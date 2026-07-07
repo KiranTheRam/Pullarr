@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type {
   Issue,
+  QueueItem,
   Release,
   ScanResult,
   SeriesDetail as SeriesDetailType,
@@ -149,11 +150,26 @@ export default function SeriesDetail() {
   const [showSources, setShowSources] = useState(false);
   const [showCleanup, setShowCleanup] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [workNotice, setWorkNotice] = useState<string | null>(null);
+
+  const showWorkNotice = (message: string, timeout = 9000) => {
+    setWorkNotice(message);
+    window.setTimeout(
+      () => setWorkNotice((current) => (current === message ? null : current)),
+      timeout,
+    );
+  };
 
   const { data: series, isLoading } = useQuery({
     queryKey: ["series", seriesId],
     queryFn: () => api.get<SeriesDetailType>(`/series/${seriesId}`),
     refetchInterval: 10000,
+  });
+
+  const { data: queue } = useQuery({
+    queryKey: ["queue"],
+    queryFn: () => api.get<QueueItem[]>("/queue"),
+    refetchInterval: 2000,
   });
 
   const invalidate = () => {
@@ -168,7 +184,10 @@ export default function SeriesDetail() {
 
   const refresh = useMutation({
     mutationFn: () => api.post(`/series/${seriesId}/refresh`),
-    onSuccess: () => setTimeout(invalidate, 4000),
+    onSuccess: () => {
+      showWorkNotice("Refreshing metadata, source links, and issues…");
+      setTimeout(invalidate, 4000);
+    },
   });
 
   const scan = useMutation({
@@ -218,6 +237,16 @@ export default function SeriesDetail() {
     if (c.file_path) fileCounts[c.file_path] = (fileCounts[c.file_path] ?? 0) + 1;
   }
   const isVolumeArchive = (path: string) => (fileCounts[path] ?? 0) > 1;
+
+  const activeDownloads = (queue ?? []).filter((item) => item.series_id === seriesId);
+  const toolbarStatus =
+    scan.isPending ? "Scanning disk" :
+    refresh.isPending ? "Starting refresh" :
+    deleteSeries.isPending ? "Removing series" :
+    toggleMonitor.isPending ? "Updating monitoring" :
+    workNotice;
+  const hasTopBanners =
+    Boolean(workNotice || scanResult) || activeDownloads.length > 0;
 
   const issueRows = (issues: Issue[]) => (
     <table className="data-table">
@@ -294,33 +323,73 @@ export default function SeriesDetail() {
 
   return (
     <>
-      <Toolbar title={series.title}>
-        <button className="btn" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+      <Toolbar className="series-toolbar">
+        <button
+          className="btn"
+          title="Refresh metadata, source links, issues, and library state"
+          onClick={() => refresh.mutate()}
+          disabled={refresh.isPending}
+        >
           ⟳ Refresh
         </button>
-        <button className="btn" onClick={() => scan.mutate()} disabled={scan.isPending}>
+        <button
+          className="btn"
+          title="Scan this series' folders and match files on disk"
+          onClick={() => scan.mutate()}
+          disabled={scan.isPending}
+        >
           {scan.isPending ? "Scanning…" : "🗂 Scan Disk"}
         </button>
-        <button className="btn" onClick={() => setShowFiles(true)}>
+        <button
+          className="btn"
+          title="Browse detected files and manually map unmatched files (e.g. a TPB to an issue range)"
+          onClick={() => setShowFiles(true)}
+        >
           📄 Files
         </button>
-        <button className="btn" onClick={() => setShowRename(true)}>
+        <button
+          className="btn"
+          title="Preview and apply the configured file naming pattern"
+          onClick={() => setShowRename(true)}
+        >
           ✏️ Rename
         </button>
-        <button className="btn" onClick={() => setShowCleanup(true)}>
+        <button
+          className="btn"
+          title="Find duplicate or orphaned files that can be cleaned up"
+          onClick={() => setShowCleanup(true)}
+        >
           🧹 Clean up
         </button>
         <button
           className="btn"
+          title="Search GetComics for every release of this series (issues, TPBs, packs)"
           onClick={() => setSearch({ title: `${series.title} (all releases)` })}
         >
           🔍 Search Releases
         </button>
-        <button className="btn" onClick={() => toggleMonitor.mutate()}>
+        <button
+          className="btn"
+          title={
+            series.monitored
+              ? "Stop automatically grabbing new issues"
+              : "Automatically grab new issues"
+          }
+          onClick={() => toggleMonitor.mutate()}
+          disabled={toggleMonitor.isPending}
+        >
           {series.monitored ? "🔖 Monitored" : "◻ Unmonitored"}
         </button>
+        {toolbarStatus && (
+          <span className="toolbar-activity" title={toolbarStatus}>
+            <span className="mini-spinner" />
+            {toolbarStatus}
+          </span>
+        )}
         <button
           className="btn danger"
+          title="Remove this series from Pullarr without deleting files"
+          disabled={deleteSeries.isPending}
           onClick={() => {
             if (confirm(`Remove "${series.title}" from library? Files on disk are kept.`))
               deleteSeries.mutate();
@@ -330,6 +399,27 @@ export default function SeriesDetail() {
         </button>
       </Toolbar>
       <div className="content">
+        {workNotice && (
+          <div className="activity-banner">
+            <span className="mini-spinner" />
+            <strong>Working.</strong>
+            <span>{workNotice}</span>
+          </div>
+        )}
+        {activeDownloads.length > 0 && (
+          <div className="activity-banner">
+            <span className="mini-spinner" />
+            <strong>Pulling issues.</strong>
+            {activeDownloads.slice(0, 3).map((item) => (
+              <span className="activity-chip" key={item.id} title={item.title || item.series_title}>
+                {item.status} · {Math.round(item.progress * 100)}%
+              </span>
+            ))}
+            {activeDownloads.length > 3 && (
+              <span className="activity-chip">+{activeDownloads.length - 3} more</span>
+            )}
+          </div>
+        )}
         {scanResult && (
           <div className="scan-banner" onClick={() => setScanResult(null)}>
             <strong>Scan complete.</strong> {scanResult.matched_issues} issue
@@ -346,7 +436,7 @@ export default function SeriesDetail() {
             )}
           </div>
         )}
-        <div className="series-header">
+        <div className={`series-header${hasTopBanners ? "" : " flush-top"}`}>
           {series.cover_url && <img className="cover" src={series.cover_url} alt="" />}
           <div>
             <h2>

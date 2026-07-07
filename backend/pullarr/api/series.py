@@ -98,8 +98,12 @@ async def add_series(body: AddSeriesIn, session: AsyncSession = Depends(get_sess
     session.add(series)
     await session.commit()
     await session.refresh(series)
-    # fetch the issue list + link sources in the background
-    asyncio.get_running_loop().create_task(refresh_series_full(series.id))
+    # fetch the issue list + link sources in the background; a monitored add
+    # immediately queues available issues instead of waiting for the next
+    # scheduled monitor interval
+    asyncio.get_running_loop().create_task(
+        refresh_series_full(series.id, grab_missing=body.monitored)
+    )
     return await get_series(series.id, session)
 
 

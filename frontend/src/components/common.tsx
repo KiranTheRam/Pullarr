@@ -1,9 +1,17 @@
 import type { ReactNode } from "react";
 
-export function Toolbar({ title, children }: { title: string; children?: ReactNode }) {
+export function Toolbar({
+  title,
+  className = "",
+  children,
+}: {
+  title?: string;
+  className?: string;
+  children?: ReactNode;
+}) {
   return (
-    <div className="toolbar">
-      <h1>{title}</h1>
+    <div className={`toolbar${className ? ` ${className}` : ""}`}>
+      {title && <h1>{title}</h1>}
       {children}
     </div>
   );

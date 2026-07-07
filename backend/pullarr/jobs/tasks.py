@@ -171,7 +171,7 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
     await session.commit()
 
 
-async def refresh_series_full(series_id: int) -> None:
+async def refresh_series_full(series_id: int, grab_missing: bool = False) -> None:
     async with session_scope() as session:
         series = await _load_series(session, series_id)
         if series is None:
@@ -190,6 +190,13 @@ async def refresh_series_full(series_id: int) -> None:
             except Exception as exc:
                 log.warning("library scan failed for series %d: %s", series_id, exc)
         await reconcile_downloaded_files(session, series)
+        # monitored adds should immediately queue available issues instead of
+        # waiting for the next scheduled monitor interval
+        if grab_missing and series.monitored:
+            try:
+                await grab_missing_issues(session, series, values)
+            except Exception as exc:
+                log.warning("add-time grab failed for series %d: %s", series_id, exc)
 
 
 async def scan_all_series() -> None:
@@ -486,6 +493,89 @@ def _releasable(issue: Issue) -> bool:
     return issue.released_at <= datetime.now(timezone.utc)
 
 
+async def grab_missing_issues(
+    session: AsyncSession, series: Series, values: dict[str, str]
+) -> int:
+    """Queue missing monitored, released issues from linked DDL sources.
+
+    Shared by the scheduled monitor and the add-time refresh path, so a newly
+    added monitored series starts pulling available issues as soon as its
+    source links and issue list exist, instead of waiting for the next
+    scheduled monitor interval. Returns the number of issues queued."""
+    # active downloads for this series → don't double-grab
+    result = await session.execute(
+        select(Download.issue_id).where(
+            Download.series_id == series.id,
+            Download.status.in_([DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING,
+                                 DownloadStatus.IMPORTING]),
+        )
+    )
+    active = {row[0] for row in result.all()}
+    if None in active:
+        # a series-level download (a pack/TPB) is in flight — its issue
+        # coverage is unknown until it imports, so grabbing per-issue now
+        # would duplicate everything
+        log.info("monitor: %r has a series-level download in flight; skipping grabs",
+                 series.title)
+        return 0
+    wanted = [
+        i for i in series.issues
+        if i.monitored and not i.downloaded and i.id not in active
+        and _releasable(i)
+    ]
+    if not wanted:
+        return 0
+
+    # a release that already failed from a source shouldn't be retried there
+    # (dead links etc.)
+    result = await session.execute(
+        select(Download.issue_id, Download.source_name).where(
+            Download.series_id == series.id,
+            Download.status == DownloadStatus.FAILED,
+            Download.issue_id.isnot(None),
+        )
+    )
+    failed_pairs = {(iid, name) for iid, name in result.all()}
+
+    links = {sl.source_name: sl for sl in series.source_links}
+    wanted_titles = {nt for t in _titles_of(series) if (nt := normalize_title(t))}
+    remaining = {i.number: i for i in wanted}
+    queued = 0
+    for src in registry.enabled_ddl_sources(values):
+        if not remaining:
+            break
+        link = links.get(src.name)
+        if link is None:
+            continue
+        wanted_titles.add(normalize_title(link.external_id))
+
+        # one series-wide search, then match all wanted numbers
+        try:
+            releases = await src.list_releases(link.external_id)
+        except Exception as exc:
+            log.warning("monitor: %s list failed for %r: %s", src.name, series.title, exc)
+            continue
+        queued += await _grab_matches(session, series, src.name, releases,
+                                      remaining, wanted_titles, failed_pairs)
+
+        # targeted per-issue searches for stragglers (older issues that fell
+        # off the recent-posts pages), capped per pass
+        for issue in list(remaining.values())[:ISSUE_SEARCH_CAP]:
+            if (issue.id, src.name) in failed_pairs:
+                continue
+            query = f"{link.external_id} {issue.number:g}"
+            try:
+                results = await src.search_releases(query)
+            except Exception as exc:
+                log.warning("monitor: %s search %r failed: %s", src.name, query, exc)
+                continue
+            queued += await _grab_matches(session, series, src.name, results,
+                                          remaining, wanted_titles, failed_pairs)
+    if queued:
+        log.info("Queued %d missing issue(s) for %r", queued, series.title)
+    return queued
+
+
 async def monitor_all() -> None:
     """Refresh monitored series and grab missing monitored issues."""
     async with session_scope() as session:
@@ -504,75 +594,7 @@ async def monitor_all() -> None:
             except Exception as exc:
                 log.warning("monitor: metadata refresh failed for %r: %s", series.title, exc)
             await link_sources(session, series, values)
-
-            # active downloads for this series → don't double-grab
-            result = await session.execute(
-                select(Download.issue_id).where(
-                    Download.series_id == series_id,
-                    Download.status.in_([DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING,
-                                         DownloadStatus.IMPORTING]),
-                )
-            )
-            active = {row[0] for row in result.all()}
-            if None in active:
-                # a series-level download (a pack/TPB) is in flight — its
-                # issue coverage is unknown until it imports, so grabbing
-                # per-issue now would duplicate everything
-                log.info("monitor: %r has a series-level download in flight; skipping grabs",
-                         series.title)
-                continue
-            wanted = [
-                i for i in series.issues
-                if i.monitored and not i.downloaded and i.id not in active
-                and _releasable(i)
-            ]
-            if not wanted:
-                continue
-
-            # a release that already failed from a source shouldn't be
-            # retried there (dead links etc.)
-            result = await session.execute(
-                select(Download.issue_id, Download.source_name).where(
-                    Download.series_id == series_id,
-                    Download.status == DownloadStatus.FAILED,
-                    Download.issue_id.isnot(None),
-                )
-            )
-            failed_pairs = {(iid, name) for iid, name in result.all()}
-
-            links = {sl.source_name: sl for sl in series.source_links}
-            wanted_titles = {nt for t in _titles_of(series) if (nt := normalize_title(t))}
-            remaining = {i.number: i for i in wanted}
-            for src in registry.enabled_ddl_sources(values):
-                if not remaining:
-                    break
-                link = links.get(src.name)
-                if link is None:
-                    continue
-                wanted_titles.add(normalize_title(link.external_id))
-
-                # one series-wide search, then match all wanted numbers
-                try:
-                    releases = await src.list_releases(link.external_id)
-                except Exception as exc:
-                    log.warning("monitor: %s list failed for %r: %s", src.name, series.title, exc)
-                    continue
-                await _grab_matches(session, series, src.name, releases,
-                                    remaining, wanted_titles, failed_pairs)
-
-                # targeted per-issue searches for stragglers (older issues
-                # that fell off the recent-posts pages), capped per pass
-                for issue in list(remaining.values())[:ISSUE_SEARCH_CAP]:
-                    if (issue.id, src.name) in failed_pairs:
-                        continue
-                    query = f"{link.external_id} {issue.number:g}"
-                    try:
-                        results = await src.search_releases(query)
-                    except Exception as exc:
-                        log.warning("monitor: %s search %r failed: %s", src.name, query, exc)
-                        continue
-                    await _grab_matches(session, series, src.name, results,
-                                        remaining, wanted_titles, failed_pairs)
+            await grab_missing_issues(session, series, values)
 
 
 async def _grab_matches(
@@ -583,7 +605,9 @@ async def _grab_matches(
     remaining: dict[float, Issue],
     wanted_titles: set[str],
     failed_pairs: set[tuple[int, str]],
-) -> None:
+) -> int:
+    """Enqueue every release that matches a still-wanted issue. Returns count."""
+    queued = 0
     for r in releases:
         if r.issue_number is None:
             continue
@@ -594,3 +618,5 @@ async def _grab_matches(
             continue
         remaining.pop(r.issue_number, None)
         await enqueue_direct(session, series, issue, source_name, r.external_id, r.title)
+        queued += 1
+    return queued
