@@ -85,7 +85,8 @@ async def search_releases(
                 found = await src.search_releases(f"{term} {issue.number:g}")
                 found = [
                     r for r in found
-                    if r.issue_number == issue.number
+                    if r.issue_number is not None
+                    and r.issue_number <= issue.number <= (r.issue_end or r.issue_number)
                     and normalize_title(strip_issue_suffix(r.title)) in wanted
                 ]
             else:
@@ -98,6 +99,7 @@ async def search_releases(
                 source_name=src.name,
                 title=r.title,
                 issue_number=r.issue_number,
+                issue_end=r.issue_end,
                 volume_number=r.volume_number,
                 external_id=r.external_id,
                 url=r.url,

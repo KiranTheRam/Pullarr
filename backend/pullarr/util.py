@@ -120,10 +120,31 @@ VOLUME_PATTERN = re.compile(r"(?<![a-z0-9])v(?:ol(?:ume)?)?[ ._]{0,2}(\d+)", re.
 YEAR_PATTERN = re.compile(r"\(((?:19|20)\d{2})\)")
 
 
+# a hyphen-separated pair of issue-like numbers: "#1-3", "#1 – 3", "#1-#3",
+# "001-003", "1 - 12". Applied after bracket groups are stripped so a "(2019)"
+# year can't be read as a range.
+ISSUE_RANGE_PATTERN = re.compile(r"#?\s*0*(\d{1,4})\s*[-–—]\s*#?\s*0*(\d{1,4})(?!\d)")
+_MAX_RANGE_SPAN = 60  # sanity cap so garbage can't claim a huge span
+
+
 def has_issue_marker(text: str) -> bool:
     """True when text has an explicit issue token (#/no./issue + number),
     as opposed to a bare trailing number that might actually be a volume."""
     return ISSUE_PREFIX_PATTERN.search(text) is not None
+
+
+def parse_issue_range(text: str) -> tuple[float, float] | None:
+    """A multi-issue span like "#1-3" / "001-003" → (1.0, 3.0). Returns None
+    for single issues, TPBs, and volume ranges ("Vol. 1-3")."""
+    stripped = BRACKET_GROUPS.sub(" ", text)
+    for m in ISSUE_RANGE_PATTERN.finditer(stripped):
+        pre = stripped[max(0, m.start() - 7):m.start()].lower().rstrip()
+        if pre.endswith(("v", "vol", "vol.", "volume")):
+            continue  # a collected-volume range, not an issue range
+        start, end = int(m.group(1)), int(m.group(2))
+        if end > start and end - start <= _MAX_RANGE_SPAN:
+            return float(start), float(end)
+    return None
 
 
 def parse_issue_number(text: str) -> float | None:

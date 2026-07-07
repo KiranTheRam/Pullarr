@@ -500,7 +500,7 @@ export function RenameModal({
   );
 }
 
-/** Two inputs to map a whole-volume archive to a issue range. */
+/** Two inputs to map a TPB / multi-issue archive to an issue range. */
 function RangeMapper({ onMap }: { onMap: (from: number, to: number) => void }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -509,12 +509,12 @@ function RangeMapper({ onMap }: { onMap: (from: number, to: number) => void }) {
     <div className="range-mapper">
       <input
         type="number"
-        placeholder="ch"
+        placeholder="#"
         value={from}
         onChange={(e) => setFrom(e.target.value)}
       />
       <span>–</span>
-      <input type="number" placeholder="ch" value={to} onChange={(e) => setTo(e.target.value)} />
+      <input type="number" placeholder="#" value={to} onChange={(e) => setTo(e.target.value)} />
       <button
         className="btn sm"
         disabled={!valid}
@@ -584,7 +584,8 @@ export function FilesModal({
             <>
               <h4 className="files-heading">Unmatched ({unmatched.length})</h4>
               <p className="section-hint">
-                These files couldn't be matched automatically. Map one to a issue if it belongs.
+                These files couldn't be matched automatically. Map one to a single issue, or use
+                Map range for a TPB / multi-issue file that collects several issues (e.g. 1–3).
               </p>
               <table className="data-table">
                 <tbody>
@@ -633,11 +634,13 @@ export function FilesModal({
                   <td>{f.name}</td>
                   <td style={{ color: "var(--text-faint)" }}>
                     {f.issue_number != null
-                      ? `Ch. ${f.issue_number}`
+                      ? `#${f.issue_number}`
                       : f.volume_number != null
                       ? `Vol. ${f.volume_number} — covers ${f.covered_count} issue${
                           f.covered_count === 1 ? "" : "s"
                         }`
+                      : f.covered_count > 1
+                      ? `covers ${f.covered_count} issues`
                       : ""}
                   </td>
                 </tr>

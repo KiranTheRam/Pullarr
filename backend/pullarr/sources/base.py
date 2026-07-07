@@ -25,6 +25,9 @@ class SourceRelease:
     title: str
     url: str = ""
     issue_number: float | None = None  # parsed from the title, if single-issue
+    # for a multi-issue bundle ("#1-3"), issue_number is the first and
+    # issue_end the last; the release covers every issue in [start, end]
+    issue_end: float | None = None
     volume_number: int | None = None  # parsed TPB/volume marker
     year: int | None = None
     size_text: str = ""  # human-readable ("125 MB")

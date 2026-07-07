@@ -5,9 +5,10 @@ from pullarr.models import Issue, Series
 from pullarr.sources.base import SourceRelease
 
 
-def _release(number, title, ext_id="url"):
+def _release(number, title, ext_id="url", end=None):
     return SourceRelease(
-        source_name="getcomics", external_id=ext_id, title=title, issue_number=number,
+        source_name="getcomics", external_id=ext_id, title=title,
+        issue_number=number, issue_end=end,
     )
 
 
@@ -45,6 +46,31 @@ async def test_grab_matches_enqueues_matching_and_pops(monkeypatch):
     assert sorted(n for n, _ in session.grabbed) == [13.0, 14.0]
     # matched numbers are removed; the wrong-series #12 stays wanted
     assert set(remaining) == {12.0}
+
+
+@pytest.mark.asyncio
+async def test_grab_matches_bundle_grabbed_once_covers_span(monkeypatch):
+    async def fake_enqueue(session, series, issue, source_name, external_id, title=""):
+        session.grabbed.append((issue.number, title))
+
+    monkeypatch.setattr(tasks, "enqueue_direct", fake_enqueue)
+
+    series = Series(id=1, title="Absolute Carnage: Miles Morales", alt_titles="")
+    remaining = {n: Issue(id=int(n), series_id=1, number=n) for n in (1.0, 2.0, 3.0)}
+    releases = [
+        _release(1.0, "Absolute Carnage – Miles Morales #1 – 3 (2019)", end=3.0),
+    ]
+    session = Recorder()
+
+    count = await tasks._grab_matches(
+        session, series, "getcomics", releases, remaining,
+        {tasks.normalize_title("Absolute Carnage: Miles Morales")}, failed_pairs=set(),
+    )
+
+    # one grab (anchored to #1), and all three issues removed from wanted
+    assert count == 1
+    assert session.grabbed == [(1.0, "Absolute Carnage – Miles Morales #1 – 3 (2019)")]
+    assert remaining == {}
 
 
 @pytest.mark.asyncio

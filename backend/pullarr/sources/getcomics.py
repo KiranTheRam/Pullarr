@@ -26,6 +26,7 @@ from ..util import (
     has_issue_marker,
     normalize_title,
     parse_issue_number,
+    parse_issue_range,
     parse_volume_number,
     parse_year,
     rl_request,
@@ -78,9 +79,14 @@ def parse_search_page(html: str, base_url: str) -> list[SourceRelease]:
                 pass
         issue = parse_issue_number(title)
         volume = parse_volume_number(title)
-        # a bare volume title ("Batman Vol. 3 – … (TPB)") has no issue marker,
-        # so a trailing number would be the volume, not an issue
-        if volume is not None and not has_issue_marker(title):
+        issue_range = parse_issue_range(title)
+        issue_end = None
+        if issue_range is not None:
+            # a multi-issue bundle ("#1-3"): first..last, covers the whole span
+            issue, issue_end = issue_range
+        elif volume is not None and not has_issue_marker(title):
+            # a bare volume title ("Batman Vol. 3 – … (TPB)") has no issue
+            # marker, so a trailing number would be the volume, not an issue
             issue = None
         releases.append(SourceRelease(
             source_name="getcomics",
@@ -88,6 +94,7 @@ def parse_search_page(html: str, base_url: str) -> list[SourceRelease]:
             title=title,
             url=url,
             issue_number=issue,
+            issue_end=issue_end,
             volume_number=volume,
             year=parse_year(title),
             size_text=size_text,

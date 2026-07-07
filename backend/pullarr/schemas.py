@@ -98,6 +98,7 @@ class ReleaseOut(BaseModel):
     source_name: str
     title: str
     issue_number: float | None = None
+    issue_end: float | None = None  # last issue when the release is a bundle
     volume_number: int | None = None
     external_id: str = ""  # ddl: post URL
     url: str = ""

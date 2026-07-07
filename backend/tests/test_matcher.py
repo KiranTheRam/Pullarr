@@ -78,3 +78,17 @@ class TestMatchFiles:
         res = match_files(find_media_files(tmp_path), tracked)
         m = res.matched[0]
         assert m.volume == 9 and m.covered_issues == [] and not res.unmatched
+
+    def test_multi_issue_bundle_covers_span(self, tmp_path):
+        tracked = issues((1, None), (2, None), (3, None), (4, None))
+        touch(tmp_path / "Series 001-003 (2019).cbz")
+        res = match_files(find_media_files(tmp_path), tracked)
+        m = res.matched[0]
+        assert m.issue is None
+        assert sorted(i.number for i in m.covered_issues) == [1.0, 2.0, 3.0]
+
+    def test_bundle_file_parsed_as_range_not_single(self, tmp_path):
+        touch(tmp_path / "Series #1-3.cbz")
+        mf = find_media_files(tmp_path)[0]
+        assert mf.issue_number is None
+        assert mf.issue_range == (1.0, 3.0)

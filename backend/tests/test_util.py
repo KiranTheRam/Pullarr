@@ -2,11 +2,40 @@ from pullarr.util import (
     has_issue_marker,
     normalize_title,
     parse_issue_number,
+    parse_issue_range,
     parse_volume_number,
     parse_year,
     sanitize_filename,
     strip_issue_suffix,
 )
+
+
+class TestParseIssueRange:
+    def test_hash_dash(self):
+        assert parse_issue_range("Absolute Carnage – Miles Morales #1 – 3 (2019)") == (1.0, 3.0)
+
+    def test_hash_hash(self):
+        assert parse_issue_range("Saga #1-#6 (2013)") == (1.0, 6.0)
+
+    def test_zero_padded_bare(self):
+        assert parse_issue_range(
+            "Absolute Carnage - Miles Morales 001-003 (2019) (Digital)"
+        ) == (1.0, 3.0)
+
+    def test_wide_span(self):
+        assert parse_issue_range("Absolute Batman #1-12 (2025)") == (1.0, 12.0)
+
+    def test_single_issue_is_none(self):
+        assert parse_issue_range("Absolute Batman #13 (2025)") is None
+
+    def test_tpb_is_none(self):
+        assert parse_issue_range("Absolute Carnage – Miles Morales (TPB) (2020)") is None
+
+    def test_volume_range_excluded(self):
+        assert parse_issue_range("Batman Vol. 1-3 (TPB) (2020)") is None
+
+    def test_year_not_a_range(self):
+        assert parse_issue_range("2000AD 2415 (2026)") is None
 
 
 class TestParseIssueNumber:

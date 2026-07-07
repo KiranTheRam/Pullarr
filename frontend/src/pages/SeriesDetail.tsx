@@ -99,6 +99,14 @@ function InteractiveSearch({
                     ) : (
                       r.title
                     )}
+                    {r.issue_end != null && r.issue_number != null && (
+                      <span className="tag" title="One file covering multiple issues">
+                        covers #{r.issue_number}–{r.issue_end}
+                      </span>
+                    )}
+                    {r.issue_end == null && r.volume_number != null && (
+                      <span className="tag" title="Collected edition (TPB)">TPB</span>
+                    )}
                   </td>
                   <td>{r.kind === "torrent" ? formatBytes(r.size_bytes) : r.size_text || "—"}</td>
                   <td>{r.kind === "torrent" ? `${r.seeders}/${r.leechers}` : r.year ?? "—"}</td>

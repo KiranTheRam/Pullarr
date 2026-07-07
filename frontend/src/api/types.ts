@@ -66,6 +66,7 @@ export interface Release {
   source_name: string;
   title: string;
   issue_number: number | null;
+  issue_end: number | null;
   volume_number: number | null;
   external_id: string;
   url: string;

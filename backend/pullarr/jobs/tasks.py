@@ -397,17 +397,15 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
     await session.commit()
 
 
-def _mark_imported(series: Series, imported: list[tuple[Path, Issue | None, int | None]]) -> None:
-    for dest, issue, volume in imported:
-        if issue is not None:
-            issue.downloaded = True
-            issue.file_path = str(dest)
-        elif volume is not None:
+def _mark_imported(series: Series, imported: list) -> None:
+    for item in imported:
+        covered = list(item.covered)
+        if not covered and item.volume is not None:
             # a volume archive covers every issue assigned to that volume
-            for i in series.issues:
-                if i.volume == volume and not i.downloaded:
-                    i.downloaded = True
-                    i.file_path = str(dest)
+            covered = [i for i in series.issues if i.volume == item.volume]
+        for issue in covered:
+            issue.downloaded = True
+            issue.file_path = str(item.dest)
 
 
 # --------------------------------------------------------------- qbt sync
@@ -606,17 +604,29 @@ async def _grab_matches(
     wanted_titles: set[str],
     failed_pairs: set[tuple[int, str]],
 ) -> int:
-    """Enqueue every release that matches a still-wanted issue. Returns count."""
+    """Enqueue every release that matches a still-wanted issue. A multi-issue
+    bundle ("#1-3") is grabbed once and covers all wanted issues in its span.
+    Returns the number of downloads queued."""
     queued = 0
     for r in releases:
         if r.issue_number is None:
             continue
-        issue = remaining.get(r.issue_number)
-        if issue is None or (issue.id, source_name) in failed_pairs:
-            continue
         if not _release_matches_series(r, wanted_titles):
             continue
-        remaining.pop(r.issue_number, None)
-        await enqueue_direct(session, series, issue, source_name, r.external_id, r.title)
+        # issues this release would satisfy: a single number, or a whole span
+        hi = r.issue_end if r.issue_end is not None else r.issue_number
+        covered = [
+            remaining[n] for n in list(remaining)
+            if r.issue_number <= n <= hi
+            and (remaining[n].id, source_name) not in failed_pairs
+        ]
+        if not covered:
+            continue
+        anchor = min(covered, key=lambda i: i.number)
+        for issue in covered:
+            remaining.pop(issue.number, None)
+        # one download, tied to the lowest covered issue; the importer marks
+        # every issue the downloaded file actually spans
+        await enqueue_direct(session, series, anchor, source_name, r.external_id, r.title)
         queued += 1
     return queued

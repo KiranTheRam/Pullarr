@@ -42,12 +42,13 @@ class TestImportPayload:
         imported = run_import(src, series, issues, tmp_path / "lib")
 
         assert len(imported) == 1
-        dest, issue, volume = imported[0]
-        assert dest.name == "Absolute Batman #002.cbz"
-        assert dest.parent.name == "Absolute Batman (2024)"
-        assert dest.exists()
-        assert issue is issues[1]
-        assert volume is None  # issue matched, so no volume-level claim
+        r = imported[0]
+        assert r.dest.name == "Absolute Batman #002.cbz"
+        assert r.dest.parent.name == "Absolute Batman (2024)"
+        assert r.dest.exists()
+        assert r.issue is issues[1]
+        assert r.covered == [issues[1]]
+        assert r.volume is None
 
     def test_comicinfo_injected_into_cbz(self, tmp_path, series, issues):
         src = tmp_path / "payload" / "Absolute Batman 002.cbz"
@@ -56,7 +57,7 @@ class TestImportPayload:
 
         imported = run_import(src, series, issues, tmp_path / "lib")
 
-        with zipfile.ZipFile(imported[0][0]) as zf:
+        with zipfile.ZipFile(imported[0].dest) as zf:
             xml = zf.read("ComicInfo.xml").decode()
         assert "<Series>Absolute Batman</Series>" in xml
         assert "<Number>2</Number>" in xml
@@ -71,7 +72,7 @@ class TestImportPayload:
 
         imported = run_import(src, series, issues, tmp_path / "lib")
 
-        with zipfile.ZipFile(imported[0][0]) as zf:
+        with zipfile.ZipFile(imported[0].dest) as zf:
             xml = zf.read("ComicInfo.xml").decode()
         assert "Original" in xml
 
@@ -86,11 +87,36 @@ class TestImportPayload:
 
         imported = run_import(payload, series, issues, tmp_path / "lib")
 
-        by_issue = {i.number: dest for dest, i, _ in imported if i is not None}
+        by_issue = {r.issue.number: r.dest for r in imported if r.issue is not None}
         assert set(by_issue) == {2.0, 3.0}
-        # loose images were zipped into a CBZ
         with zipfile.ZipFile(by_issue[3.0]) as zf:
             assert "p01.png" in zf.namelist() and "p02.png" in zf.namelist()
+
+    def test_multi_issue_bundle_covers_its_span(self, tmp_path, series, issues):
+        # one file holding issues 1-3 (the "Absolute Carnage #1-3" case)
+        payload = tmp_path / "payload"
+        payload.mkdir()
+        make_cbz(payload / "Absolute Batman 001-003 (2024) (Digital) (Group).cbz")
+
+        imported = run_import(payload, series, issues, tmp_path / "lib",
+                              force_issue=issues[0])
+
+        assert len(imported) == 1
+        r = imported[0]
+        assert r.issue is None
+        assert r.dest.name == "Absolute Batman #001-003.cbz"
+        assert sorted(i.number for i in r.covered) == [1.0, 2.0, 3.0]
+
+    def test_hash_range_title_covers_span(self, tmp_path, series, issues):
+        payload = tmp_path / "payload"
+        payload.mkdir()
+        make_cbz(payload / "Absolute Batman #2 - 4.cbz")
+
+        imported = run_import(payload, series, issues, tmp_path / "lib")
+
+        r = imported[0]
+        assert sorted(i.number for i in r.covered) == [2.0, 3.0, 4.0]
+        assert r.dest.name == "Absolute Batman #002-004.cbz"
 
     def test_volume_archive_without_issue_match(self, tmp_path, series, issues):
         payload = tmp_path / "payload"
@@ -100,11 +126,11 @@ class TestImportPayload:
         imported = run_import(payload, series, issues, tmp_path / "lib")
 
         assert len(imported) == 1
-        dest, issue, volume = imported[0]
-        assert issue is None
-        assert volume == 7  # caller can mark all issues of vol 7 downloaded
-        assert dest.name == "Absolute Batman Vol. 07.cbz"  # .zip renamed to .cbz
-        assert dest.exists()
+        r = imported[0]
+        assert r.issue is None
+        assert r.volume == 7
+        assert r.dest.name == "Absolute Batman Vol. 07.cbz"
+        assert r.dest.exists()
 
     def test_unmatched_archive_keeps_original_stem(self, tmp_path, series, issues):
         payload = tmp_path / "payload"
@@ -113,22 +139,23 @@ class TestImportPayload:
 
         imported = run_import(payload, series, issues, tmp_path / "lib")
 
-        dest, issue, volume = imported[0]
-        assert issue is None
-        assert volume is None
-        assert dest.name == "Absolute Batman (2024) - Extras and Omake.cbz"
+        r = imported[0]
+        assert r.issue is None
+        assert r.volume is None
+        assert r.covered == []
+        assert r.dest.name == "Absolute Batman (2024) - Extras and Omake.cbz"
 
     def test_force_issue_for_unparseable_single_file(self, tmp_path, series, issues):
         payload = tmp_path / "payload"
         payload.mkdir()
-        make_cbz(payload / "AbsBat-FCBD-Special.cbz")  # no parsable number
+        make_cbz(payload / "AbsBat-FCBD-Special.cbz")
 
         imported = run_import(payload, series, issues, tmp_path / "lib",
                               force_issue=issues[4])
 
-        dest, issue, volume = imported[0]
-        assert issue is issues[4]
-        assert dest.name == "Absolute Batman #005.cbz"
+        r = imported[0]
+        assert r.issue is issues[4]
+        assert r.dest.name == "Absolute Batman #005.cbz"
 
     def test_force_issue_ignored_when_name_matches(self, tmp_path, series, issues):
         payload = tmp_path / "payload"
@@ -138,8 +165,7 @@ class TestImportPayload:
         imported = run_import(payload, series, issues, tmp_path / "lib",
                               force_issue=issues[4])
 
-        # the filename says #2 — trust the parse, not the grab hint
-        assert imported[0][1] is issues[1]
+        assert imported[0].issue is issues[1]
 
     def test_move_semantics_removes_source(self, tmp_path, series, issues):
         payload = tmp_path / "payload"
@@ -158,7 +184,7 @@ class TestImportPayload:
         lib = tmp_path / "lib"
 
         first = run_import(payload, series, issues, lib)
-        mtime = first[0][0].stat().st_mtime_ns
+        mtime = first[0].dest.stat().st_mtime_ns
         second = run_import(payload, series, issues, lib)
 
-        assert second[0][0].stat().st_mtime_ns == mtime
+        assert second[0].dest.stat().st_mtime_ns == mtime

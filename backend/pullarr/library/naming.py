@@ -48,6 +48,12 @@ def volume_filename(series_title: str, volume: int, ext: str = ".cbz") -> str:
     return sanitize_filename(f"{series_title} Vol. {volume:02d}") + ext
 
 
+def range_filename(series_title: str, lo: float, hi: float, year: int | None = None,
+                   ext: str = ".cbz") -> str:
+    """Name for a multi-issue bundle file, e.g. 'Series #001-003.cbz'."""
+    return sanitize_filename(f"{series_title} #{int(lo):03d}-{int(hi):03d}") + ext
+
+
 def series_folder(series_title: str, year: int | None = None) -> str:
     """Series directory name; the start year disambiguates the many comic
     series that share a title across reboots (Batman (1940) vs (2016))."""
