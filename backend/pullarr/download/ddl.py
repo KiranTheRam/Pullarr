@@ -34,29 +34,44 @@ async def download_release(
     staging_dir: Path,
     progress_cb=None,
 ) -> Path:
-    """Resolve a release's direct links and stream every file into a fresh
-    subdirectory of staging_dir. Returns that directory (the import payload).
+    """Resolve a release's download options and stream one into a fresh
+    subdirectory of staging_dir. Options (mirrors) are tried in order until one
+    fully downloads, so a blocked primary (e.g. a 403ing comicfiles mirror)
+    falls back to the next (e.g. Pixeldrain). Returns the import payload dir.
     progress_cb(done_bytes, total_bytes) is called as data arrives; total is
     0 when the server sends no Content-Length."""
-    links = await source.resolve_downloads(release_external_id)
+    options = await source.resolve_downloads(release_external_id)
     payload_dir = _unique_dir(staging_dir, release_external_id)
     payload_dir.mkdir(parents=True, exist_ok=True)
 
-    done_total = 0
-    try:
-        for i, url in enumerate(links, start=1):
-            done_total = await _fetch_file(
-                source.client, url, payload_dir, f"part{i}",
-                progress_cb, done_total,
-            )
-    except BaseException:
-        # leave no partial payloads behind for the importer to trip on
-        for p in payload_dir.glob("*.partial"):
-            p.unlink(missing_ok=True)
-        raise
-    if not any(payload_dir.iterdir()):
-        raise RuntimeError("no files downloaded")
-    return payload_dir
+    last_error: Exception | None = None
+    for opt_index, parts in enumerate(options):
+        _clear_dir(payload_dir)
+        done_total = 0
+        try:
+            for i, url in enumerate(parts, start=1):
+                done_total = await _fetch_file(
+                    source.client, url, payload_dir, f"part{i}",
+                    progress_cb, done_total,
+                )
+        except (httpx.HTTPError, OSError) as exc:
+            last_error = exc
+            log.warning("download option %d/%d failed (%s); trying next mirror",
+                        opt_index + 1, len(options), exc)
+            continue
+        except BaseException:
+            _clear_dir(payload_dir)  # cancellation etc. — leave nothing partial
+            raise
+        if any(payload_dir.iterdir()):
+            return payload_dir
+
+    _clear_dir(payload_dir)
+    raise last_error or RuntimeError("no files downloaded")
+
+
+def _clear_dir(d: Path) -> None:
+    for p in d.iterdir():
+        p.unlink(missing_ok=True)
 
 
 async def _fetch_file(

@@ -110,9 +110,25 @@ def parse_download_buttons(html: str) -> list[DownloadButton]:
 
 
 def main_server_links(buttons: list[DownloadButton]) -> list[str]:
-    """The main-server ("DOWNLOAD NOW") links — the only mirrors that resolve
-    to a direct file via a plain redirect. Multi-part packs have several."""
+    """The main-server ("DOWNLOAD NOW") links — resolve to a direct file via a
+    plain redirect. Multi-part packs have several (all parts of one release)."""
     return [b.url for b in buttons if b.label.upper() == "DOWNLOAD NOW"]
+
+
+def mirror_link(buttons: list[DownloadButton], label: str) -> str | None:
+    for b in buttons:
+        if b.label.upper() == label.upper():
+            return b.url
+    return None
+
+
+PIXELDRAIN_ID_RE = re.compile(r"pixeldrain\.com/(?:u|l)/([A-Za-z0-9]+)")
+
+
+def pixeldrain_api_url(page_url: str) -> str | None:
+    """Direct-download API URL for a pixeldrain file/list page."""
+    m = PIXELDRAIN_ID_RE.search(page_url)
+    return f"https://pixeldrain.com/api/file/{m.group(1)}?download" if m else None
 
 
 class GetComicsSource(DDLSource):
@@ -201,15 +217,41 @@ class GetComicsSource(DDLSource):
     async def search_releases(self, query: str) -> list[SourceRelease]:
         return await self._search_pages(query, pages=1)
 
-    async def resolve_downloads(self, release_external_id: str) -> list[str]:
+    async def resolve_downloads(self, release_external_id: str) -> list[list[str]]:
         resp = await rl_request(
             self._client, "GET", release_external_id, limiter=_limiter
         )
         resp.raise_for_status()
-        links = main_server_links(parse_download_buttons(resp.text))
-        if not links:
-            raise RuntimeError("post has no main-server (DOWNLOAD NOW) link")
-        return links
+        buttons = parse_download_buttons(resp.text)
+        options: list[list[str]] = []
+
+        # primary: the main server (may be multi-part)
+        main = main_server_links(buttons)
+        if main:
+            options.append(main)
+
+        # fallback: the Pixeldrain mirror — a clean direct download when the
+        # main server is blocked/down (older files often 403 on comicfiles).
+        # Its getcomics /dls/ link 302s to a pixeldrain page we turn into the
+        # download API URL.
+        px_dls = mirror_link(buttons, "PIXELDRAIN")
+        if px_dls:
+            api_url = await self._resolve_pixeldrain(px_dls)
+            if api_url:
+                options.append([api_url])
+
+        if not options:
+            raise RuntimeError("post has no usable download link")
+        return options
+
+    async def _resolve_pixeldrain(self, dls_url: str) -> str | None:
+        try:
+            resp = await self._client.get(dls_url, follow_redirects=False)
+            location = resp.headers.get("location", "")
+            return pixeldrain_api_url(location)
+        except httpx.HTTPError as exc:
+            log.warning("pixeldrain resolve failed: %s", exc)
+            return None
 
 
 source = GetComicsSource()

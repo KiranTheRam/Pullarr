@@ -9,8 +9,8 @@ from pullarr.sources.base import DDLSource
 class FakeSource(DDLSource):
     name = "fake"
 
-    def __init__(self, links: list[str]) -> None:
-        self._links = links
+    def __init__(self, options: list[list[str]]) -> None:
+        self._options = options
         self.client = httpx.AsyncClient(follow_redirects=True)
 
     async def search_series(self, query):
@@ -23,7 +23,7 @@ class FakeSource(DDLSource):
         return []
 
     async def resolve_downloads(self, release_external_id):
-        return self._links
+        return self._options
 
 
 class TestFilenameFromResponse:
@@ -57,7 +57,7 @@ async def test_download_release_streams_files(tmp_path):
     respx.get("https://fs1.comicfiles.ru/Batman%20015.cbr").respond(
         200, content=payload, headers={"Content-Length": str(len(payload))}
     )
-    source = FakeSource(["https://getcomics.org/dls/abc"])
+    source = FakeSource([["https://getcomics.org/dls/abc"]])
     progress = []
 
     payload_dir = await download_release(
@@ -74,11 +74,40 @@ async def test_download_release_streams_files(tmp_path):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_download_release_cleans_partials_on_failure(tmp_path):
-    respx.get("https://fs1.comicfiles.ru/x.cbr").respond(500)
-    source = FakeSource(["https://fs1.comicfiles.ru/x.cbr"])
+async def test_download_release_falls_back_to_next_mirror(tmp_path):
+    payload = b"comic" * 50
+    # primary mirror 403s, fallback works
+    respx.get("https://fs2.comicfiles.ru/x.cbr").respond(403)
+    respx.get("https://pixeldrain.com/api/file/abc?download").respond(
+        200, content=payload,
+        headers={"Content-Length": str(len(payload)),
+                 "Content-Disposition": 'attachment; filename="Batman 005.cbz"'},
+    )
+    source = FakeSource([
+        ["https://fs2.comicfiles.ru/x.cbr"],
+        ["https://pixeldrain.com/api/file/abc?download"],
+    ])
+
+    payload_dir = await download_release(source, "https://getcomics.org/post", tmp_path)
+
+    files = list(payload_dir.iterdir())
+    assert [f.name for f in files] == ["Batman 005.cbz"]
+    assert files[0].read_bytes() == payload
+    assert not list(payload_dir.glob("*.partial"))
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_release_raises_when_all_mirrors_fail(tmp_path):
+    respx.get("https://fs2.comicfiles.ru/x.cbr").respond(403)
+    respx.get("https://pixeldrain.com/api/file/abc?download").respond(500)
+    source = FakeSource([
+        ["https://fs2.comicfiles.ru/x.cbr"],
+        ["https://pixeldrain.com/api/file/abc?download"],
+    ])
 
     with pytest.raises(httpx.HTTPStatusError):
         await download_release(source, "https://getcomics.org/post", tmp_path)
 
     assert not list(tmp_path.rglob("*.partial"))
+    assert not list(tmp_path.rglob("*.cbr"))

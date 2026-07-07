@@ -61,8 +61,11 @@ class DDLSource(ABC):
         """Free-form release search (interactive search / issue fallback)."""
 
     @abstractmethod
-    async def resolve_downloads(self, release_external_id: str) -> list[str]:
-        """Ordered direct-download URLs for a release (best mirror first)."""
+    async def resolve_downloads(self, release_external_id: str) -> list[list[str]]:
+        """Ordered download options for a release, best mirror first. Each
+        option is a list of file-part URLs that together make up the release
+        (usually one file). The worker tries options in order until one fully
+        downloads, so a blocked/dead primary mirror falls back to the next."""
 
 
 class TorrentIndexer(ABC):

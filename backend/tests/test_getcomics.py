@@ -2,8 +2,10 @@ from pathlib import Path
 
 from pullarr.sources.getcomics import (
     main_server_links,
+    mirror_link,
     parse_download_buttons,
     parse_search_page,
+    pixeldrain_api_url,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -58,6 +60,23 @@ class TestParseDownloadButtons:
         buttons = parse_download_buttons(load("getcomics_post.html"))
         links = main_server_links(buttons)
         assert not any("readcomicsonline" in l for l in links)
+
+    def test_pixeldrain_mirror_present(self):
+        buttons = parse_download_buttons(load("getcomics_post.html"))
+        assert mirror_link(buttons, "PIXELDRAIN") is not None
+
+
+class TestPixeldrainApiUrl:
+    def test_user_page(self):
+        assert pixeldrain_api_url("https://pixeldrain.com/u/jb9EAA5h") == \
+            "https://pixeldrain.com/api/file/jb9EAA5h?download"
+
+    def test_list_page(self):
+        assert pixeldrain_api_url("https://pixeldrain.com/l/abc123") == \
+            "https://pixeldrain.com/api/file/abc123?download"
+
+    def test_non_pixeldrain(self):
+        assert pixeldrain_api_url("https://mega.nz/file/xyz") is None
 
 
 class TestVolumeTitles:
