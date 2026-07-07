@@ -51,3 +51,12 @@ async def test_add_magnet_sends_category_and_savepath():
     assert "category=pullarr" in body
     assert "savepath=%2Fdownloads%2Fpullarr" in body
     assert "autoTMM=false" in body
+
+
+@respx.mock
+async def test_delete_torrents_removes_hashes_and_files():
+    route = respx.post(f"{BASE}/api/v2/torrents/delete").respond(200)
+    await client().delete_torrents(["abc", "def"])
+    body = route.calls.last.request.content.decode()
+    assert "hashes=abc%7Cdef" in body
+    assert "deleteFiles=true" in body

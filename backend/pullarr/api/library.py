@@ -31,6 +31,8 @@ from ..schemas import (
     FileMapRangeOut,
     FilesystemEntryOut,
     FilesystemListOut,
+    FolderPreviewIn,
+    FolderPreviewOut,
     RenameApplyIn,
     RenameItemOut,
     RenameOutcomeOut,
@@ -74,14 +76,6 @@ def _root_of(series: Series) -> Path:
 def _folders_of(series: Series) -> list[Path]:
     """Primary folder plus any extra folders configured for the series."""
     return resolve_folders(_root_of(series), series, [f.path for f in series.extra_folders])
-
-
-def _within(p: Path, root: Path) -> bool:
-    try:
-        p.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 # ------------------------------------------------------------------ scan
@@ -409,34 +403,67 @@ async def _scan_now(session: AsyncSession, series: Series) -> int:
     return result.matched_issues
 
 
+@router.post("/library/folder-preview", response_model=FolderPreviewOut)
+async def folder_preview(body: FolderPreviewIn, session: AsyncSession = Depends(get_session)):
+    """Show the folder a prospective ComicVine volume will use.
+
+    Pullarr keeps the ComicVine start year in the default folder name so
+    reboots like Batman (1940) and Batman (2016) remain distinct, while still
+    adopting an existing matching folder when one is already under the root.
+    """
+    from ..library.naming import series_folder
+
+    root = await session.get(RootFolder, body.root_folder_id)
+    if root is None:
+        raise HTTPException(404, "Root folder not found")
+    probe = Series(
+        title=body.title,
+        year=body.year,
+        alt_titles="\n".join(body.alt_titles),
+    )
+    found = find_existing_folder(Path(root.path), probe)
+    name = found or series_folder(body.title, body.year)
+    resolved = Path(root.path) / name
+    return FolderPreviewOut(
+        folder_name=name,
+        path=str(resolved),
+        exists=resolved.exists(),
+        matched=found is not None,
+    )
+
+
 # ---------------------------------------------------------- filesystem browse
 
 @router.get("/filesystem", response_model=FilesystemListOut)
 async def browse(
     path: str = Query(default=""), session: AsyncSession = Depends(get_session)
 ):
+    """Folder browser: root-folder shortcuts plus the whole container filesystem."""
     roots = [
         Path(r.path)
         for r in (await session.execute(select(RootFolder))).scalars().all()
     ]
     if not path:
-        return FilesystemListOut(
-            path="", parent=None,
-            entries=[FilesystemEntryOut(name=str(r), path=str(r)) for r in roots],
-        )
+        entries = [FilesystemEntryOut(name=str(r), path=str(r)) for r in roots]
+        if not any(str(r) == "/" for r in roots):
+            entries.append(FilesystemEntryOut(name="/", path="/"))
+        return FilesystemListOut(path="", parent=None, entries=entries)
     target = Path(path)
-    if not any(_within(target, r) for r in roots):
-        raise HTTPException(400, "Path is outside the configured root folders")
+    if not target.is_absolute():
+        raise HTTPException(400, "Path must be absolute")
     if not target.is_dir():
         raise HTTPException(404, "Not a directory")
+    try:
+        children = [c for c in target.iterdir() if c.is_dir()]
+    except OSError as exc:
+        raise HTTPException(400, f"Cannot list {target}: {exc}") from exc
     entries = sorted(
-        (FilesystemEntryOut(name=c.name, path=str(c))
-         for c in target.iterdir() if c.is_dir()),
+        (FilesystemEntryOut(name=c.name, path=str(c)) for c in children),
         key=lambda e: e.name.lower(),
     )
-    is_root = any(target == r for r in roots)
+    at_top = target == target.parent
     return FilesystemListOut(
         path=str(target),
-        parent=None if is_root else str(target.parent),
+        parent=None if at_top else str(target.parent),
         entries=entries,
     )

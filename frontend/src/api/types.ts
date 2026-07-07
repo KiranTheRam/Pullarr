@@ -61,6 +61,13 @@ export interface MetadataResult {
   in_library: boolean;
 }
 
+export interface FolderPreview {
+  folder_name: string;
+  path: string;
+  exists: boolean;
+  matched: boolean;
+}
+
 export interface Release {
   kind: "ddl" | "torrent";
   source_name: string;

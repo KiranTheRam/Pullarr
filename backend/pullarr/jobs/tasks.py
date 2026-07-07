@@ -107,19 +107,30 @@ async def link_sources(session: AsyncSession, series: Series, values: dict[str, 
     monitor can start finding releases as soon as they appear."""
     linked = {sl.source_name for sl in series.source_links}
     titles = _titles_of(series)
+    # Empty normalized strings would match everything; skip them.
     wanted = {nt for t in titles if (nt := normalize_title(t))}
     for src in registry.enabled_ddl_sources(values):
         if src.name in linked:
             continue
         match = None
-        try:
-            candidates = await src.search_series(series.title)
-        except Exception as exc:
-            log.warning("source %s search failed for %r: %s", src.name, series.title, exc)
-            candidates = []
-        for cand in candidates:
-            if normalize_title(cand.title) in wanted:
-                match = cand
+        for query in titles[:4]:
+            if not normalize_title(query):
+                continue
+            try:
+                candidates = await src.search_series(query)
+            except Exception as exc:
+                log.warning("source %s search failed for %r: %s", src.name, query, exc)
+                candidates = []
+            for cand in candidates:
+                cand_titles = {n for t in [cand.title, *cand.alt_titles] if (n := normalize_title(t))}
+                if wanted & cand_titles:
+                    match = cand
+                    break
+            if match is None and candidates and len(normalize_title(query)) >= 4:
+                top = candidates[0]
+                if normalize_title(top.title).startswith(normalize_title(query)[:12]):
+                    match = top
+            if match:
                 break
         external_id = match.external_id if match else series.title
         series.source_links.append(
@@ -190,11 +201,12 @@ async def refresh_series_full(series_id: int, grab_missing: bool = False) -> Non
             except Exception as exc:
                 log.warning("library scan failed for series %d: %s", series_id, exc)
         await reconcile_downloaded_files(session, series)
-        # monitored adds should immediately queue available issues instead of
-        # waiting for the next scheduled monitor interval
-        if grab_missing and series.monitored:
+        # Explicit one-time search, independent of the ongoing monitor toggle:
+        # if the user asks to search now, grab released missing issues after
+        # metadata/source linking and disk adoption have completed.
+        if grab_missing:
             try:
-                await grab_missing_issues(session, series, values)
+                await grab_missing_issues(session, series, values, only_monitored=False)
             except Exception as exc:
                 log.warning("add-time grab failed for series %d: %s", series_id, exc)
 
@@ -492,14 +504,16 @@ def _releasable(issue: Issue) -> bool:
 
 
 async def grab_missing_issues(
-    session: AsyncSession, series: Series, values: dict[str, str]
+    session: AsyncSession, series: Series, values: dict[str, str],
+    only_monitored: bool = True,
 ) -> int:
-    """Queue missing monitored, released issues from linked DDL sources.
+    """Queue missing released issues from linked DDL sources.
 
     Shared by the scheduled monitor and the add-time refresh path, so a newly
     added monitored series starts pulling available issues as soon as its
-    source links and issue list exist, instead of waiting for the next
-    scheduled monitor interval. Returns the number of issues queued."""
+    source links and issue list exist when the user requests a one-time
+    search. The scheduled monitor keeps `only_monitored=True`; add-time
+    search uses `False` because it is an explicit user action."""
     # active downloads for this series → don't double-grab
     result = await session.execute(
         select(Download.issue_id).where(
@@ -518,7 +532,7 @@ async def grab_missing_issues(
         return 0
     wanted = [
         i for i in series.issues
-        if i.monitored and not i.downloaded and i.id not in active
+        if (i.monitored or not only_monitored) and not i.downloaded and i.id not in active
         and _releasable(i)
     ]
     if not wanted:
@@ -592,6 +606,10 @@ async def monitor_all() -> None:
             except Exception as exc:
                 log.warning("monitor: metadata refresh failed for %r: %s", series.title, exc)
             await link_sources(session, series, values)
+            try:
+                await scan_series_folder(session, series)
+            except Exception as exc:
+                log.warning("library scan failed for series %d: %s", series_id, exc)
             await grab_missing_issues(session, series, values)
 
 

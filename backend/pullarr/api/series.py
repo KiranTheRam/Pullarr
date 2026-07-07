@@ -2,6 +2,7 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Integer, cast, func, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -9,7 +10,7 @@ from ..db import get_session
 from ..jobs.tasks import refresh_series_full
 from ..library.naming import series_folder
 from ..metadata.comicvine import ComicVineError, provider as comicvine
-from ..models import Issue, Series
+from ..models import Issue, Series, SeriesFolder
 from ..schemas import (
     AddSeriesIn,
     IssueMonitorIn,
@@ -95,14 +96,22 @@ async def add_series(body: AddSeriesIn, session: AsyncSession = Depends(get_sess
         root_folder_id=body.root_folder_id,
         folder_name=series_folder(meta.title, meta.year),
     )
+    if body.folder_name.strip():
+        series.folder_name = await _normalize_folder_name(session, series, body.folder_name)
     session.add(series)
+    seen_extras: set[str] = set()
+    for extra in body.extra_folders:
+        path = await _normalize_folder_name(session, series, extra)
+        if path and path != series.folder_name and path not in seen_extras:
+            series.extra_folders.append(SeriesFolder(path=path))
+            seen_extras.add(path)
     await session.commit()
     await session.refresh(series)
-    # fetch the issue list + link sources in the background; a monitored add
-    # immediately queues available issues instead of waiting for the next
-    # scheduled monitor interval
+    # Fetch the issue list + link sources in the background. `search_now`
+    # explicitly queues missing released issues after the initial disk scan;
+    # otherwise monitoring begins on the next scheduled pass.
     asyncio.get_running_loop().create_task(
-        refresh_series_full(series.id, grab_missing=body.monitored)
+        refresh_series_full(series.id, grab_missing=body.search_now)
     )
     return await get_series(series.id, session)
 
@@ -130,8 +139,16 @@ async def update_series(
     series = await session.get(Series, series_id)
     if series is None:
         raise HTTPException(404, "Series not found")
-    if body.monitored is not None:
+    if body.monitored is not None and body.monitored != series.monitored:
         series.monitored = body.monitored
+        # Series monitoring is the broad "want this volume" switch. When it
+        # changes, issue monitor flags follow; users can then unmonitor
+        # individual issues or TPB groups again.
+        await session.execute(
+            sa_update(Issue)
+            .where(Issue.series_id == series_id)
+            .values(monitored=body.monitored)
+        )
     if body.root_folder_id is not None:
         series.root_folder_id = body.root_folder_id
     if body.folder_name is not None:

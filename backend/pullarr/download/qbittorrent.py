@@ -119,6 +119,19 @@ class QbtClient:
             for t in resp.json()
         ]
 
+    async def delete_torrents(self, hashes: list[str], delete_files: bool = True) -> None:
+        """Remove torrents, including partial data by default."""
+        if not hashes:
+            return
+        await self._request(
+            "POST",
+            "/torrents/delete",
+            data={
+                "hashes": "|".join(hashes),
+                "deleteFiles": "true" if delete_files else "false",
+            },
+        )
+
     async def get_torrent(self, torrent_hash: str) -> QbtTorrent | None:
         resp = await self._request("GET", "/torrents/info", params={"hashes": torrent_hash})
         torrents = resp.json()

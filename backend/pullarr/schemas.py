@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RootFolderOut(BaseModel):
@@ -64,6 +64,24 @@ class AddSeriesIn(BaseModel):
     root_folder_id: int
     monitored: bool = True
     search_now: bool = False
+    # series folder under the root; empty means derive from title/year
+    folder_name: str = ""
+    extra_folders: list[str] = Field(default_factory=list)
+
+
+class FolderPreviewIn(BaseModel):
+    """Ask which folder a prospective ComicVine volume would use before add."""
+    root_folder_id: int
+    title: str
+    year: int | None = None
+    alt_titles: list[str] = Field(default_factory=list)
+
+
+class FolderPreviewOut(BaseModel):
+    folder_name: str
+    path: str
+    exists: bool
+    matched: bool  # an existing folder was adopted (vs a fresh default name)
 
 
 class SeriesUpdateIn(BaseModel):
@@ -120,6 +138,14 @@ class GrabIn(BaseModel):
     series_id: int | None = None
     magnet: str | None = None
     title: str | None = None
+
+
+class QueueRemoveIn(BaseModel):
+    ids: list[int]
+
+
+class QueueRemoveOut(BaseModel):
+    removed: int
 
 
 class QueueItemOut(BaseModel):

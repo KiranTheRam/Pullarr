@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
@@ -43,22 +43,86 @@ function InteractiveSearch({
     queryFn: () => api.get<Release[]>(`/search/releases?${params}`),
   });
 
+  const [activeSource, setActiveSource] = useState("");
+  const [selectedDdl, setSelectedDdl] = useState<Set<string>>(() => new Set());
+  const sourceNames = useMemo(
+    () => [...new Set((data ?? []).map((release) => release.source_name))],
+    [data],
+  );
+  const currentSource = activeSource || sourceNames[0] || "";
+  const visibleReleases = useMemo(
+    () => (data ?? []).filter((release) => release.source_name === currentSource),
+    [data, currentSource],
+  );
+  const ddlSelectable = visibleReleases.filter((release) => release.kind === "ddl");
+  const releaseKey = (release: Release) =>
+    `${release.kind}:${release.source_name}:${release.external_id || release.magnet}:${release.issue_number ?? ""}:${release.issue_end ?? ""}`;
+  const selectedVisibleDdl = ddlSelectable.filter((release) =>
+    selectedDdl.has(releaseKey(release)),
+  );
+  const allVisibleDdlSelected =
+    ddlSelectable.length > 0 && selectedVisibleDdl.length === ddlSelectable.length;
+
+  useEffect(() => {
+    if (!activeSource && sourceNames.length > 0) {
+      setActiveSource(sourceNames[0]);
+    } else if (activeSource && sourceNames.length > 0 && !sourceNames.includes(activeSource)) {
+      setActiveSource(sourceNames[0]);
+    }
+  }, [activeSource, sourceNames]);
+
+  const grabRelease = (release: Release) =>
+    api.post("/queue/grab", release.kind === "ddl"
+      ? {
+          issue_id: issueId,
+          series_id: seriesId,
+          source_name: release.source_name,
+          external_id: release.external_id,
+          title: release.title,
+        }
+      : { series_id: seriesId, magnet: release.magnet, title: release.title });
+
   const grab = useMutation({
-    mutationFn: (release: Release) =>
-      api.post("/queue/grab", release.kind === "ddl"
-        ? {
-            issue_id: issueId,
-            series_id: seriesId,
-            source_name: release.source_name,
-            external_id: release.external_id,
-            title: release.title,
-          }
-        : { series_id: seriesId, magnet: release.magnet, title: release.title }),
+    mutationFn: grabRelease,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["queue"] });
       onClose();
     },
   });
+
+  const grabSelected = useMutation({
+    mutationFn: async (releases: Release[]) => {
+      for (const release of releases) {
+        await grabRelease(release);
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["queue"] });
+      onClose();
+    },
+  });
+
+  const toggleDdl = (release: Release) => {
+    const key = releaseKey(release);
+    setSelectedDdl((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleAllVisibleDdl = () => {
+    setSelectedDdl((current) => {
+      const next = new Set(current);
+      for (const release of ddlSelectable) {
+        const key = releaseKey(release);
+        if (allVisibleDdlSelected) next.delete(key);
+        else next.add(key);
+      }
+      return next;
+    });
+  };
 
   return (
     <Modal title={`Search — ${title}`} onClose={onClose}>
@@ -73,10 +137,43 @@ function InteractiveSearch({
       ) : (
         <>
           {grab.isError && <div className="error-banner">{(grab.error as Error).message}</div>}
+          {grabSelected.isError && (
+            <div className="error-banner">{(grabSelected.error as Error).message}</div>
+          )}
+          <div className="source-tabs">
+            {sourceNames.map((source) => {
+              const sourceCount = (data ?? []).filter((release) => release.source_name === source).length;
+              return (
+                <button
+                  className={`source-tab${source === currentSource ? " active" : ""}`}
+                  key={source}
+                  onClick={() => setActiveSource(source)}
+                >
+                  {source}
+                  <span>{sourceCount}</span>
+                </button>
+              );
+            })}
+          </div>
+          {ddlSelectable.length > 0 && (
+            <div className="release-actions">
+              <button className="btn sm" onClick={toggleAllVisibleDdl}>
+                {allVisibleDdlSelected ? "Clear selected" : "Select all"}
+              </button>
+              <span>{selectedVisibleDdl.length} selected</span>
+              <button
+                className="btn primary sm"
+                disabled={selectedVisibleDdl.length === 0 || grabSelected.isPending}
+                onClick={() => grabSelected.mutate(selectedVisibleDdl)}
+              >
+                {grabSelected.isPending ? "Grabbing..." : "Grab selected"}
+              </button>
+            </div>
+          )}
           <table className="data-table">
             <thead>
               <tr>
-                <th>Source</th>
+                {ddlSelectable.length > 0 && <th style={{ width: 42 }}></th>}
                 <th>Title</th>
                 <th>Size</th>
                 <th>Year / Peers</th>
@@ -84,13 +181,19 @@ function InteractiveSearch({
               </tr>
             </thead>
             <tbody>
-              {data.map((r, i) => (
-                <tr key={i}>
-                  <td>
-                    <span className={`pill ${r.kind === "torrent" ? "orange" : "blue"}`}>
-                      {r.source_name}
-                    </span>
-                  </td>
+              {visibleReleases.map((r, i) => (
+                <tr key={`${r.source_name}-${r.external_id || r.magnet || i}`}>
+                  {ddlSelectable.length > 0 && (
+                    <td>
+                      {r.kind === "ddl" && (
+                        <input
+                          type="checkbox"
+                          checked={selectedDdl.has(releaseKey(r))}
+                          onChange={() => toggleDdl(r)}
+                        />
+                      )}
+                    </td>
+                  )}
                   <td>
                     {r.url ? (
                       <a href={r.url} target="_blank" rel="noreferrer" style={{ color: "var(--info)" }}>
@@ -114,7 +217,7 @@ function InteractiveSearch({
                     <button
                       className="btn icon-btn"
                       title="Grab"
-                      disabled={grab.isPending}
+                      disabled={grab.isPending || grabSelected.isPending}
                       onClick={() => grab.mutate(r)}
                     >
                       ⇓
@@ -420,7 +523,7 @@ export default function SeriesDetail() {
             <strong>Pulling issues.</strong>
             {activeDownloads.slice(0, 3).map((item) => (
               <span className="activity-chip" key={item.id} title={item.title || item.series_title}>
-                {item.status} · {Math.round(item.progress * 100)}%
+                {item.kind} · {item.status} · {Math.round(item.progress * 100)}%
               </span>
             ))}
             {activeDownloads.length > 3 && (

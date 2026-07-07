@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { RootFolder, Settings as SettingsType } from "../api/types";
+import { FolderBrowser } from "../components/FolderBrowser";
 import { Spinner, Toggle, Toolbar } from "../components/common";
 
 function RootFolders() {
@@ -41,7 +42,7 @@ function RootFolders() {
       <div className="form-row">
         <input
           type="text"
-          placeholder="/data/manga"
+          placeholder="/data/comics"
           value={path}
           onChange={(e) => setPath(e.target.value)}
           style={{ flex: 1, maxWidth: 380 }}
@@ -50,6 +51,71 @@ function RootFolders() {
           + Add
         </button>
       </div>
+    </div>
+  );
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  getcomics: "GetComics",
+};
+
+const SOURCE_HINTS: Record<string, string> = {
+  getcomics: "Main-server direct downloads, with Pixeldrain fallback when available.",
+};
+
+function SourcePriority({
+  form,
+  setForm,
+}: {
+  form: SettingsType;
+  setForm: (f: SettingsType) => void;
+}) {
+  const known = Object.keys(form)
+    .filter((k) => k.startsWith("source_") && k.endsWith("_enabled"))
+    .map((k) => k.slice("source_".length, -"_enabled".length));
+  const order = (form.source_priority ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s, i, arr) => s && known.includes(s) && arr.indexOf(s) === i);
+  for (const source of known) if (!order.includes(source)) order.push(source);
+
+  const move = (index: number, delta: number) => {
+    const next = [...order];
+    const target = index + delta;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    setForm({ ...form, source_priority: next.join(",") });
+  };
+
+  return (
+    <div className="priority-list">
+      {order.map((name, i) => {
+        const enabled = form[`source_${name}_enabled`] === "true";
+        return (
+          <div className={`priority-row${enabled ? "" : " disabled"}`} key={name}>
+            <span className="priority-rank">{i + 1}</span>
+            <span className="priority-arrows">
+              <button className="btn icon-btn" disabled={i === 0} onClick={() => move(i, -1)} title="Higher priority">
+                ↑
+              </button>
+              <button
+                className="btn icon-btn"
+                disabled={i === order.length - 1}
+                onClick={() => move(i, 1)}
+                title="Lower priority"
+              >
+                ↓
+              </button>
+            </span>
+            <span className="priority-name">{SOURCE_LABELS[name] ?? name}</span>
+            {SOURCE_HINTS[name] && <span className="priority-hint">{SOURCE_HINTS[name]}</span>}
+            <Toggle
+              on={enabled}
+              onChange={(v) => setForm({ ...form, [`source_${name}_enabled`]: v ? "true" : "false" })}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -93,6 +159,7 @@ export default function Settings() {
     onSuccess: () => setCvTest("✔ ComicVine key works"),
     onError: (e) => setCvTest(`✖ ${(e as Error).message}`),
   });
+  const [browsingDdl, setBrowsingDdl] = useState(false);
 
   if (isLoading || !saved) {
     return (
@@ -164,12 +231,9 @@ export default function Settings() {
         <div className="settings-section">
           <h3>Sources</h3>
           <p className="section-hint">
-            Releases are found and downloaded from GetComics (main-server direct downloads).
+            Releases are found and downloaded from the highest-priority enabled source.
           </p>
-          <div className="form-row">
-            <label>GetComics enabled</label>
-            <Toggle on={form.source_getcomics_enabled === "true"} onChange={setBool("source_getcomics_enabled")} />
-          </div>
+          <SourcePriority form={form} setForm={setForm} />
           <div className="form-row">
             <label>GetComics base URL</label>
             {text("getcomics_base_url")}
@@ -185,6 +249,9 @@ export default function Settings() {
           <div className="form-row">
             <label>DDL staging directory</label>
             {text("ddl_directory")}
+            <button className="btn" onClick={() => setBrowsingDdl(true)}>
+              Browse...
+            </button>
             <span style={{ color: "var(--text-faint)", fontSize: 13 }}>
               Where downloads land before import. Empty = &lt;data dir&gt;/ddl.
             </span>
@@ -230,6 +297,15 @@ export default function Settings() {
           </div>
         </div>
       </div>
+      {browsingDdl && (
+        <FolderBrowser
+          onPick={(path) => {
+            setForm({ ...form, ddl_directory: path });
+            setBrowsingDdl(false);
+          }}
+          onClose={() => setBrowsingDdl(false)}
+        />
+      )}
     </>
   );
 }
