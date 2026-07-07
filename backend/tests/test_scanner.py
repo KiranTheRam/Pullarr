@@ -127,6 +127,16 @@ class TestFindExistingFolder:
         s = Series(id=1, title="Teenage Mutant Ninja Turtles", alt_titles="TMNT")
         assert find_existing_folder(tmp_path, s) == "TMNT"
 
+    def test_nested_publisher_folder_match(self, tmp_path):
+        (tmp_path / "Marvel" / "Ghost Spider").mkdir(parents=True)
+        s = Series(id=1, title="Spider-Gwen: Ghost-Spider", alt_titles="")
+        assert find_existing_folder(tmp_path, s) == "Marvel/Ghost Spider"
+
+    def test_respects_max_depth(self, tmp_path):
+        (tmp_path / "A" / "B" / "C" / "Chew").mkdir(parents=True)
+        s = Series(id=1, title="Chew!", alt_titles="")
+        assert find_existing_folder(tmp_path, s, max_depth=3) is None
+
     def test_no_match(self, tmp_path):
         (tmp_path / "Totally Different").mkdir()
         s = Series(id=1, title="Saga", alt_titles="")

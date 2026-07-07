@@ -98,13 +98,15 @@ async def add_series(body: AddSeriesIn, session: AsyncSession = Depends(get_sess
     )
     if body.folder_name.strip():
         series.folder_name = await _normalize_folder_name(session, series, body.folder_name)
-    session.add(series)
     seen_extras: set[str] = set()
+    extra_folders: list[SeriesFolder] = []
     for extra in body.extra_folders:
         path = await _normalize_folder_name(session, series, extra)
         if path and path != series.folder_name and path not in seen_extras:
-            series.extra_folders.append(SeriesFolder(path=path))
+            extra_folders.append(SeriesFolder(path=path))
             seen_extras.add(path)
+    series.extra_folders = extra_folders
+    session.add(series)
     await session.commit()
     await session.refresh(series)
     # Fetch the issue list + link sources in the background. `search_now`

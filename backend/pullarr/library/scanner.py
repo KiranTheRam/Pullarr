@@ -56,10 +56,14 @@ def resolve_folders(root: Path, series: Series, extra_paths: list[str]) -> list[
     return folders
 
 
-def find_existing_folder(root: Path, series: Series) -> str | None:
-    """Return the sub-directory name of `root` whose normalized name matches
-    the series title or an alt title, so pullarr can adopt a pre-existing
-    folder even when it isn't named exactly like the series."""
+def find_existing_folder(root: Path, series: Series, max_depth: int = 3) -> str | None:
+    """Return the relative directory path under `root` whose normalized name
+    matches the series title or an alt title.
+
+    Existing comic libraries are often grouped by publisher, imprint, or era
+    (`Marvel/Ghost Spider`), so this walks a few levels below the root instead
+    of checking direct children only.
+    """
     root = Path(root)
     if not root.is_dir():
         return None
@@ -68,15 +72,25 @@ def find_existing_folder(root: Path, series: Series) -> str | None:
         wanted.add(normalize_title(f"{series.title} {series.year}"))
     wanted.update(normalize_title(t) for t in series.alt_titles.split("\n") if t)
     wanted.discard("")
-    best = None
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
+    best: str | None = None
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    while stack:
+        parent, depth = stack.pop()
+        try:
+            children = sorted((c for c in parent.iterdir() if c.is_dir()), key=lambda p: str(p).lower())
+        except OSError:
             continue
-        nn = normalize_title(child.name)
-        if nn in wanted:
-            return child.name  # exact normalized match wins immediately
-        if best is None and nn and any(nn in w or w in nn for w in wanted):
-            best = child.name
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            rel = str(child.relative_to(root))
+            nn = normalize_title(child.name)
+            if nn in wanted:
+                return rel  # exact normalized match wins immediately
+            if best is None and len(nn) >= 4 and any(nn in w or w in nn for w in wanted):
+                best = rel
+            if depth + 1 < max_depth:
+                stack.append((child, depth + 1))
     return best
 
 
