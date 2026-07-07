@@ -40,17 +40,20 @@ git clone <this repo> pullarr && cd pullarr
 docker compose up -d
 ```
 
-Open <http://localhost:6997>. The compose file also starts an optional
+Open <http://localhost:6997>. The compose file also starts a
 [binhex/arch-qbittorrentvpn](https://github.com/binhex/arch-qbittorrentvpn)
-container (PIA WireGuard + Privoxy) — supply `PIA_USER`/`PIA_PASS` in `.env`,
-or delete that service if you don't want torrents/VPN.
+`pullarr-vpn` sidecar (PIA WireGuard + Privoxy) — supply `PIA_USER`/`PIA_PASS`
+in `.env`, or delete that service if you don't want a VPN. pullarr itself keeps
+normal networking (so its UI is reachable on the LAN); only its GetComics
+traffic is routed through the sidecar's Privoxy.
 
 First-run checklist, in the pullarr UI:
 
 1. **Settings → Root Folders**: add `/comics` (mapped to `./data/comics`).
 2. **Settings → Metadata**: paste your ComicVine API key, *Test Key*.
-3. **Settings → Sources** (optional): set the HTTP proxy to route GetComics
-   traffic through the VPN container's Privoxy (`http://<host>:8118`).
+3. **Settings → Sources**: set the HTTP proxy to `http://pullarr-vpn:8118` so
+   GetComics searches and downloads exit through the VPN (ComicVine stays
+   direct). Leave blank to skip the VPN.
 4. **Add New**: search a title, pick a root folder, add. Issues appear after
    the automatic ComicVine sync (a few seconds).
 
