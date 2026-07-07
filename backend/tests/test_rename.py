@@ -45,6 +45,19 @@ class TestPlanRenames:
         assert items[0].new_name == "Absolute Batman Vol. 01.cbz"
         assert sorted(items[0].issue_ids) == [1, 2]
 
+    def test_range_mapped_file_named_by_issue_span(self, tmp_path):
+        f = tmp_path / "Scream (2020).cbz"
+        f.write_bytes(b"x")
+        s = Series(id=1, title="Absolute Carnage: Scream", year=2019,
+                   folder_name="", alt_titles="")
+        issues = [issue(1, 1, f), issue(2, 2, f), issue(3, 3, f)]
+
+        items = plan(s, issues)
+
+        assert len(items) == 1
+        assert items[0].new_name == "Absolute Carnage Scream #001-003.cbz"
+        assert sorted(items[0].issue_ids) == [1, 2, 3]
+
     def test_conflict_flagged(self, tmp_path):
         f = tmp_path / "Absolute Batman 015.cbz"
         f.write_bytes(b"x")

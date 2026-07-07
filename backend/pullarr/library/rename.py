@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..models import Issue, Series
 from ..util import has_issue_marker, parse_volume_number
-from .naming import issue_filename, volume_filename
+from .naming import issue_filename, range_filename, volume_filename
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +70,9 @@ def plan_renames(
             )
             key = (1, batch[0].number)
         else:
-            # ambiguous grouping (several issues, not a named volume) — leave it
-            continue
+            numbers = sorted(i.number for i in batch)
+            desired = range_filename(series.title, numbers[0], numbers[-1], series.year, ext=ext)
+            key = (1, numbers[0], numbers[-1])
         # rename in place, in the file's own directory
         new_path = current_path.parent / desired
         if new_path.name != current_path.name:
