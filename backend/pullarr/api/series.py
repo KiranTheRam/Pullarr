@@ -142,9 +142,18 @@ async def update_series(
 
 @router.delete("/{series_id}", status_code=204)
 async def delete_series(series_id: int, session: AsyncSession = Depends(get_session)):
+    from sqlalchemy import delete as sa_delete
+
+    from ..models import Download, HistoryEvent
+
     series = await session.get(Series, series_id)
     if series is None:
         raise HTTPException(404, "Series not found")
+    # remove this series' download + history rows too, so a later series that
+    # reuses the id doesn't inherit stale failed-grab records (which would
+    # otherwise block re-grabbing those issues)
+    await session.execute(sa_delete(Download).where(Download.series_id == series_id))
+    await session.execute(sa_delete(HistoryEvent).where(HistoryEvent.series_id == series_id))
     await session.delete(series)
     await session.commit()
 
