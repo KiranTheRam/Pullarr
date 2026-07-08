@@ -53,7 +53,13 @@ function AddSeriesModal({
       }),
     onSuccess: (series) => {
       queryClient.invalidateQueries({ queryKey: ["series"] });
-      navigate(`/series/${series.id}`);
+      navigate(`/series/${series.id}`, {
+        state: {
+          addedSeries: true,
+          addedAt: Date.now(),
+          searchNow,
+        },
+      });
     },
   });
 

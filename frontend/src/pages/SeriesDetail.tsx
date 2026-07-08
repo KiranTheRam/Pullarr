@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type {
   Issue,
@@ -24,6 +24,14 @@ import {
   RenameModal,
   SourcesModal,
 } from "../components/LibraryTools";
+
+type SeriesLocationState = {
+  addedSeries?: boolean;
+  addedAt?: number;
+  searchNow?: boolean;
+};
+
+const ADD_SYNC_NOTICE_TIMEOUT_MS = 120000;
 
 function InteractiveSearch({
   seriesId,
@@ -250,8 +258,10 @@ function groupByVolume(issues: Issue[]): { volume: number | null; issues: Issue[
 export default function SeriesDetail() {
   const { id } = useParams();
   const seriesId = Number(id);
+  const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const locationState = location.state as SeriesLocationState | null;
   const [search, setSearch] = useState<{ issueId?: number; title: string } | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
@@ -262,6 +272,7 @@ export default function SeriesDetail() {
   const [showCleanup, setShowCleanup] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [workNotice, setWorkNotice] = useState<string | null>(null);
+  const [showAddSyncNotice, setShowAddSyncNotice] = useState(false);
 
   const showWorkNotice = (message: string, timeout = 9000) => {
     setWorkNotice(message);
@@ -282,6 +293,28 @@ export default function SeriesDetail() {
     queryFn: () => api.get<QueueItem[]>("/queue"),
     refetchInterval: 2000,
   });
+
+  useEffect(() => {
+    setShowAddSyncNotice(Boolean(locationState?.addedSeries));
+  }, [location.key, locationState?.addedSeries]);
+
+  useEffect(() => {
+    if (!showAddSyncNotice || !series) return;
+    if (series.issues.length > 0) {
+      setShowAddSyncNotice(false);
+      return;
+    }
+
+    const addedAt = locationState?.addedAt ?? Date.now();
+    const remaining = ADD_SYNC_NOTICE_TIMEOUT_MS - (Date.now() - addedAt);
+    if (remaining <= 0) {
+      setShowAddSyncNotice(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => setShowAddSyncNotice(false), remaining);
+    return () => window.clearTimeout(timer);
+  }, [locationState?.addedAt, series, showAddSyncNotice]);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["series", seriesId] });
@@ -350,14 +383,12 @@ export default function SeriesDetail() {
   const isVolumeArchive = (path: string) => (fileCounts[path] ?? 0) > 1;
 
   const activeDownloads = (queue ?? []).filter((item) => item.series_id === seriesId);
-  const toolbarStatus =
-    scan.isPending ? "Scanning disk" :
-    refresh.isPending ? "Starting refresh" :
-    deleteSeries.isPending ? "Removing series" :
-    toggleMonitor.isPending ? "Updating monitoring" :
-    workNotice;
+  const addSyncNotice =
+    showAddSyncNotice && series.issues.length === 0
+      ? `Adding series. Pullarr is fetching the issue list, linking sources, and scanning the library${locationState?.searchNow ? " before searching for missing content" : ""}...`
+      : null;
   const hasTopBanners =
-    Boolean(workNotice || scanResult) || activeDownloads.length > 0;
+    Boolean(workNotice || addSyncNotice || scanResult) || activeDownloads.length > 0;
 
   const issueRows = (issues: Issue[]) => (
     <table className="data-table">
@@ -491,12 +522,6 @@ export default function SeriesDetail() {
         >
           {series.monitored ? "🔖 Monitored" : "◻ Unmonitored"}
         </button>
-        {toolbarStatus && (
-          <span className="toolbar-activity" title={toolbarStatus}>
-            <span className="mini-spinner" />
-            {toolbarStatus}
-          </span>
-        )}
         <button
           className="btn danger"
           title="Remove this series from Pullarr without deleting files"
@@ -510,11 +535,11 @@ export default function SeriesDetail() {
         </button>
       </Toolbar>
       <div className="content">
-        {workNotice && (
+        {(workNotice || addSyncNotice) && (
           <div className="activity-banner">
             <span className="mini-spinner" />
             <strong>Working.</strong>
-            <span>{workNotice}</span>
+            <span>{workNotice || addSyncNotice}</span>
           </div>
         )}
         {activeDownloads.length > 0 && (
