@@ -80,9 +80,10 @@ async def search_releases(
         link = links.get(src.name)
         term = link.external_id if link else series.title
         wanted.add(normalize_title(term))
-        try:
-            if issue is not None:
-                found = await src.search_releases(f"{term} {issue.number:g}")
+            try:
+                if issue is not None:
+                    issue_term = issue.display_number or f"{issue.number:g}"
+                    found = await src.search_releases(f"{term} {issue_term}")
                 found = [
                     r for r in found
                     if r.issue_number is not None

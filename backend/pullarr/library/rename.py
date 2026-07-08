@@ -65,7 +65,7 @@ def plan_renames(
             key = (0, float(vol))
         elif len(batch) == 1:
             desired = issue_filename(
-                template, series.title, batch[0].number, batch[0].title,
+                template, series.title, batch[0].display_number or batch[0].number, batch[0].title,
                 series.year, ext=ext,
             )
             key = (1, batch[0].number)

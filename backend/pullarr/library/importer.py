@@ -68,7 +68,8 @@ def import_payload(
         ext = _dest_ext(media)
         if issue is not None:
             dest_name = issue_filename(
-                template, series.title, issue.number, issue.title, series.year, ext=ext
+                template, series.title, issue.display_number or issue.number,
+                issue.title, series.year, ext=ext
             )
         elif media.issue_range is not None:
             lo, hi = media.issue_range
@@ -117,7 +118,7 @@ def _stamp_comicinfo(dest: Path, series: Series, issue: Issue | None, volume: in
     try:
         xml = build_comicinfo(
             series=series.title,
-            number=issue.number if issue else None,
+            number=(issue.display_number or issue.number) if issue else None,
             volume=volume,
             title=issue.title if issue else "",
             publisher=series.publisher,

@@ -9,6 +9,7 @@ from pullarr.metadata.comicvine import (
     API_URL,
     ComicVineError,
     ComicVineProvider,
+    _clean_html,
     derive_status,
     parse_issue_number,
 )
@@ -118,8 +119,9 @@ async def test_list_issues_paginates_and_sorts():
         }),
     ]
     issues = await _provider().list_issues("796")
-    # "Special" is skipped; the rest sorted by number
-    assert [i.number for i in issues] == [1.0, 2.0]
+    # "Special" is retained with a synthetic sort key and its display label.
+    assert [i.number for i in issues] == [1.0, 2.0, 3.0]
+    assert [i.display_number for i in issues] == ["1", "2", "Special"]
     assert issues[0].title == "One"
     # store_date preferred over cover_date
     assert issues[1].released_at.day == 25
@@ -133,3 +135,26 @@ async def test_api_error_raises():
     })
     with pytest.raises(ComicVineError, match="Invalid API Key"):
         await _provider().search("batman")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_issues_keeps_suffixed_issue_distinct():
+    respx.get(f"{API_URL}/issues/").respond(json={
+        "status_code": 1,
+        "number_of_total_results": 2,
+        "results": [
+            {"id": 1, "issue_number": "1", "name": "One"},
+            {"id": 2, "issue_number": "1.MU", "name": "Tie-in"},
+        ],
+    })
+
+    issues = await _provider().list_issues("796")
+
+    assert [i.display_number for i in issues] == ["1", "1.MU"]
+    assert issues[0].number == 1.0
+    assert issues[1].number > 1.0
+
+
+def test_clean_html_strips_escaped_tags():
+    assert _clean_html("&lt;img src=x onerror=alert(1)&gt;Safe") == "Safe"

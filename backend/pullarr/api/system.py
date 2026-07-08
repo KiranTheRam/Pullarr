@@ -8,6 +8,7 @@ from .. import __version__
 from ..db import get_session
 from ..models import Issue, Download, DownloadStatus, RootFolder, Series
 from ..schemas import RootFolderIn, RootFolderOut, SystemStatus, WantedItemOut
+from ..util import is_released
 
 router = APIRouter(tags=["system"])
 
@@ -48,21 +49,25 @@ async def wanted(limit: int = 100, session: AsyncSession = Depends(get_session))
             Series.monitored == True,  # noqa: E712
         )
         .order_by(Series.title, Issue.number)
-        .limit(limit)
     )
-    return [
-        WantedItemOut(
+    items: list[WantedItemOut] = []
+    for ch, title, cover in result.all():
+        if not is_released(ch.released_at):
+            continue
+        items.append(WantedItemOut(
             issue_id=ch.id,
             series_id=ch.series_id,
             series_title=title,
             cover_url=cover,
             number=ch.number,
+            display_number=ch.display_number,
             volume=ch.volume,
             title=ch.title,
             released_at=ch.released_at,
-        )
-        for ch, title, cover in result.all()
-    ]
+        ))
+        if len(items) >= limit:
+            break
+    return items
 
 
 @router.get("/rootfolders", response_model=list[RootFolderOut])

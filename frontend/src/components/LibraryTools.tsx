@@ -608,7 +608,7 @@ export function FilesModal({
                           <option value="">Map to issue…</option>
                           {issues.map((c) => (
                             <option key={c.id} value={c.id}>
-                              {issueLabel(c.number, c.volume)}
+                              {issueLabel(c.number, c.volume, c.display_number)}
                             </option>
                           ))}
                         </select>

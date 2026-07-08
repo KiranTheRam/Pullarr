@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..download.qbittorrent import QbtClient
-from ..jobs.tasks import enqueue_direct, enqueue_torrent
+from ..jobs.tasks import cancel_downloads, enqueue_direct, enqueue_torrent
 from ..models import Download, DownloadKind, DownloadStatus, HistoryEvent, Issue, Series
 from ..schemas import GrabIn, HistoryOut, QueueItemOut, QueueRemoveIn, QueueRemoveOut
 from ..sources import registry
@@ -46,6 +46,10 @@ async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
         dl.status = DownloadStatus.FAILED
         dl.error = "removed by user"
     await session.commit()
+    cancel_downloads([
+        dl.id for dl in downloads
+        if dl.kind == DownloadKind.DIRECT and dl.status == DownloadStatus.FAILED
+    ])
     if hashes:
         values = await registry.apply_settings(session)
         if values["qbittorrent_enabled"] == "true":

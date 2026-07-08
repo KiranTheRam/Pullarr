@@ -50,8 +50,8 @@ def _size(path: str) -> int:
         return 0
 
 
-def _identity(mf: MediaFile, tracked_issues: set[float], tracked_vol: set[int]):
-    if mf.issue_number is not None and mf.issue_number in tracked_issues:
+def _identity(mf: MediaFile, issues_by_number: dict[float, list[Issue]], tracked_vol: set[int]):
+    if mf.issue_number is not None and len(issues_by_number.get(mf.issue_number, [])) == 1:
         return ("issue", mf.issue_number)
     if mf.volume_number is not None and mf.volume_number in tracked_vol:
         return ("vol", mf.volume_number)
@@ -74,16 +74,18 @@ def analyze(
 ) -> CleanupPlan:
     media = _all_media(folders)
     referenced = {i.file_path for i in issues if i.downloaded and i.file_path}
-    tracked_issues = {i.number for i in issues}
     tracked_vol = {i.volume for i in issues if i.volume is not None}
     issue_by_num = {i.number: i for i in issues}
+    issues_by_number: dict[float, list[Issue]] = {}
+    for issue in issues:
+        issues_by_number.setdefault(issue.number, []).append(issue)
     vol_downloaded = {
         v: all(i.downloaded for i in issues if i.volume == v) for v in tracked_vol
     }
 
     by_identity: dict[tuple, list[MediaFile]] = {}
     for mf in media:
-        by_identity.setdefault(_identity(mf, tracked_issues, tracked_vol), []).append(mf)
+        by_identity.setdefault(_identity(mf, issues_by_number, tracked_vol), []).append(mf)
 
     plan = CleanupPlan()
     for identity, files in by_identity.items():
@@ -99,7 +101,7 @@ def analyze(
         # a standalone unreferenced file: redundant if its content is already
         # covered elsewhere (a downloaded issue / a fully-downloaded volume)
         if kind == "issue":
-            redundant = num in tracked_issues and issue_by_num[num].downloaded
+            redundant = num in issue_by_num and issue_by_num[num].downloaded
         elif kind == "vol":
             redundant = vol_downloaded.get(num, False)
         else:
@@ -115,7 +117,7 @@ def _group(series, kind, num, files, referenced, issue_by_num, template):
     ext = Path(str(files[0].path)).suffix.lower()
     if kind == "issue":
         issue = issue_by_num[num]
-        canonical = issue_filename(template, series.title, issue.number,
+        canonical = issue_filename(template, series.title, issue.display_number or issue.number,
                                    issue.title, series.year, ext=ext)
         label = f"Issue {num:g}"
     else:
@@ -148,22 +150,35 @@ def apply_cleanup(
     series: Series, issues: list[Issue], folders: list[Path], delete_paths: list[str]
 ) -> CleanupResult:
     media = _all_media(folders)
-    tracked_issues = {i.number for i in issues}
     tracked_vol = {i.volume for i in issues if i.volume is not None}
-    identity_of = {str(mf.path): _identity(mf, tracked_issues, tracked_vol) for mf in media}
-    delete_set = set(delete_paths)
+    issues_by_number: dict[float, list[Issue]] = {}
+    for issue in issues:
+        issues_by_number.setdefault(issue.number, []).append(issue)
+    media_by_resolved = {str(mf.path.resolve()): mf for mf in media}
+    identity_of = {
+        str(mf.path.resolve()): _identity(mf, issues_by_number, tracked_vol)
+        for mf in media
+    }
+    delete_set = {str(Path(p).resolve()) for p in delete_paths}
     result = CleanupResult()
 
     for path in delete_paths:
+        resolved = str(Path(path).resolve())
+        mf = media_by_resolved.get(resolved)
+        if mf is None:
+            result.skipped += 1
+            continue
+        path = str(mf.path)
         if not os.path.exists(path):
             continue
         referencing = [i for i in issues if i.file_path == path]
         if referencing:
-            ident = identity_of.get(path)
+            ident = identity_of.get(resolved)
             survivors = [
                 str(mf.path) for mf in media
-                if identity_of.get(str(mf.path)) == ident
-                and str(mf.path) not in delete_set and os.path.exists(str(mf.path))
+                if identity_of.get(str(mf.path.resolve())) == ident
+                and str(mf.path.resolve()) not in delete_set
+                and os.path.exists(str(mf.path))
             ]
             if not survivors:
                 result.skipped += 1  # would leave an issue with no file — refuse

@@ -269,7 +269,7 @@ export default function AddSeries() {
                       {g}
                     </span>
                   ))}
-                  <div className="desc" dangerouslySetInnerHTML={{ __html: r.description }} />
+	                  <div className="desc">{r.description}</div>
                 </div>
                 {r.in_library && (
                   <div style={{ alignSelf: "center" }}>

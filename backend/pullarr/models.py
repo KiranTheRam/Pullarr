@@ -9,16 +9,46 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class UTCDateTime(TypeDecorator):
+    """Store datetimes as UTC and return aware UTC values.
+
+    SQLite does not preserve timezone information for DateTime columns, so this
+    type normalizes values on the way in and restores UTC tzinfo on the way out.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -66,7 +96,7 @@ class Series(Base):
     monitored: Mapped[bool] = mapped_column(Boolean, default=True)
     root_folder_id: Mapped[int | None] = mapped_column(ForeignKey("root_folders.id"), nullable=True)
     folder_name: Mapped[str] = mapped_column(String, default="")
-    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     root_folder: Mapped[RootFolder | None] = relationship(back_populates="series")
     issues: Mapped[list[Issue]] = relationship(
@@ -115,12 +145,22 @@ class SeriesSourceLink(Base):
 
 class Issue(Base):
     __tablename__ = "issues"
-    __table_args__ = (UniqueConstraint("series_id", "number"),)
+    __table_args__ = (
+        Index(
+            "ix_issues_series_comicvine",
+            "series_id",
+            "comicvine_id",
+            unique=True,
+            sqlite_where=text("comicvine_id IS NOT NULL"),
+        ),
+        Index("ix_issues_series_number", "series_id", "number"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     series_id: Mapped[int] = mapped_column(ForeignKey("series.id"))
     comicvine_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    number: Mapped[float] = mapped_column(Float)  # 10.5 etc.
+    number: Mapped[float] = mapped_column(Float)  # sortable numeric key
+    display_number: Mapped[str] = mapped_column(String, default="")  # raw ComicVine issue number
     # collected-volume (TPB) number this issue belongs to; only populated by
     # manual file mapping — ComicVine has no issue→TPB data
     volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -128,7 +168,7 @@ class Issue(Base):
     monitored: Mapped[bool] = mapped_column(Boolean, default=True)
     downloaded: Mapped[bool] = mapped_column(Boolean, default=False)
     file_path: Mapped[str] = mapped_column(String, default="")
-    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     series: Mapped[Series] = relationship(back_populates="issues")
 
@@ -165,9 +205,9 @@ class Download(Base):
     torrent_hash: Mapped[str] = mapped_column(String, default="")
     progress: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1
     error: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+        UTCDateTime(), default=utcnow, onupdate=utcnow
     )
 
     series: Mapped[Series | None] = relationship()
@@ -183,7 +223,7 @@ class HistoryEvent(Base):
     event: Mapped[str] = mapped_column(String)  # grabbed / imported / failed / deleted
     detail: Mapped[str] = mapped_column(Text, default="")
     source_name: Mapped[str] = mapped_column(String, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     series: Mapped[Series | None] = relationship()
     issue: Mapped[Issue | None] = relationship()

@@ -1,7 +1,9 @@
+from datetime import datetime
+
 import pytest
 
 from pullarr.jobs import tasks
-from pullarr.models import Issue, Series
+from pullarr.models import Download, Issue, Series
 from pullarr.sources.base import SourceRelease
 
 
@@ -91,6 +93,43 @@ async def test_grab_matches_skips_failed_pairs(monkeypatch):
         {tasks.normalize_title("Absolute Batman")},
         failed_pairs={(5, "getcomics")},
     )
+    assert count == 0
+    assert session.grabbed == []
+    assert set(remaining) == {5.0}
+
+
+def test_releasable_accepts_naive_sqlite_datetime():
+    issue = Issue(id=1, series_id=1, number=1.0, released_at=datetime(2026, 1, 1))
+    assert tasks._releasable(issue)
+
+
+def test_download_covered_issue_ids_expands_title_range():
+    dl = Download(id=1, issue_id=1, title="Absolute Batman #1-3 (2025)")
+    issues = [Issue(id=n, series_id=1, number=float(n)) for n in (1, 2, 3, 4)]
+
+    assert tasks._download_covered_issue_ids(dl, issues) == {1, 2, 3}
+
+
+@pytest.mark.asyncio
+async def test_grab_matches_skips_failed_release_payload(monkeypatch):
+    async def fake_enqueue(session, series, issue, source_name, external_id, title=""):
+        session.grabbed.append((issue.number, title))
+
+    monkeypatch.setattr(tasks, "enqueue_direct", fake_enqueue)
+
+    series = Series(id=1, title="Absolute Batman", alt_titles="")
+    issue = Issue(id=5, series_id=1, number=5.0)
+    remaining = {5.0: issue}
+    releases = [_release(5.0, "Absolute Batman #5 (2025)", ext_id="dead-url")]
+    session = Recorder()
+
+    count = await tasks._grab_matches(
+        session, series, "getcomics", releases, remaining,
+        {tasks.normalize_title("Absolute Batman")},
+        failed_pairs=set(),
+        failed_releases={("getcomics", "dead-url")},
+    )
+
     assert count == 0
     assert session.grabbed == []
     assert set(remaining) == {5.0}

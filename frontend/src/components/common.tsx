@@ -75,8 +75,8 @@ export function formatBytes(bytes: number): string {
   return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`;
 }
 
-export function issueLabel(number: number, _volume?: number | null): string {
-  const n = Number.isInteger(number) ? number.toString() : number.toFixed(1);
+export function issueLabel(number: number, _volume?: number | null, displayNumber?: string): string {
+  const n = displayNumber || (Number.isInteger(number) ? number.toString() : number.toFixed(1));
   return `#${n}`;
 }
 

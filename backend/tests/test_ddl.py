@@ -2,7 +2,7 @@ import httpx
 import pytest
 import respx
 
-from pullarr.download.ddl import download_release, filename_from_response
+from pullarr.download.ddl import DownloadCancelled, download_release, filename_from_response
 from pullarr.sources.base import DDLSource
 
 
@@ -108,6 +108,19 @@ async def test_download_release_raises_when_all_mirrors_fail(tmp_path):
 
     with pytest.raises(httpx.HTTPStatusError):
         await download_release(source, "https://getcomics.org/post", tmp_path)
+
+    assert not list(tmp_path.rglob("*.partial"))
+    assert not list(tmp_path.rglob("*.cbr"))
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_release_cancellation_cleans_payload(tmp_path):
+    source = FakeSource([["https://fs2.comicfiles.ru/x.cbr"]])
+
+    with pytest.raises(DownloadCancelled):
+        await download_release(source, "https://getcomics.org/post", tmp_path,
+                               cancel_cb=lambda: True)
 
     assert not list(tmp_path.rglob("*.partial"))
     assert not list(tmp_path.rglob("*.cbr"))

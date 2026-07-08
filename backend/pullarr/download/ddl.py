@@ -3,6 +3,9 @@ DDL source into a staging directory, ready for the shared archive importer."""
 
 import logging
 import re
+import shutil
+from collections.abc import Awaitable, Callable
+from inspect import isawaitable
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -14,6 +17,13 @@ from ..util import sanitize_filename
 log = logging.getLogger(__name__)
 
 FILENAME_RE = re.compile(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', re.I)
+
+ProgressCallback = Callable[[int, int], Awaitable[None] | None]
+CancelCallback = Callable[[], Awaitable[bool] | bool]
+
+
+class DownloadCancelled(RuntimeError):
+    pass
 
 
 def filename_from_response(resp: httpx.Response, fallback: str) -> str:
@@ -32,7 +42,8 @@ async def download_release(
     source: DDLSource,
     release_external_id: str,
     staging_dir: Path,
-    progress_cb=None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> Path:
     """Resolve a release's download options and stream one into a fresh
     subdirectory of staging_dir. Options (mirrors) are tried in order until one
@@ -52,7 +63,7 @@ async def download_release(
             for i, url in enumerate(parts, start=1):
                 done_total = await _fetch_file(
                     source.client, url, payload_dir, f"part{i}",
-                    progress_cb, done_total,
+                    progress_cb, cancel_cb, done_total,
                 )
         except (httpx.HTTPError, OSError) as exc:
             last_error = exc
@@ -60,12 +71,12 @@ async def download_release(
                         opt_index + 1, len(options), exc)
             continue
         except BaseException:
-            _clear_dir(payload_dir)  # cancellation etc. — leave nothing partial
+            shutil.rmtree(payload_dir, ignore_errors=True)  # cancellation etc. — leave nothing partial
             raise
         if any(payload_dir.iterdir()):
             return payload_dir
 
-    _clear_dir(payload_dir)
+    shutil.rmtree(payload_dir, ignore_errors=True)
     raise last_error or RuntimeError("no files downloaded")
 
 
@@ -79,9 +90,11 @@ async def _fetch_file(
     url: str,
     dest_dir: Path,
     fallback_name: str,
-    progress_cb,
+    progress_cb: ProgressCallback | None,
+    cancel_cb: CancelCallback | None,
     done_before: int,
 ) -> int:
+    await _raise_if_cancelled(cancel_cb)
     async with client.stream("GET", url) as resp:
         resp.raise_for_status()
         name = filename_from_response(resp, fallback_name)
@@ -91,10 +104,11 @@ async def _fetch_file(
         done = done_before
         with open(tmp, "wb") as fh:
             async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
+                await _raise_if_cancelled(cancel_cb)
                 fh.write(chunk)
                 done += len(chunk)
                 if progress_cb:
-                    progress_cb(done, done_before + total)
+                    await _maybe_await(progress_cb(done, done_before + total))
         tmp.replace(dest)
         log.info("Downloaded %s (%d bytes)", dest.name, dest.stat().st_size)
         return done
@@ -108,3 +122,18 @@ def _unique_dir(staging_dir: Path, seed: str) -> Path:
         n += 1
         candidate = staging_dir / f"{slug}-{n}"
     return candidate
+
+
+async def _maybe_await(result) -> None:
+    if isawaitable(result):
+        await result
+
+
+async def _raise_if_cancelled(cancel_cb: CancelCallback | None) -> None:
+    if cancel_cb is None:
+        return
+    cancelled = cancel_cb()
+    if isawaitable(cancelled):
+        cancelled = await cancelled
+    if cancelled:
+        raise DownloadCancelled("removed by user")

@@ -40,7 +40,7 @@ export default function Wanted() {
                       {w.series_title}
                     </Link>
                   </td>
-                  <td>{issueLabel(w.number, w.volume)}</td>
+                  <td>{issueLabel(w.number, w.volume, w.display_number)}</td>
                   <td style={{ color: "var(--text-dim)" }}>{w.title || "—"}</td>
                 </tr>
               ))}

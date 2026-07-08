@@ -26,6 +26,7 @@ class IssueOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     number: float
+    display_number: str
     volume: int | None
     title: str
     monitored: bool
@@ -180,6 +181,7 @@ class WantedItemOut(BaseModel):
     series_title: str
     cover_url: str
     number: float
+    display_number: str
     volume: int | None
     title: str
     released_at: datetime | None

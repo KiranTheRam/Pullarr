@@ -43,6 +43,13 @@ async def test_ensure_category_conflict_edits():
 
 
 @respx.mock
+async def test_ensure_category_raises_on_server_error():
+    respx.post(f"{BASE}/api/v2/torrents/createCategory").respond(500)
+    with pytest.raises(httpx.HTTPStatusError):
+        await client().ensure_category("pullarr", "/downloads/pullarr")
+
+
+@respx.mock
 async def test_add_magnet_sends_category_and_savepath():
     route = respx.post(f"{BASE}/api/v2/torrents/add").respond(200, text="Ok.")
     await client().add_magnet("magnet:?xt=urn:btih:abc", category="pullarr",

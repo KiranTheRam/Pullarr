@@ -14,6 +14,7 @@ export interface SourceLink {
 export interface Issue {
   id: number;
   number: number;
+  display_number: string;
   volume: number | null;
   title: string;
   monitored: boolean;
@@ -116,6 +117,7 @@ export interface WantedItem {
   series_title: string;
   cover_url: string;
   number: number;
+  display_number: string;
   volume: number | null;
   title: string;
   released_at: string | null;

@@ -6,10 +6,12 @@ never opens or writes files."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 
 from ..models import Issue
 from ..util import (
     has_issue_marker,
+    normalize_title,
     parse_issue_number,
     parse_issue_range,
     parse_volume_number,
@@ -98,10 +100,32 @@ def _media_of(path: Path, is_dir: bool) -> MediaFile:
                      volume_number=volume, issue_range=issue_range)
 
 
+def _plain_display_number(issue: Issue) -> bool:
+    raw = (issue.display_number or f"{issue.number:g}").strip()
+    return raw == "½" or re.fullmatch(r"\d+(?:\.\d+)?", raw) is not None
+
+
+def _pick_issue(mf: MediaFile, candidates: list[Issue]) -> Issue | None:
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        return None
+    stem = normalize_title(_name_source(mf.path, mf.is_dir))
+    matched = [
+        issue for issue in candidates
+        if issue.display_number
+        and not _plain_display_number(issue)
+        and normalize_title(issue.display_number) in stem
+    ]
+    return matched[0] if len(matched) == 1 else None
+
+
 def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
     """Match each media file to a issue (by number) or, for whole-volume
     archives, to every issue assigned to that volume."""
-    by_number = {c.number: c for c in issues}
+    by_number: dict[float, list[Issue]] = {}
+    for c in issues:
+        by_number.setdefault(c.number, []).append(c)
     issues_in_volume: dict[int, list[Issue]] = {}
     for c in issues:
         if c.volume is not None:
@@ -110,14 +134,18 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
     matched: list[MatchedFile] = []
     unmatched: list[MediaFile] = []
     for mf in media:
-        issue = by_number.get(mf.issue_number) if mf.issue_number is not None else None
+        issue = (
+            _pick_issue(mf, by_number.get(mf.issue_number, []))
+            if mf.issue_number is not None
+            else None
+        )
         if issue is not None:
             matched.append(MatchedFile(media=mf, issue=issue, volume=None,
                                        covered_issues=[issue]))
         elif mf.issue_range is not None:
             # a multi-issue bundle covers every tracked issue in its span
             lo, hi = mf.issue_range
-            covered = [c for c in issues if lo <= c.number <= hi]
+            covered = [c for c in issues if lo <= c.number <= hi and _plain_display_number(c)]
             matched.append(MatchedFile(media=mf, issue=None, volume=None,
                                        covered_issues=covered))
         elif mf.volume_number is not None and mf.volume_number in issues_in_volume:

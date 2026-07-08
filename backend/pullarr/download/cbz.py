@@ -12,7 +12,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 
 def build_comicinfo(
     series: str,
-    number: float | None = None,
+    number: float | str | None = None,
     volume: int | None = None,
     title: str = "",
     summary: str = "",
@@ -32,7 +32,10 @@ def build_comicinfo(
 
     add("Series", series)
     if number is not None:
-        add("Number", int(number) if float(number).is_integer() else number)
+        if isinstance(number, str):
+            add("Number", number)
+        else:
+            add("Number", int(number) if float(number).is_integer() else number)
     add("Volume", volume)
     add("Title", title)
     add("Summary", summary)

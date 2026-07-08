@@ -156,12 +156,14 @@ class GetComicsSource(DDLSource):
             proxy=proxy or None,
         )
 
-    def configure(self, base_url: str, proxy: str) -> None:
+    async def configure(self, base_url: str, proxy: str) -> None:
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         proxy = proxy.strip() or None
         if not self._external_client and proxy != self._proxy:
+            old_client = self._client
             self._proxy = proxy
             self._client = self._make_client(proxy)
+            await old_client.aclose()
 
     @property
     def client(self) -> httpx.AsyncClient:

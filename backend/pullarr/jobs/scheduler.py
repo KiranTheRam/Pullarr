@@ -13,7 +13,14 @@ scheduler = AsyncIOScheduler()
 
 async def start() -> None:
     async with session_scope() as session:
-        interval = int(await settings_service.get(session, "monitor_interval_minutes") or 15)
+        raw_interval = await settings_service.get(session, "monitor_interval_minutes") or "60"
+        try:
+            interval = settings_service.parse_monitor_interval(raw_interval)
+        except ValueError:
+            interval = settings_service.parse_monitor_interval(
+                settings_service.DEFAULTS["monitor_interval_minutes"]
+            )
+            log.warning("Invalid monitor interval %r; using %d min", raw_interval, interval)
 
     scheduler.add_job(
         process_direct_queue, "interval", seconds=10,

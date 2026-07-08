@@ -422,10 +422,10 @@ export default function SeriesDetail() {
                   title="Show filename on disk"
                   onClick={() => toggleReveal(`c${ch.id}`)}
                 >
-                  {issueLabel(ch.number, ch.volume)}
+                  {issueLabel(ch.number, ch.volume, ch.display_number)}
                 </button>
               ) : (
-                issueLabel(ch.number, ch.volume)
+                issueLabel(ch.number, ch.volume, ch.display_number)
               )}
               {revealed[`c${ch.id}`] && ch.file_path && (
                 <div className="filepath">{ch.file_path}</div>
@@ -450,7 +450,7 @@ export default function SeriesDetail() {
                 onClick={() =>
                   setSearch({
                     issueId: ch.id,
-                    title: `${series.title} ${issueLabel(ch.number, ch.volume)}`,
+                    title: `${series.title} ${issueLabel(ch.number, ch.volume, ch.display_number)}`,
                   })
                 }
               >
@@ -596,7 +596,7 @@ export default function SeriesDetail() {
                   </span>
                 ))}
             </div>
-            <div className="series-desc" dangerouslySetInnerHTML={{ __html: series.description }} />
+            <div className="series-desc">{series.description}</div>
             <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
               {series.source_links.map((sl) => (
                 <span className="tag" key={sl.id} title={sl.external_title}>

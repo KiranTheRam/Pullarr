@@ -21,7 +21,8 @@ class SeriesMetadata:
 @dataclass
 class IssueMetadata:
     provider_id: str  # the issue's id at the provider
-    number: float
+    number: float  # sortable numeric key used for matching when unambiguous
+    display_number: str = ""  # provider's original issue number label
     title: str = ""
     released_at: datetime | None = None
     cover_url: str = ""

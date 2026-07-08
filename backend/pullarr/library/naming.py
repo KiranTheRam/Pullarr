@@ -12,11 +12,13 @@ DEFAULT_TEMPLATE = "{series} #{issue:03d}"
 _ISSUE_FMT = re.compile(r"\{issue:0(\d+)d?\}")
 
 
-def _format_issue(template: str, issue: float) -> str:
+def _format_issue(template: str, issue: float | str) -> str:
     """Renders {issue:03d} as zero-padded but keeping half-issues readable:
     12 → 012, 12.5 → 012.5"""
 
     def repl(m: re.Match) -> str:
+        if isinstance(issue, str):
+            return issue
         width = int(m.group(1))
         if float(issue).is_integer():
             return f"{int(issue):0{width}d}"
@@ -28,7 +30,7 @@ def _format_issue(template: str, issue: float) -> str:
 def issue_filename(
     template: str,
     series_title: str,
-    issue: float,
+    issue: float | str,
     title: str = "",
     year: int | None = None,
     ext: str = ".cbz",

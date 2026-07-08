@@ -90,3 +90,14 @@ class TestApplyCleanup:
         assert result.skipped == 1
         assert only.exists()
         assert i.file_path == str(only)
+
+    def test_refuses_to_delete_path_outside_scanned_media(self, tmp_path):
+        folder = tmp_path / "Saga (2012)"
+        folder.mkdir()
+        outside = tmp_path / "outside.cbz"
+        outside.write_bytes(b"x")
+
+        result = apply_cleanup(series(), [issue(1, 3)], [folder], [str(outside)])
+
+        assert result.skipped == 1
+        assert outside.exists()

@@ -92,3 +92,15 @@ class TestMatchFiles:
         mf = find_media_files(tmp_path)[0]
         assert mf.issue_number is None
         assert mf.issue_range == (1.0, 3.0)
+
+    def test_duplicate_numeric_issue_stays_unmatched_when_ambiguous(self, tmp_path):
+        tracked = [
+            Issue(id=1, series_id=1, number=1.0, display_number="1"),
+            Issue(id=2, series_id=1, number=1.0, display_number="1.MU"),
+        ]
+        touch(tmp_path / "Series #001.cbz")
+
+        res = match_files(find_media_files(tmp_path), tracked)
+
+        assert res.matched == []
+        assert [m.path.name for m in res.unmatched] == ["Series #001.cbz"]

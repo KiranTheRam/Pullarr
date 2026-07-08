@@ -57,13 +57,22 @@ class QbtClient:
             raise QbtError(f"qBittorrent login failed: HTTP {resp.status_code} {resp.text[:100]}")
         self._logged_in = True
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        allowed_statuses: set[int] | None = None,
+        **kwargs,
+    ) -> httpx.Response:
         if not self._logged_in:
             await self._login()
         resp = await self._client.request(method, f"{self.base_url}/api/v2{path}", **kwargs)
         if resp.status_code == 403:
             await self._login()
             resp = await self._client.request(method, f"{self.base_url}/api/v2{path}", **kwargs)
+        if allowed_statuses and resp.status_code in allowed_statuses:
+            return resp
         resp.raise_for_status()
         return resp
 
@@ -84,14 +93,9 @@ class QbtClient:
         data = {"category": name}
         if save_path:
             data["savePath"] = save_path
-        resp = await self._client.request(
-            "POST", f"{self.base_url}/api/v2/torrents/createCategory", data=data
+        resp = await self._request(
+            "POST", "/torrents/createCategory", data=data, allowed_statuses={409}
         )
-        if resp.status_code == 403:
-            await self._login()
-            resp = await self._client.request(
-                "POST", f"{self.base_url}/api/v2/torrents/createCategory", data=data
-            )
         # 409/Conflict means it already exists — set its path instead
         if resp.status_code == 409 and save_path:
             await self._request("POST", "/torrents/editCategory", data=data)

@@ -25,7 +25,14 @@ initClient()
     );
   })
   .catch((err) => {
-    document.getElementById("root")!.innerHTML =
-      `<div style="padding:40px;font-family:sans-serif;color:#e1e2e6">
-        <h2>Pullarr backend unreachable</h2><p>${err.message}</p></div>`;
+    const root = document.getElementById("root")!;
+    root.textContent = "";
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "padding:40px;font-family:sans-serif;color:#e1e2e6";
+    const title = document.createElement("h2");
+    title.textContent = "Pullarr backend unreachable";
+    const message = document.createElement("p");
+    message.textContent = err.message;
+    wrap.append(title, message);
+    root.append(wrap);
   });

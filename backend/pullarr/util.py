@@ -196,3 +196,22 @@ def normalize_title(title: str) -> str:
     t = title.lower()
     t = re.sub(r"[^a-z0-9]+", " ", t)
     return re.sub(r"\s+", " ", t).strip()
+
+
+def as_utc(value: datetime) -> datetime:
+    """Return a timezone-aware UTC datetime.
+
+    SQLite can round-trip aware datetimes as naive values; the app stores all
+    persisted datetimes as UTC, so naive values are interpreted as UTC.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def is_released(value: datetime | None, now: datetime | None = None) -> bool:
+    """True when an issue date is due for grabbing/listing as wanted."""
+    if value is None:
+        return True
+    current = as_utc(now or datetime.now(timezone.utc))
+    return as_utc(value) <= current

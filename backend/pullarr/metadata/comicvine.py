@@ -38,7 +38,7 @@ class ComicVineError(RuntimeError):
 def _clean_html(text: str | None) -> str:
     if not text:
         return ""
-    return html.unescape(TAG_RE.sub("", text)).strip()
+    return TAG_RE.sub("", html.unescape(text)).strip()
 
 
 def _parse_date(value: str | None) -> datetime | None:
@@ -60,6 +60,44 @@ def parse_issue_number(value: str | None) -> float | None:
         return 0.5
     m = re.match(r"^(\d+(?:\.\d+)?)", value)
     return float(m.group(1)) if m else None
+
+
+def _plain_numeric_label(value: str) -> bool:
+    return value == "½" or re.fullmatch(r"\d+(?:\.\d+)?", value) is not None
+
+
+def _next_available(base: float, used: set[float]) -> float:
+    n = 1
+    candidate = base
+    while candidate in used:
+        candidate = round(base + (n / 1000), 3)
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
+def _assign_sort_numbers(raw_numbers: list[str]) -> list[float]:
+    parsed = [parse_issue_number(raw) for raw in raw_numbers]
+    plain_bases = {
+        number
+        for raw, number in zip(raw_numbers, parsed)
+        if number is not None and _plain_numeric_label(raw)
+    }
+    max_numeric = max((n for n in parsed if n is not None), default=0.0)
+    used: set[float] = set()
+    special_base = max_numeric + 1.0
+    sort_numbers: list[float] = []
+    for raw, number in zip(raw_numbers, parsed):
+        if number is None:
+            sort_numbers.append(_next_available(special_base, used))
+            special_base = sort_numbers[-1] + 0.001
+            continue
+        if number in used or (number in plain_bases and not _plain_numeric_label(raw)):
+            sort_numbers.append(_next_available(number + 0.001, used))
+            continue
+        used.add(number)
+        sort_numbers.append(number)
+    return sort_numbers
 
 
 class ComicVineProvider(MetadataProvider):
@@ -137,7 +175,7 @@ class ComicVineProvider(MetadataProvider):
         return self._to_metadata(result) if result else None
 
     async def list_issues(self, provider_id: str) -> list[IssueMetadata]:
-        issues: list[IssueMetadata] = []
+        raw_items: list[dict] = []
         offset = 0
         while True:
             data = await self._get("issues", {
@@ -147,23 +185,25 @@ class ComicVineProvider(MetadataProvider):
                 "offset": offset,
             })
             page = data.get("results") or []
-            for item in page:
-                number = parse_issue_number(item.get("issue_number"))
-                if number is None:
-                    continue
-                image = item.get("image") or {}
-                issues.append(IssueMetadata(
-                    provider_id=str(item.get("id") or ""),
-                    number=number,
-                    title=item.get("name") or "",
-                    released_at=_parse_date(item.get("store_date"))
-                    or _parse_date(item.get("cover_date")),
-                    cover_url=image.get("small_url") or "",
-                ))
+            raw_items.extend(page)
             offset += len(page)
             if offset >= int(data.get("number_of_total_results") or 0) or not page:
                 break
-        issues.sort(key=lambda i: i.number)
+        raw_numbers = [str(item.get("issue_number") or "").strip() for item in raw_items]
+        sort_numbers = _assign_sort_numbers(raw_numbers)
+        issues: list[IssueMetadata] = []
+        for item, number, display_number in zip(raw_items, sort_numbers, raw_numbers):
+            image = item.get("image") or {}
+            issues.append(IssueMetadata(
+                provider_id=str(item.get("id") or ""),
+                number=number,
+                display_number=display_number or str(number),
+                title=item.get("name") or "",
+                released_at=_parse_date(item.get("store_date"))
+                or _parse_date(item.get("cover_date")),
+                cover_url=image.get("small_url") or "",
+            ))
+        issues.sort(key=lambda i: (i.number, i.display_number))
         return issues
 
 

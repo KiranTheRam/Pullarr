@@ -37,6 +37,39 @@ DEFAULTS: dict[str, str] = {
 SECRET_KEYS = {"comicvine_api_key", "qbittorrent_password"}
 
 
+def parse_monitor_interval(value: str) -> int:
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Monitor interval must be a whole number of minutes") from exc
+    if minutes < 1:
+        raise ValueError("Monitor interval must be at least 1 minute")
+    if minutes > 10080:
+        raise ValueError("Monitor interval must be no more than 10080 minutes")
+    return minutes
+
+
+def validate_updates(values: dict[str, str]) -> dict[str, str]:
+    from .library.naming import issue_filename
+
+    cleaned: dict[str, str] = {}
+    for key, value in values.items():
+        if key not in DEFAULTS:
+            continue
+        value = "" if value is None else str(value)
+        if key == "monitor_interval_minutes":
+            value = str(parse_monitor_interval(value))
+        elif key == "naming_template":
+            try:
+                issue_filename(value, "Series", 1.0, "Issue Title", 2024)
+            except Exception as exc:
+                raise ValueError(f"Invalid naming template: {exc}") from exc
+        elif key == "qbittorrent_category" and not value.strip():
+            raise ValueError("qBittorrent category cannot be empty")
+        cleaned[key] = value
+    return cleaned
+
+
 async def get_all(session: AsyncSession) -> dict[str, str]:
     rows = (await session.execute(select(Setting))).scalars().all()
     values = dict(DEFAULTS)
@@ -52,9 +85,7 @@ async def get(session: AsyncSession, key: str) -> str:
 
 
 async def set_many(session: AsyncSession, values: dict[str, str]) -> None:
-    for key, value in values.items():
-        if key not in DEFAULTS:
-            continue
+    for key, value in validate_updates(values).items():
         row = await session.get(Setting, key)
         if row is None:
             session.add(Setting(key=key, value=value))

@@ -20,7 +20,7 @@ async def apply_settings(session: AsyncSession) -> dict[str, str]:
     settings dict."""
     values = await settings_service.get_all(session)
     comicvine_provider.configure(values["comicvine_api_key"])
-    getcomics_source.configure(
+    await getcomics_source.configure(
         base_url=values["getcomics_base_url"],
         proxy=values["getcomics_proxy"],
     )

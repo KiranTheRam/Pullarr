@@ -5,7 +5,7 @@ monitor loop."""
 import logging
 import re
 import shutil
-from datetime import datetime, timezone
+import time
 from pathlib import Path
 
 from sqlalchemy import select
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import config
 from ..db import session_scope
-from ..download.ddl import download_release
+from ..download.ddl import DownloadCancelled, download_release
 from ..download.qbittorrent import QbtClient
 from ..library.importer import import_payload
 from ..metadata.comicvine import derive_status, provider as comicvine
@@ -29,7 +29,7 @@ from ..models import (
 )
 from ..sources import registry
 from ..sources.base import SourceRelease
-from ..util import normalize_title, strip_issue_suffix
+from ..util import is_released, normalize_title, parse_issue_range, strip_issue_suffix
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,16 @@ BTIH_RE = re.compile(r"btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})")
 # per-series cap on targeted per-issue searches in one monitor pass, so a
 # freshly added long series doesn't hammer the source
 ISSUE_SEARCH_CAP = 5
+
+_cancelled_downloads: set[int] = set()
+
+
+def cancel_downloads(ids: list[int]) -> None:
+    _cancelled_downloads.update(ids)
+
+
+def _is_cancelled(download_id: int) -> bool:
+    return download_id in _cancelled_downloads
 
 
 # ---------------------------------------------------------------- metadata
@@ -56,6 +66,7 @@ async def refresh_series_metadata(session: AsyncSession, series: Series) -> None
     series.cover_url = meta.cover_url
     series.genres = ",".join(meta.genres)
     series.total_issues = meta.total_issues
+    series.sort_title = meta.title.lower()
     await session.commit()
 
 
@@ -64,14 +75,33 @@ async def update_issues(session: AsyncSession, series: Series) -> int:
     if not series.comicvine_id:
         return 0
     issue_meta = await comicvine.list_issues(str(series.comicvine_id))
-    existing = {i.number: i for i in series.issues}
+    by_comicvine = {i.comicvine_id: i for i in series.issues if i.comicvine_id is not None}
+    by_display = {
+        (i.display_number or f"{i.number:g}"): i
+        for i in series.issues
+        if i.display_number or i.comicvine_id is None
+    }
+    by_number: dict[float, list[Issue]] = {}
+    for issue in series.issues:
+        by_number.setdefault(issue.number, []).append(issue)
     added = 0
     for im in issue_meta:
-        issue = existing.get(im.number)
+        comicvine_id = int(im.provider_id) if im.provider_id else None
+        display_number = im.display_number or f"{im.number:g}"
+        issue = by_comicvine.get(comicvine_id) if comicvine_id is not None else None
+        if issue is None:
+            issue = by_display.get(display_number)
+        if issue is None:
+            # Last-resort compatibility for old rows without provider/display
+            # identity. Only use the numeric key when it is unambiguous.
+            candidates = by_number.get(im.number, [])
+            if len(candidates) == 1 and not candidates[0].display_number:
+                issue = candidates[0]
         if issue is None:
             issue = Issue(
-                comicvine_id=int(im.provider_id) if im.provider_id else None,
+                comicvine_id=comicvine_id,
                 number=im.number,
+                display_number=display_number,
                 title=im.title,
                 released_at=im.released_at,
                 monitored=series.monitored,
@@ -79,15 +109,20 @@ async def update_issues(session: AsyncSession, series: Series) -> int:
             # append via the relationship so series.issues is current for
             # the scan/grab logic later in this same pass
             series.issues.append(issue)
-            existing[im.number] = issue
+            if comicvine_id is not None:
+                by_comicvine[comicvine_id] = issue
+            by_display[display_number] = issue
+            by_number.setdefault(im.number, []).append(issue)
             added += 1
         else:
+            issue.number = im.number
+            issue.display_number = display_number
             if not issue.title and im.title:
                 issue.title = im.title
             if issue.released_at is None and im.released_at is not None:
                 issue.released_at = im.released_at
-            if issue.comicvine_id is None and im.provider_id:
-                issue.comicvine_id = int(im.provider_id)
+            if issue.comicvine_id is None and comicvine_id is not None:
+                issue.comicvine_id = comicvine_id
     # ComicVine volumes carry no status — derive it from issue recency
     series.status = SeriesStatus(derive_status(issue_meta, series.total_issues))
     await session.commit()
@@ -369,21 +404,47 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
     dl.status = DownloadStatus.DOWNLOADING
     await session.commit()
 
-    def on_progress(done: int, total: int) -> None:
+    last_progress_commit = 0.0
+
+    async def on_progress(done: int, total: int) -> None:
+        nonlocal last_progress_commit
         if total > 0:
             dl.progress = min(done / total, 1.0)
+        now = time.monotonic()
+        if now - last_progress_commit >= 1.0 or dl.progress >= 1.0:
+            last_progress_commit = now
+            await session.commit()
+
+    def should_cancel() -> bool:
+        return _is_cancelled(dl.id)
 
     payload_dir: Path | None = None
     try:
         payload_dir = await download_release(
-            source, dl.payload, _staging_dir(values), progress_cb=on_progress
+            source, dl.payload, _staging_dir(values),
+            progress_cb=on_progress, cancel_cb=should_cancel,
         )
+        await session.refresh(dl)
+        if dl.status == DownloadStatus.FAILED or _is_cancelled(dl.id):
+            dl.status = DownloadStatus.FAILED
+            dl.error = dl.error or "removed by user"
+            await session.commit()
+            return
         dl.status = DownloadStatus.IMPORTING
         await session.commit()
         imported = import_payload(
             payload_dir, series, list(series.issues), Path(root),
             values["naming_template"], force_issue=issue, move=True,
         )
+    except DownloadCancelled as exc:
+        dl.status = DownloadStatus.FAILED
+        dl.error = str(exc)[:500]
+        session.add(HistoryEvent(
+            series_id=series.id, issue_id=issue.id if issue else None, event="failed",
+            source_name=dl.source_name, detail=dl.error,
+        ))
+        await session.commit()
+        return
     except Exception as exc:
         log.exception("DDL download %d failed", dl.id)
         dl.status = DownloadStatus.FAILED
@@ -395,6 +456,7 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
         await session.commit()
         return
     finally:
+        _cancelled_downloads.discard(dl.id)
         if payload_dir is not None:
             shutil.rmtree(payload_dir, ignore_errors=True)
 
@@ -498,9 +560,22 @@ async def _import_torrent(
 
 def _releasable(issue: Issue) -> bool:
     """Only hunt issues that are actually out (or undated)."""
-    if issue.released_at is None:
-        return True
-    return issue.released_at <= datetime.now(timezone.utc)
+    return is_released(issue.released_at)
+
+
+def _download_covered_issue_ids(download: Download, issues: list[Issue]) -> set[int] | None:
+    """Issue ids reserved by an active download.
+
+    None means a series-level pack is in flight and coverage is unknown.
+    """
+    if download.issue_id is None:
+        return None
+    covered = {download.issue_id}
+    issue_range = parse_issue_range(download.title)
+    if issue_range is not None:
+        lo, hi = issue_range
+        covered.update(issue.id for issue in issues if lo <= issue.number <= hi)
+    return covered
 
 
 async def grab_missing_issues(
@@ -516,20 +591,23 @@ async def grab_missing_issues(
     search uses `False` because it is an explicit user action."""
     # active downloads for this series → don't double-grab
     result = await session.execute(
-        select(Download.issue_id).where(
+        select(Download).where(
             Download.series_id == series.id,
             Download.status.in_([DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING,
                                  DownloadStatus.IMPORTING]),
         )
     )
-    active = {row[0] for row in result.all()}
-    if None in active:
-        # a series-level download (a pack/TPB) is in flight — its issue
-        # coverage is unknown until it imports, so grabbing per-issue now
-        # would duplicate everything
-        log.info("monitor: %r has a series-level download in flight; skipping grabs",
-                 series.title)
-        return 0
+    active: set[int] = set()
+    for dl in result.scalars().all():
+        covered = _download_covered_issue_ids(dl, list(series.issues))
+        if covered is None:
+            # a series-level download (a pack/TPB) is in flight — its issue
+            # coverage is unknown until it imports, so grabbing per-issue now
+            # would duplicate everything
+            log.info("monitor: %r has a series-level download in flight; skipping grabs",
+                     series.title)
+            return 0
+        active.update(covered)
     wanted = [
         i for i in series.issues
         if (i.monitored or not only_monitored) and not i.downloaded and i.id not in active
@@ -541,13 +619,15 @@ async def grab_missing_issues(
     # a release that already failed from a source shouldn't be retried there
     # (dead links etc.)
     result = await session.execute(
-        select(Download.issue_id, Download.source_name).where(
+        select(Download).where(
             Download.series_id == series.id,
             Download.status == DownloadStatus.FAILED,
             Download.issue_id.isnot(None),
         )
     )
-    failed_pairs = {(iid, name) for iid, name in result.all()}
+    failed_downloads = result.scalars().all()
+    failed_pairs = {(dl.issue_id, dl.source_name) for dl in failed_downloads if dl.issue_id is not None}
+    failed_releases = {(dl.source_name, dl.payload) for dl in failed_downloads if dl.payload}
 
     links = {sl.source_name: sl for sl in series.source_links}
     wanted_titles = {nt for t in _titles_of(series) if (nt := normalize_title(t))}
@@ -568,21 +648,23 @@ async def grab_missing_issues(
             log.warning("monitor: %s list failed for %r: %s", src.name, series.title, exc)
             continue
         queued += await _grab_matches(session, series, src.name, releases,
-                                      remaining, wanted_titles, failed_pairs)
+                                      remaining, wanted_titles, failed_pairs,
+                                      failed_releases)
 
         # targeted per-issue searches for stragglers (older issues that fell
         # off the recent-posts pages), capped per pass
         for issue in list(remaining.values())[:ISSUE_SEARCH_CAP]:
             if (issue.id, src.name) in failed_pairs:
                 continue
-            query = f"{link.external_id} {issue.number:g}"
+            query = f"{link.external_id} {issue.display_number or f'{issue.number:g}'}"
             try:
                 results = await src.search_releases(query)
             except Exception as exc:
                 log.warning("monitor: %s search %r failed: %s", src.name, query, exc)
                 continue
             queued += await _grab_matches(session, series, src.name, results,
-                                          remaining, wanted_titles, failed_pairs)
+                                          remaining, wanted_titles, failed_pairs,
+                                          failed_releases)
     if queued:
         log.info("Queued %d missing issue(s) for %r", queued, series.title)
     return queued
@@ -621,12 +703,16 @@ async def _grab_matches(
     remaining: dict[float, Issue],
     wanted_titles: set[str],
     failed_pairs: set[tuple[int, str]],
+    failed_releases: set[tuple[str, str]] | None = None,
 ) -> int:
     """Enqueue every release that matches a still-wanted issue. A multi-issue
     bundle ("#1-3") is grabbed once and covers all wanted issues in its span.
     Returns the number of downloads queued."""
     queued = 0
+    failed_releases = failed_releases or set()
     for r in releases:
+        if (source_name, r.external_id) in failed_releases:
+            continue
         if r.issue_number is None:
             continue
         if not _release_matches_series(r, wanted_titles):

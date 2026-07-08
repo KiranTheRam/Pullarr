@@ -27,14 +27,17 @@ async def update_settings(
 ) -> dict[str, str]:
     # ignore masked secrets that the user did not change
     to_save = {k: v for k, v in body.items() if v != MASK}
-    await settings_service.set_many(session, to_save)
+    try:
+        await settings_service.set_many(session, to_save)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     # apply a changed monitor interval immediately (no restart needed)
     if "monitor_interval_minutes" in to_save:
         from ..jobs.scheduler import reschedule_monitor
 
         try:
-            reschedule_monitor(int(to_save["monitor_interval_minutes"]))
-        except (ValueError, TypeError):
+            reschedule_monitor(settings_service.parse_monitor_interval(to_save["monitor_interval_minutes"]))
+        except ValueError:
             pass
     return await get_settings(session)
 
