@@ -162,6 +162,49 @@ def parse_issue_number(text: str) -> float | None:
     return None
 
 
+# Same marker forms as ISSUE_PREFIX_PATTERN but keeping a variant suffix
+# ("#78.BEY", "#16.HU") that the numeric pattern stops before.
+ISSUE_LABEL_PATTERN = re.compile(
+    r"(?:#[ ]?|(?<![a-z])(?:no|issue)[ ._]{0,2})(\d+(?:\.[a-z0-9]+)?)", re.I
+)
+_PLAIN_LABEL = re.compile(r"\d+(?:\.\d+)?$")
+
+
+def parse_issue_label(text: str) -> str | None:
+    """The full issue token after an explicit marker, lowercased and keeping
+    variant suffixes: "#78.BEY" → "78.bey" (parse_issue_number reads 78)."""
+    m = ISSUE_LABEL_PATTERN.search(text)
+    return m.group(1).lower() if m else None
+
+
+def release_covers_issue(release, issue) -> bool:
+    """Whether a source release provides this specific issue.
+
+    Beyond the numeric span check, two guards keep lookalikes apart:
+    variant point issues ("#78.BEY") match only on the exact display number
+    (their sort number is synthetic, and a plain "#78" is a different issue);
+    and when both sides carry a year they must be within a year of each
+    other, so a relaunch reusing the same numbers (a later series' "#73")
+    can't satisfy an older series' #73.
+    """
+    if (
+        release.year is not None
+        and issue.released_at is not None
+        and abs(release.year - issue.released_at.year) > 1
+    ):
+        return False
+    display = (issue.display_number or "").strip().lower()
+    label = parse_issue_label(release.title)
+    issue_is_variant = bool(display) and _PLAIN_LABEL.fullmatch(display) is None
+    release_is_variant = label is not None and _PLAIN_LABEL.fullmatch(label) is None
+    if issue_is_variant or release_is_variant:
+        return label == display
+    if release.issue_number is None:
+        return False
+    hi = release.issue_end if release.issue_end is not None else release.issue_number
+    return release.issue_number <= issue.number <= hi
+
+
 def parse_volume_number(text: str) -> int | None:
     m = VOLUME_PATTERN.search(text)
     if m:
@@ -192,10 +235,13 @@ def strip_issue_suffix(title: str) -> str:
 
 
 def normalize_title(title: str) -> str:
-    """Loose normalization for cross-source title matching."""
+    """Loose normalization for cross-source title matching. A leading "The"
+    is dropped because sources disagree on it (ComicVine's "The Amazing
+    Spider-Man" is posted on GetComics as "Amazing Spider-Man")."""
     t = title.lower()
     t = re.sub(r"[^a-z0-9]+", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    return re.sub(r"^the ", "", t) or t
 
 
 def as_utc(value: datetime) -> datetime:

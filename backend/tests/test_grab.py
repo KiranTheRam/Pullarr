@@ -7,10 +7,10 @@ from pullarr.models import Download, Issue, Series
 from pullarr.sources.base import SourceRelease
 
 
-def _release(number, title, ext_id="url", end=None):
+def _release(number, title, ext_id="url", end=None, year=None):
     return SourceRelease(
         source_name="getcomics", external_id=ext_id, title=title,
-        issue_number=number, issue_end=end,
+        issue_number=number, issue_end=end, year=year,
     )
 
 
@@ -96,6 +96,71 @@ async def test_grab_matches_skips_failed_pairs(monkeypatch):
     assert count == 0
     assert session.grabbed == []
     assert set(remaining) == {5.0}
+
+
+@pytest.mark.asyncio
+async def test_grab_matches_leading_article_and_relaunch_year(monkeypatch):
+    """The ComicVine title carries a leading "The" that GetComics posts drop,
+    and a relaunched series reusing the same issue numbers must not match."""
+    async def fake_enqueue(session, series, issue, source_name, external_id, title=""):
+        session.grabbed.append((issue.number, title))
+
+    monkeypatch.setattr(tasks, "enqueue_direct", fake_enqueue)
+
+    series = Series(id=1, title="The Amazing Spider-Man", alt_titles="")
+    remaining = {
+        73.0: Issue(id=73, series_id=1, number=73.0, display_number="73",
+                    released_at=datetime(2021, 8, 1)),
+        74.0: Issue(id=74, series_id=1, number=74.0, display_number="74",
+                    released_at=datetime(2021, 9, 1)),
+    }
+    wanted = {tasks.normalize_title("The Amazing Spider-Man")}
+    releases = [
+        # the real post: no "The", cover year matches the issue
+        _release(73.0, "Amazing Spider-Man #73 (2021)", year=2021),
+        # a later relaunch reusing the number — year rules it out
+        _release(74.0, "The Amazing Spider-Man #74 (2028)", ext_id="url2", year=2028),
+    ]
+    session = Recorder()
+
+    count = await tasks._grab_matches(session, series, "getcomics", releases,
+                                      remaining, wanted, failed_pairs=set())
+
+    assert count == 1
+    assert session.grabbed == [(73.0, "Amazing Spider-Man #73 (2021)")]
+    assert set(remaining) == {74.0}
+
+
+@pytest.mark.asyncio
+async def test_grab_matches_variant_issue_display_number(monkeypatch):
+    """A "#78.BEY" post is a different issue than "#78": it must not satisfy
+    the plain issue, and the variant issue is matched by display number."""
+    async def fake_enqueue(session, series, issue, source_name, external_id, title=""):
+        session.grabbed.append((issue.number, title))
+
+    monkeypatch.setattr(tasks, "enqueue_direct", fake_enqueue)
+
+    series = Series(id=1, title="The Amazing Spider-Man", alt_titles="")
+    remaining = {
+        78.0: Issue(id=78, series_id=1, number=78.0, display_number="78"),
+        78.001: Issue(id=79, series_id=1, number=78.001, display_number="78.BEY"),
+    }
+    wanted = {tasks.normalize_title("The Amazing Spider-Man")}
+    releases = [
+        _release(78.0, "Amazing Spider-Man #78.BEY (2021)", ext_id="url-bey"),
+        _release(78.0, "Amazing Spider-Man #78 (2021)", ext_id="url-plain"),
+    ]
+    session = Recorder()
+
+    count = await tasks._grab_matches(session, series, "getcomics", releases,
+                                      remaining, wanted, failed_pairs=set())
+
+    assert count == 2
+    assert sorted(session.grabbed) == [
+        (78.0, "Amazing Spider-Man #78 (2021)"),
+        (78.001, "Amazing Spider-Man #78.BEY (2021)"),
+    ]
+    assert remaining == {}
 
 
 def test_releasable_accepts_naive_sqlite_datetime():

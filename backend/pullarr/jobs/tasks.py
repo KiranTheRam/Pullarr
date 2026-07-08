@@ -29,7 +29,13 @@ from ..models import (
 )
 from ..sources import registry
 from ..sources.base import SourceRelease
-from ..util import is_released, normalize_title, parse_issue_range, strip_issue_suffix
+from ..util import (
+    is_released,
+    normalize_title,
+    parse_issue_range,
+    release_covers_issue,
+    strip_issue_suffix,
+)
 
 log = logging.getLogger(__name__)
 
@@ -296,7 +302,7 @@ async def find_release_for_issue(
             log.warning("list_releases failed on %s: %s", src.name, exc)
             continue
         for r in releases:
-            if r.issue_number == issue.number and _release_matches_series(r, wanted_titles):
+            if release_covers_issue(r, issue) and _release_matches_series(r, wanted_titles):
                 return src.name, r
     return None
 
@@ -713,16 +719,13 @@ async def _grab_matches(
     for r in releases:
         if (source_name, r.external_id) in failed_releases:
             continue
-        if r.issue_number is None:
-            continue
         if not _release_matches_series(r, wanted_titles):
             continue
-        # issues this release would satisfy: a single number, or a whole span
-        hi = r.issue_end if r.issue_end is not None else r.issue_number
+        # issues this release would satisfy: a single number, a whole span,
+        # or a variant point issue matched by display number
         covered = [
-            remaining[n] for n in list(remaining)
-            if r.issue_number <= n <= hi
-            and (remaining[n].id, source_name) not in failed_pairs
+            i for i in remaining.values()
+            if (i.id, source_name) not in failed_pairs and release_covers_issue(r, i)
         ]
         if not covered:
             continue

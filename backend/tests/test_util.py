@@ -1,10 +1,16 @@
+from datetime import datetime
+
+from pullarr.models import Issue
+from pullarr.sources.base import SourceRelease
 from pullarr.util import (
     has_issue_marker,
     normalize_title,
+    parse_issue_label,
     parse_issue_number,
     parse_issue_range,
     parse_volume_number,
     parse_year,
+    release_covers_issue,
     sanitize_filename,
     strip_issue_suffix,
 )
@@ -119,5 +125,92 @@ class TestNormalizeAndSanitize:
     def test_normalize(self):
         assert normalize_title("Batman: The Long Halloween!") == "batman the long halloween"
 
+    def test_leading_article_dropped(self):
+        # GetComics posts "Amazing Spider-Man"; ComicVine titles it with "The"
+        assert normalize_title("The Amazing Spider-Man") == normalize_title(
+            "Amazing Spider-Man"
+        )
+
+    def test_inner_article_kept(self):
+        assert normalize_title("Batman: The Long Halloween") != normalize_title(
+            "Batman Long Halloween"
+        )
+
+    def test_bare_article_survives(self):
+        assert normalize_title("The") == "the"
+
     def test_sanitize(self):
         assert sanitize_filename('Spider-Man: No Way Home?') == "Spider-Man No Way Home"
+
+
+class TestParseIssueLabel:
+    def test_plain(self):
+        assert parse_issue_label("Absolute Batman #15 (2025)") == "15"
+
+    def test_variant_suffix_kept(self):
+        assert parse_issue_label("Amazing Spider-Man #78.BEY (2021)") == "78.bey"
+
+    def test_fractional(self):
+        assert parse_issue_label("Spawn #10.5") == "10.5"
+
+    def test_no_marker(self):
+        assert parse_issue_label("Amazing Spider-Man 078 (2021)") is None
+
+
+def _release(title, number="auto", end=None, year=None):
+    return SourceRelease(
+        source_name="getcomics", external_id="url", title=title,
+        issue_number=parse_issue_number(title) if number == "auto" else number,
+        issue_end=end,
+        year=year if year is not None else parse_year(title),
+    )
+
+
+class TestReleaseCoversIssue:
+    def test_plain_number_matches(self):
+        issue = Issue(id=1, series_id=1, number=73.0, display_number="73",
+                      released_at=datetime(2021, 8, 1))
+        assert release_covers_issue(_release("Amazing Spider-Man #73 (2021)"), issue)
+
+    def test_span_covers_issue(self):
+        issue = Issue(id=1, series_id=1, number=2.0, display_number="2")
+        assert release_covers_issue(_release("Saga #1 – 3 (2013)", number=1.0, end=3.0), issue)
+
+    def test_variant_release_rejected_for_plain_issue(self):
+        issue = Issue(id=1, series_id=1, number=78.0, display_number="78",
+                      released_at=datetime(2021, 11, 1))
+        assert not release_covers_issue(_release("Amazing Spider-Man #78.BEY (2021)"), issue)
+
+    def test_variant_issue_matched_by_display_number(self):
+        # the variant's sort number is synthetic (78.001), not in the span
+        issue = Issue(id=1, series_id=1, number=78.001, display_number="78.BEY",
+                      released_at=datetime(2021, 11, 1))
+        assert release_covers_issue(_release("Amazing Spider-Man #78.BEY (2021)"), issue)
+
+    def test_plain_release_rejected_for_variant_issue(self):
+        issue = Issue(id=1, series_id=1, number=78.001, display_number="78.BEY")
+        assert not release_covers_issue(_release("Amazing Spider-Man #78 (2021)"), issue)
+
+    def test_relaunch_year_mismatch_rejected(self):
+        # the 2018 series' #73 came out in 2021; a later relaunch reusing the
+        # number must not satisfy it
+        issue = Issue(id=1, series_id=1, number=73.0, display_number="73",
+                      released_at=datetime(2021, 8, 1))
+        assert not release_covers_issue(
+            _release("The Amazing Spider-Man #73 (2028)"), issue
+        )
+
+    def test_year_off_by_one_allowed(self):
+        issue = Issue(id=1, series_id=1, number=84.0, display_number="84",
+                      released_at=datetime(2022, 1, 5))
+        assert release_covers_issue(_release("Amazing Spider-Man #84 (2021)"), issue)
+
+    def test_missing_years_allowed(self):
+        issue = Issue(id=1, series_id=1, number=15.0, display_number="15")
+        assert release_covers_issue(_release("Absolute Batman #15"), issue)
+
+    def test_no_issue_number_rejected(self):
+        issue = Issue(id=1, series_id=1, number=1.0, display_number="1")
+        assert not release_covers_issue(
+            _release("Amazing Spider-Man – Beyond Vol. 1 (TPB) (2021)", number=None), issue
+        )

@@ -8,7 +8,7 @@ from ..metadata.comicvine import ComicVineError, provider as comicvine
 from ..models import Issue, Series
 from ..schemas import MetadataResult, ReleaseOut
 from ..sources import registry
-from ..util import normalize_title, strip_issue_suffix
+from ..util import normalize_title, release_covers_issue, strip_issue_suffix
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -86,8 +86,7 @@ async def search_releases(
                 found = await src.search_releases(f"{term} {issue_term}")
                 found = [
                     r for r in found
-                    if r.issue_number is not None
-                    and r.issue_number <= issue.number <= (r.issue_end or r.issue_number)
+                    if release_covers_issue(r, issue)
                     and normalize_title(strip_issue_suffix(r.title)) in wanted
                 ]
             else:
