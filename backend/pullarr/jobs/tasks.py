@@ -223,7 +223,9 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
     await session.commit()
 
 
-async def refresh_series_full(series_id: int, grab_missing: bool = False) -> None:
+async def refresh_series_full(
+    series_id: int, grab_missing: bool = False, only_monitored: bool = False
+) -> None:
     async with session_scope() as session:
         series = await _load_series(session, series_id)
         if series is None:
@@ -247,9 +249,13 @@ async def refresh_series_full(series_id: int, grab_missing: bool = False) -> Non
         # metadata/source linking and disk adoption have completed.
         if grab_missing:
             try:
-                await grab_missing_issues(session, series, values, only_monitored=False)
+                # an explicit one-time search: hunt every missing issue now
+                await grab_missing_issues(
+                    session, series, values,
+                    only_monitored=only_monitored, straggler_cap=None,
+                )
             except Exception as exc:
-                log.warning("add-time grab failed for series %d: %s", series_id, exc)
+                log.warning("search-time grab failed for series %d: %s", series_id, exc)
 
 
 async def scan_all_series() -> None:
@@ -587,6 +593,7 @@ def _download_covered_issue_ids(download: Download, issues: list[Issue]) -> set[
 async def grab_missing_issues(
     session: AsyncSession, series: Series, values: dict[str, str],
     only_monitored: bool = True,
+    straggler_cap: int | None = ISSUE_SEARCH_CAP,
 ) -> int:
     """Queue missing released issues from linked DDL sources.
 
@@ -594,7 +601,12 @@ async def grab_missing_issues(
     added monitored series starts pulling available issues as soon as its
     source links and issue list exist when the user requests a one-time
     search. The scheduled monitor keeps `only_monitored=True`; add-time
-    search uses `False` because it is an explicit user action."""
+    search uses `False` because it is an explicit user action.
+
+    `straggler_cap` bounds the targeted per-issue searches in one pass; the
+    recurring monitor keeps the default so its hourly footprint stays small,
+    while explicit one-time searches pass None to hunt every missing issue
+    (still paced by the source's rate limiter)."""
     # active downloads for this series → don't double-grab
     result = await session.execute(
         select(Download).where(
@@ -659,7 +671,7 @@ async def grab_missing_issues(
 
         # targeted per-issue searches for stragglers (older issues that fell
         # off the recent-posts pages), capped per pass
-        for issue in list(remaining.values())[:ISSUE_SEARCH_CAP]:
+        for issue in list(remaining.values())[:straggler_cap]:
             if (issue.id, src.name) in failed_pairs:
                 continue
             query = f"{link.external_id} {issue.display_number or f'{issue.number:g}'}"

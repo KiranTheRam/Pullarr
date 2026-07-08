@@ -334,6 +334,14 @@ export default function SeriesDetail() {
     },
   });
 
+  const searchMissing = useMutation({
+    mutationFn: () => api.post(`/series/${seriesId}/search`),
+    onSuccess: () => {
+      showWorkNotice("Searching sources for missing monitored issues — grabs land in the queue…");
+      setTimeout(invalidate, 4000);
+    },
+  });
+
   const scan = useMutation({
     mutationFn: () => api.post<ScanResult>(`/series/${seriesId}/scan`),
     onSuccess: (res) => {
@@ -502,6 +510,14 @@ export default function SeriesDetail() {
           onClick={() => setShowCleanup(true)}
         >
           🧹 Clean up
+        </button>
+        <button
+          className="btn"
+          title="Automatically search sources and grab all missing monitored issues"
+          onClick={() => searchMissing.mutate()}
+          disabled={searchMissing.isPending}
+        >
+          🎯 Search Missing
         </button>
         <button
           className="btn"

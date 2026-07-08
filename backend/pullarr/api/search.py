@@ -63,7 +63,9 @@ async def search_releases(
         raise HTTPException(422, "series_id or issue_id required")
 
     result = await session.execute(
-        select(Series).options(selectinload(Series.source_links)).where(Series.id == series_id)
+        select(Series)
+        .options(selectinload(Series.source_links), selectinload(Series.issues))
+        .where(Series.id == series_id)
     )
     series = result.scalar_one_or_none()
     if series is None:
@@ -91,6 +93,16 @@ async def search_releases(
                 ]
             else:
                 found = await src.list_releases(term)
+                # keep TPBs/packs (no parsed issue number) for manual grabs,
+                # but drop numbered releases that can't belong to any issue
+                # of this series — a same-titled relaunch ("#27 (2026)" when
+                # this series' #27 came out in 2019) fails the year guard
+                if series.issues:
+                    found = [
+                        r for r in found
+                        if r.issue_number is None
+                        or any(release_covers_issue(r, i) for i in series.issues)
+                    ]
         except Exception:
             continue
         for r in found[:40]:

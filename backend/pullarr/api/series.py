@@ -186,6 +186,22 @@ async def refresh_series(series_id: int, session: AsyncSession = Depends(get_ses
     return {"status": "refreshing"}
 
 
+@router.post("/{series_id}/search", status_code=202)
+async def search_missing_issues(
+    series_id: int, session: AsyncSession = Depends(get_session)
+):
+    """On-demand hunt for this series' missing monitored issues — the same
+    refresh + grab pass the hourly monitor runs, regardless of the series'
+    monitor toggle."""
+    series = await session.get(Series, series_id)
+    if series is None:
+        raise HTTPException(404, "Series not found")
+    asyncio.get_running_loop().create_task(
+        refresh_series_full(series_id, grab_missing=True, only_monitored=True)
+    )
+    return {"status": "searching"}
+
+
 @router.put("/{series_id}/issues/monitor", status_code=204)
 async def monitor_issues(
     series_id: int, body: IssueMonitorIn, session: AsyncSession = Depends(get_session)
