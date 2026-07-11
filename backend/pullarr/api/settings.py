@@ -5,7 +5,8 @@ from .. import settings_service
 from ..db import get_session
 from ..download.qbittorrent import QbtError, test_connection
 from ..metadata.comicvine import ComicVineError, provider as comicvine
-from ..schemas import ComicVineTestIn, QbtTestIn
+from ..metadata.metron import MetronError, provider as metron
+from ..schemas import ComicVineTestIn, MetronTestIn, QbtTestIn
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -69,3 +70,19 @@ async def comicvine_test(body: ComicVineTestIn, session: AsyncSession = Depends(
     if not results:
         raise HTTPException(400, "ComicVine responded but returned no results")
     return {"ok": True}
+
+
+@router.post("/metron/test")
+async def metron_test(body: MetronTestIn, session: AsyncSession = Depends(get_session)):
+    username = body.username
+    password = body.password
+    if password == MASK:
+        password = await settings_service.get(session, "metron_password")
+    metron.configure(username, password)
+    try:
+        result = await metron.test()
+    except MetronError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400, f"Metron request failed: {exc}") from exc
+    return result

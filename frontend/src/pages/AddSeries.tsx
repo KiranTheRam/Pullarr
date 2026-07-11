@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import type { FolderPreview, MetadataResult, RootFolder } from "../api/types";
 import { FolderBrowser } from "../components/FolderBrowser";
-import { EmptyState, Modal, Spinner, Toggle, Toolbar, statusPill } from "../components/common";
+import { EmptyState, Modal, QueryError, Spinner, Toggle, Toolbar, statusPill } from "../components/common";
 
 function AddSeriesModal({
   result,
@@ -199,12 +199,12 @@ export default function AddSeries() {
   const [submitted, setSubmitted] = useState("");
   const [adding, setAdding] = useState<MetadataResult | null>(null);
 
-  const { data: rootFolders } = useQuery({
+  const { data: rootFolders, isError: rootsError, error: rootsErrorValue, refetch: refetchRoots } = useQuery({
     queryKey: ["rootfolders"],
     queryFn: () => api.get<RootFolder[]>("/rootfolders"),
   });
 
-  const { data: results, isFetching } = useQuery({
+  const { data: results, isFetching, isError, error, refetch } = useQuery({
     queryKey: ["metadata-search", submitted],
     queryFn: () => api.get<MetadataResult[]>(`/search/metadata?q=${encodeURIComponent(submitted)}`),
     enabled: submitted.length > 1,
@@ -240,9 +240,12 @@ export default function AddSeries() {
             No root folder configured; add one in Settings before adding series.
           </div>
         )}
+        {rootsError && <QueryError error={rootsErrorValue} retry={() => refetchRoots()} />}
 
         {isFetching ? (
           <Spinner />
+        ) : isError ? (
+          <QueryError error={error} retry={() => refetch()} />
         ) : results && results.length === 0 ? (
           <EmptyState icon="🔍" title="No results" hint="Try a different title." />
         ) : (

@@ -175,6 +175,18 @@ def test_download_covered_issue_ids_expands_title_range():
     assert tasks._download_covered_issue_ids(dl, issues) == {1, 2, 3}
 
 
+def test_transient_download_errors_are_retryable():
+    code = tasks._download_error_code(RuntimeError("peer closed connection before complete body"))
+    assert code == "incomplete_transfer"
+    assert tasks._retryable_download_error(code)
+
+
+def test_import_collisions_are_not_retryable():
+    code = tasks._download_error_code(RuntimeError("import collision: target exists"))
+    assert code == "import_collision"
+    assert not tasks._retryable_download_error(code)
+
+
 @pytest.mark.asyncio
 async def test_grab_matches_skips_failed_release_payload(monkeypatch):
     async def fake_enqueue(session, series, issue, source_name, external_id, title=""):

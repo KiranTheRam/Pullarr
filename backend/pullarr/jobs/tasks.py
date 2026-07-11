@@ -6,9 +6,10 @@ import logging
 import re
 import shutil
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import config
@@ -17,16 +18,19 @@ from ..download.ddl import DownloadCancelled, download_release
 from ..download.qbittorrent import QbtClient
 from ..library.importer import import_payload
 from ..metadata.comicvine import derive_status, provider as comicvine
+from ..metadata.metron import provider as metron
 from ..models import (
     Download,
     DownloadKind,
     DownloadStatus,
     HistoryEvent,
     Issue,
+    JobStatus,
     Series,
     SeriesSourceLink,
     SeriesStatus,
 )
+from .service import update_job
 from ..sources import registry
 from ..sources.base import SourceRelease
 from ..util import (
@@ -76,6 +80,20 @@ async def refresh_series_metadata(session: AsyncSession, series: Series) -> None
     await session.commit()
 
 
+def metadata_refresh_due(series: Series, now: datetime | None = None) -> bool:
+    """Refresh active series daily and stable finished series monthly."""
+    if series.metadata_refreshed_at is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    refreshed = series.metadata_refreshed_at
+    if refreshed.tzinfo is None:
+        refreshed = refreshed.replace(tzinfo=timezone.utc)
+    age = current - refreshed
+    if series.status in (SeriesStatus.RELEASING, SeriesStatus.HIATUS, SeriesStatus.UNKNOWN):
+        return age >= timedelta(hours=24)
+    return age >= timedelta(days=30)
+
+
 async def update_issues(session: AsyncSession, series: Series) -> int:
     """Sync the issue list from ComicVine into the DB. Returns # new."""
     if not series.comicvine_id:
@@ -123,9 +141,9 @@ async def update_issues(session: AsyncSession, series: Series) -> int:
         else:
             issue.number = im.number
             issue.display_number = display_number
-            if not issue.title and im.title:
+            if im.title:
                 issue.title = im.title
-            if issue.released_at is None and im.released_at is not None:
+            if im.released_at is not None:
                 issue.released_at = im.released_at
             if issue.comicvine_id is None and comicvine_id is not None:
                 issue.comicvine_id = comicvine_id
@@ -224,52 +242,129 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
 
 
 async def refresh_series_full(
-    series_id: int, grab_missing: bool = False, only_monitored: bool = False
+    series_id: int, grab_missing: bool = False, only_monitored: bool = False,
+    job_id: int | None = None,
+) -> None:
+    try:
+        await _refresh_series_full_impl(
+            series_id, grab_missing=grab_missing,
+            only_monitored=only_monitored, job_id=job_id,
+        )
+    except Exception as exc:
+        log.exception("series job failed for %d", series_id)
+        async with session_scope() as session:
+            await update_job(
+                session, job_id, status=JobStatus.FAILED,
+                phase="failed", error=str(exc),
+            )
+
+
+async def _refresh_series_full_impl(
+    series_id: int, grab_missing: bool = False, only_monitored: bool = False,
+    job_id: int | None = None,
 ) -> None:
     async with session_scope() as session:
+        await update_job(session, job_id, status=JobStatus.RUNNING,
+                         phase="metadata", progress=0.05)
         series = await _load_series(session, series_id)
         if series is None:
+            await update_job(session, job_id, status=JobStatus.FAILED,
+                             phase="failed", error="Series no longer exists")
             return
         values = await registry.apply_settings(session)
+        warnings: list[str] = []
         try:
             await refresh_series_metadata(session, series)
             await update_issues(session, series)
+            series.metadata_refreshed_at = datetime.now(timezone.utc)
+            await session.commit()
+            if values.get("metron_enabled") == "true" and metron.enabled:
+                try:
+                    await metron.enrich_series(series)
+                    await session.commit()
+                    limit = int(values.get("metron_issue_enrichment_limit", "5"))
+                    candidates = sorted(
+                        (i for i in series.issues if i.comicvine_id and i.metadata_refreshed_at is None),
+                        key=lambda i: (not i.downloaded, -i.number),
+                    )[:limit]
+                    for index, candidate in enumerate(candidates, start=1):
+                        await update_job(
+                            session, job_id, phase="enriching metadata",
+                            progress=0.1 + (0.2 * index / max(len(candidates), 1)),
+                            detail=f"Enriched {index} of {len(candidates)} issue records",
+                        )
+                        try:
+                            await metron.enrich_issue(candidate)
+                            await session.commit()
+                        except Exception as exc:
+                            warnings.append(f"Metron issue {candidate.display_number}: {exc}")
+                except Exception as exc:
+                    warnings.append(f"Metron: {exc}")
+                    log.warning("Metron enrichment failed for series %d: %s", series_id, exc)
         except Exception as exc:
+            warnings.append(f"Metadata: {exc}")
             log.warning("metadata refresh failed for series %d: %s", series_id, exc)
+        await update_job(session, job_id, phase="sources", progress=0.35)
         await link_sources(session, series, values)
         # adopt existing on-disk files before the monitor considers grabbing
         if values.get("library_scan_on_add", "true") == "true":
+            await update_job(session, job_id, phase="scanning", progress=0.55)
             try:
                 await scan_series_folder(session, series)
             except Exception as exc:
+                warnings.append(f"Scan: {exc}")
                 log.warning("library scan failed for series %d: %s", series_id, exc)
         await reconcile_downloaded_files(session, series)
         # Explicit one-time search, independent of the ongoing monitor toggle:
         # if the user asks to search now, grab released missing issues after
         # metadata/source linking and disk adoption have completed.
+        queued_downloads: int | None = None
         if grab_missing:
+            await update_job(session, job_id, phase="searching", progress=0.75)
             try:
                 # an explicit one-time search: hunt every missing issue now
-                await grab_missing_issues(
+                queued_downloads = await grab_missing_issues(
                     session, series, values,
                     only_monitored=only_monitored, straggler_cap=None,
                 )
             except Exception as exc:
+                warnings.append(f"Search: {exc}")
                 log.warning("search-time grab failed for series %d: %s", series_id, exc)
+        if queued_downloads is not None:
+            noun = "download" if queued_downloads == 1 else "downloads"
+            warnings.insert(0, f"Queued {queued_downloads} {noun}")
+        await update_job(
+            session, job_id, status=JobStatus.DONE, phase="complete", progress=1.0,
+            detail="; ".join(warnings) if warnings else "Completed successfully",
+        )
 
 
-async def scan_all_series() -> None:
+async def scan_all_series(job_id: int | None = None) -> None:
     """Scan every series' folder to adopt on-disk files (background job)."""
     async with session_scope() as session:
+        await update_job(session, job_id, status=JobStatus.RUNNING,
+                         phase="scanning", progress=0.0)
         series_ids = [row[0] for row in (await session.execute(select(Series.id))).all()]
-    for series_id in series_ids:
+    warnings: list[str] = []
+    for index, series_id in enumerate(series_ids, start=1):
         async with session_scope() as session:
             series = await _load_series(session, series_id)
             if series is not None:
                 try:
                     await scan_series_folder(session, series)
                 except Exception as exc:
+                    warnings.append(f"Series {series_id}: {exc}")
                     log.warning("library scan failed for series %d: %s", series_id, exc)
+            await update_job(
+                session, job_id, phase="scanning",
+                progress=index / max(len(series_ids), 1),
+                detail=f"Scanned {index} of {len(series_ids)} series",
+            )
+    async with session_scope() as session:
+        await update_job(
+            session, job_id, status=JobStatus.DONE, phase="complete", progress=1.0,
+            detail=("; ".join(warnings[:5]) if warnings else f"Scanned {len(series_ids)} series"),
+        )
 
 
 async def _load_series(session: AsyncSession, series_id: int) -> Series | None:
@@ -378,6 +473,86 @@ def _staging_dir(values: dict[str, str]) -> Path:
     return Path(configured) if configured else (config.data_dir / "ddl")
 
 
+def _quarantine_payload(payload_dir: Path, values: dict[str, str], download_id: int) -> Path:
+    quarantine = _staging_dir(values) / "quarantine"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    target = quarantine / f"download-{download_id}"
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    shutil.move(str(payload_dir), target)
+    return target
+
+
+def _download_error_code(exc: Exception) -> str:
+    if isinstance(exc, DownloadCancelled):
+        return "cancelled"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    if "timeout" in name or "timeout" in message:
+        return "timeout"
+    if "incomplete" in message or "peer closed" in message or "protocol" in name:
+        return "incomplete_transfer"
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status:
+        return f"http_{status}"
+    if "no usable download link" in message or "no files downloaded" in message:
+        return "no_working_link"
+    if "collision" in message:
+        return "import_collision"
+    if "invalid" in message or "corrupt" in message:
+        return "invalid_archive"
+    return "download_error"
+
+
+def _retryable_download_error(code: str) -> bool:
+    if code in {"timeout", "incomplete_transfer", "download_error"}:
+        return True
+    if code.startswith("http_"):
+        try:
+            status = int(code.split("_", 1)[1])
+        except ValueError:
+            return False
+        return status in {408, 425, 429} or status >= 500
+    return False
+
+
+async def _record_direct_failure(
+    session: AsyncSession,
+    dl: Download,
+    series: Series,
+    issue: Issue | None,
+    exc: Exception,
+    values: dict[str, str],
+) -> None:
+    code = _download_error_code(exc)
+    message = str(exc)[:500] or exc.__class__.__name__
+    max_attempts = int(values.get("download_retry_attempts", "4")) + 1
+    retry = _retryable_download_error(code) and dl.attempt_count < max_attempts
+    dl.error = message
+    dl.error_code = code
+    if retry:
+        delay_minutes = min(2 ** max(dl.attempt_count - 1, 0), 60)
+        dl.status = DownloadStatus.QUEUED
+        dl.next_retry_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+        event = "retrying"
+        detail = f"{message} — retry {dl.attempt_count}/{max_attempts - 1} in {delay_minutes}m"
+    else:
+        dl.status = DownloadStatus.FAILED
+        dl.next_retry_at = None
+        event = "failed"
+        detail = message
+    session.add(HistoryEvent(
+        series_id=series.id,
+        issue_id=issue.id if issue else None,
+        event=event,
+        source_name=dl.source_name,
+        detail=detail,
+    ))
+    await session.commit()
+
+
 async def process_direct_queue() -> None:
     """Processes all queued DDL downloads, one release at a time."""
     while True:
@@ -385,7 +560,9 @@ async def process_direct_queue() -> None:
             result = await session.execute(
                 select(Download)
                 .where(Download.kind == DownloadKind.DIRECT,
-                       Download.status == DownloadStatus.QUEUED)
+                       Download.status == DownloadStatus.QUEUED,
+                       or_(Download.next_retry_at.is_(None),
+                           Download.next_retry_at <= datetime.now(timezone.utc)))
                 .order_by(Download.id)
                 .limit(1)
             )
@@ -403,6 +580,7 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
     if series is None or source is None:
         dl.status = DownloadStatus.FAILED
         dl.error = "series/source no longer exists"
+        dl.error_code = "missing_series_or_source"
         await session.commit()
         return
 
@@ -410,10 +588,16 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
     if not root:
         dl.status = DownloadStatus.FAILED
         dl.error = "series has no root folder configured"
+        dl.error_code = "missing_root_folder"
         await session.commit()
         return
 
     dl.status = DownloadStatus.DOWNLOADING
+    dl.attempt_count += 1
+    dl.progress = 0.0
+    dl.next_retry_at = None
+    dl.error = ""
+    dl.error_code = ""
     await session.commit()
 
     last_progress_commit = 0.0
@@ -444,46 +628,55 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
             return
         dl.status = DownloadStatus.IMPORTING
         await session.commit()
+        if issue is not None and values.get("metron_enabled") == "true" and metron.enabled:
+            try:
+                if await metron.enrich_issue(issue):
+                    await session.commit()
+            except Exception as exc:
+                log.warning("Metron issue enrichment failed for %s: %s", issue.id, exc)
         imported = import_payload(
             payload_dir, series, list(series.issues), Path(root),
             values["naming_template"], force_issue=issue, move=True,
         )
     except DownloadCancelled as exc:
-        dl.status = DownloadStatus.FAILED
-        dl.error = str(exc)[:500]
-        session.add(HistoryEvent(
-            series_id=series.id, issue_id=issue.id if issue else None, event="failed",
-            source_name=dl.source_name, detail=dl.error,
-        ))
-        await session.commit()
+        await _record_direct_failure(session, dl, series, issue, exc, values)
         return
     except Exception as exc:
         log.exception("DDL download %d failed", dl.id)
-        dl.status = DownloadStatus.FAILED
-        dl.error = str(exc)[:500]
-        session.add(HistoryEvent(
-            series_id=series.id, issue_id=issue.id if issue else None, event="failed",
-            source_name=dl.source_name, detail=dl.error,
-        ))
-        await session.commit()
+        code = _download_error_code(exc)
+        if payload_dir is not None and code in {"import_collision", "invalid_archive"}:
+            try:
+                kept = _quarantine_payload(payload_dir, values, dl.id)
+                payload_dir = None
+                exc = RuntimeError(f"{exc}; downloaded payload kept at {kept}")
+            except OSError as quarantine_error:
+                log.warning("could not quarantine failed payload: %s", quarantine_error)
+        await _record_direct_failure(session, dl, series, issue, exc, values)
         return
     finally:
         _cancelled_downloads.discard(dl.id)
         if payload_dir is not None:
             shutil.rmtree(payload_dir, ignore_errors=True)
 
-    _mark_imported(series, imported)
-    dl.status = DownloadStatus.DONE
+    covered_count = _mark_imported(series, imported)
+    needs_attention = covered_count == 0
+    dl.status = DownloadStatus.NEEDS_ATTENTION if needs_attention else DownloadStatus.DONE
     dl.progress = 1.0
+    dl.next_retry_at = None
+    dl.error = ""
+    dl.error_code = ""
     session.add(HistoryEvent(
-        series_id=series.id, issue_id=issue.id if issue else None, event="imported",
+        series_id=series.id, issue_id=issue.id if issue else None,
+        event="needs_attention" if needs_attention else "imported",
         source_name=dl.source_name,
-        detail=f"{len(imported)} file(s) from {dl.title}",
+        detail=(f"{len(imported)} file(s) need manual matching from {dl.title}"
+                if needs_attention else f"{len(imported)} file(s) from {dl.title}"),
     ))
     await session.commit()
 
 
-def _mark_imported(series: Series, imported: list) -> None:
+def _mark_imported(series: Series, imported: list) -> int:
+    marked: set[int] = set()
     for item in imported:
         covered = list(item.covered)
         if not covered and item.volume is not None:
@@ -492,6 +685,8 @@ def _mark_imported(series: Series, imported: list) -> None:
         for issue in covered:
             issue.downloaded = True
             issue.file_path = str(item.dest)
+            marked.add(issue.id)
+    return len(marked)
 
 
 # --------------------------------------------------------------- qbt sync
@@ -558,12 +753,15 @@ async def _import_torrent(
         dl.error = str(exc)[:500]
         await session.commit()
         return
-    _mark_imported(series, imported)
-    dl.status = DownloadStatus.DONE
+    covered_count = _mark_imported(series, imported)
+    dl.status = DownloadStatus.DONE if covered_count else DownloadStatus.NEEDS_ATTENTION
     dl.progress = 1.0
     session.add(HistoryEvent(
-        series_id=series.id, event="imported", source_name=dl.source_name or "torrent",
-        detail=f"{len(imported)} file(s) from {dl.title}",
+        series_id=series.id,
+        event="imported" if covered_count else "needs_attention",
+        source_name=dl.source_name or "torrent",
+        detail=(f"{len(imported)} file(s) from {dl.title}"
+                if covered_count else f"{len(imported)} file(s) need manual matching from {dl.title}"),
     ))
     await session.commit()
 
@@ -634,8 +832,9 @@ async def grab_missing_issues(
     if not wanted:
         return 0
 
-    # a release that already failed from a source shouldn't be retried there
-    # (dead links etc.)
+    # Explicit blocklisting suppresses a release indefinitely. Exhausted
+    # failures get a 24-hour cooldown so an hourly monitor does not thrash a
+    # dead host, but can recover later without database surgery.
     result = await session.execute(
         select(Download).where(
             Download.series_id == series.id,
@@ -644,8 +843,13 @@ async def grab_missing_issues(
         )
     )
     failed_downloads = result.scalars().all()
-    failed_pairs = {(dl.issue_id, dl.source_name) for dl in failed_downloads if dl.issue_id is not None}
-    failed_releases = {(dl.source_name, dl.payload) for dl in failed_downloads if dl.payload}
+    cooldown = datetime.now(timezone.utc) - timedelta(hours=24)
+    suppressed = [
+        dl for dl in failed_downloads
+        if dl.blocked or (dl.updated_at is not None and dl.updated_at >= cooldown)
+    ]
+    failed_pairs = {(dl.issue_id, dl.source_name) for dl in suppressed if dl.issue_id is not None}
+    failed_releases = {(dl.source_name, dl.payload) for dl in suppressed if dl.payload}
 
     links = {sl.source_name: sl for sl in series.source_links}
     wanted_titles = {nt for t in _titles_of(series) if (nt := normalize_title(t))}
@@ -700,11 +904,17 @@ async def monitor_all() -> None:
             series = await _load_series(session, series_id)
             if series is None:
                 continue
-            try:
-                await refresh_series_metadata(session, series)
-                await update_issues(session, series)
-            except Exception as exc:
-                log.warning("monitor: metadata refresh failed for %r: %s", series.title, exc)
+            if metadata_refresh_due(series):
+                try:
+                    await refresh_series_metadata(session, series)
+                    await update_issues(session, series)
+                    series.metadata_refreshed_at = datetime.now(timezone.utc)
+                    await session.commit()
+                    if values.get("metron_enabled") == "true" and metron.enabled:
+                        await metron.enrich_series(series)
+                        await session.commit()
+                except Exception as exc:
+                    log.warning("monitor: metadata refresh failed for %r: %s", series.title, exc)
             await link_sources(session, series, values)
             try:
                 await scan_series_folder(session, series)

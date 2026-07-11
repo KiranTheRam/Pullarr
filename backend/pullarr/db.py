@@ -54,8 +54,50 @@ async def _migrate_sqlite(conn) -> None:
             WHERE display_number IS NULL OR display_number = ''
             """
         )
-        return
-    await _rebuild_issues_table(conn, has_display_number)
+    else:
+        await _rebuild_issues_table(conn, has_display_number)
+
+    await _ensure_columns(conn, "series", {
+        "metron_id": "INTEGER",
+        "metadata_refreshed_at": "DATETIME",
+    })
+    await _ensure_columns(conn, "issues", {
+        "metron_id": "INTEGER",
+        "summary": "TEXT NOT NULL DEFAULT ''",
+        "imprint": "VARCHAR NOT NULL DEFAULT ''",
+        "writers": "TEXT NOT NULL DEFAULT ''",
+        "pencillers": "TEXT NOT NULL DEFAULT ''",
+        "inkers": "TEXT NOT NULL DEFAULT ''",
+        "colorists": "TEXT NOT NULL DEFAULT ''",
+        "letterers": "TEXT NOT NULL DEFAULT ''",
+        "cover_artists": "TEXT NOT NULL DEFAULT ''",
+        "editors": "TEXT NOT NULL DEFAULT ''",
+        "translators": "TEXT NOT NULL DEFAULT ''",
+        "story_arcs": "TEXT NOT NULL DEFAULT ''",
+        "reprints": "TEXT NOT NULL DEFAULT ''",
+        "characters": "TEXT NOT NULL DEFAULT ''",
+        "teams": "TEXT NOT NULL DEFAULT ''",
+        "genres": "TEXT NOT NULL DEFAULT ''",
+        "web_url": "VARCHAR NOT NULL DEFAULT ''",
+        "format": "VARCHAR NOT NULL DEFAULT ''",
+        "language": "VARCHAR NOT NULL DEFAULT ''",
+        "page_count": "INTEGER",
+        "metadata_refreshed_at": "DATETIME",
+    })
+    await _ensure_columns(conn, "downloads", {
+        "error_code": "VARCHAR NOT NULL DEFAULT ''",
+        "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "next_retry_at": "DATETIME",
+        "blocked": "BOOLEAN NOT NULL DEFAULT 0",
+    })
+    if await _table_exists(conn, "series"):
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_series_metron_id "
+            "ON series (metron_id) WHERE metron_id IS NOT NULL"
+        )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_issues_metron_id ON issues (metron_id)"
+    )
 
 
 async def _table_exists(conn, name: str) -> bool:
@@ -68,6 +110,16 @@ async def _table_exists(conn, name: str) -> bool:
 async def _columns(conn, table: str) -> set[str]:
     result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
     return {row[1] for row in result.fetchall()}
+
+
+async def _ensure_columns(conn, table: str, definitions: dict[str, str]) -> None:
+    """Idempotently add simple columns to existing SQLite installations."""
+    if not await _table_exists(conn, table):
+        return
+    existing = await _columns(conn, table)
+    for name, ddl in definitions.items():
+        if name not in existing:
+            await conn.exec_driver_sql(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {ddl}')
 
 
 async def _has_unique_index(conn, table: str, columns: tuple[str, ...]) -> bool:

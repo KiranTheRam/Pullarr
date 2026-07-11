@@ -13,10 +13,30 @@ export interface SourceLink {
 
 export interface Issue {
   id: number;
+  metron_id: number | null;
   number: number;
   display_number: string;
   volume: number | null;
   title: string;
+  summary: string;
+  imprint: string;
+  writers: string;
+  pencillers: string;
+  inkers: string;
+  colorists: string;
+  letterers: string;
+  cover_artists: string;
+  editors: string;
+  translators: string;
+  story_arcs: string;
+  reprints: string;
+  characters: string;
+  teams: string;
+  genres: string;
+  web_url: string;
+  format: string;
+  language: string;
+  page_count: number | null;
   monitored: boolean;
   downloaded: boolean;
   file_path: string;
@@ -26,6 +46,7 @@ export interface Issue {
 export interface Series {
   id: number;
   comicvine_id: number | null;
+  metron_id: number | null;
   title: string;
   description: string;
   status: string;
@@ -97,6 +118,10 @@ export interface QueueItem {
   source_name: string;
   progress: number;
   error: string;
+  error_code: string;
+  attempt_count: number;
+  next_retry_at: string | null;
+  blocked: boolean;
   created_at: string;
   series_title: string;
 }
@@ -121,6 +146,24 @@ export interface WantedItem {
   volume: number | null;
   title: string;
   released_at: string | null;
+  series_monitored: boolean;
+  issue_monitored: boolean;
+}
+
+export interface JobItem {
+  id: number;
+  kind: string;
+  status: string;
+  series_id: number | null;
+  progress: number;
+  phase: string;
+  detail: string;
+  error: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+  series_title: string;
 }
 
 export interface SystemStatus {

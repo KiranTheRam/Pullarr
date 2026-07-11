@@ -14,12 +14,15 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
 - **Library management** — add series via ComicVine metadata search (covers,
   descriptions, publishers, full issue lists with release dates), poster-grid
   library, per-series issue tables with monitor toggles, wanted/missing view.
-- **Metadata: ComicVine** — a ComicVine "volume" (e.g. *Batman (2016)*) is a
+- **Metadata: ComicVine + optional Metron enrichment** — a ComicVine "volume" (e.g. *Batman (2016)*) is a
   pullarr series; its issues drive what gets hunted. Needs a free API key from
-  <https://comicvine.gamespot.com/api> (Settings → Metadata).
+  <https://comicvine.gamespot.com/api> (Settings → Metadata). Optional Metron
+  credentials add creators, summaries, arcs, page counts, status, and reprint
+  mappings by exact ComicVine ID cross-reference.
 - **Source: GetComics** — the monitor searches getcomics.org for monitored,
   missing, released issues and downloads the **main-server direct-download**
-  file (CBR/CBZ as posted). Packs/TPBs found via interactive search import
+  file (CBR/CBZ as posted), with ordered Pixeldrain and MediaFire fallback.
+  Packs/TPBs found via interactive search import
   with per-file matching. An optional **HTTP proxy setting** routes all
   GetComics traffic (searches *and* file downloads) through e.g. a VPN-side
   Privoxy.
@@ -29,8 +32,11 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
   adopts files in place (never re-downloads), rename previews/applies the
   naming convention format-preservingly, cleanup finds duplicate files, and
   unmatched TPB archives can be mapped to issue ranges by hand.
-- **Output** — `Series Title (Year)/Series Title #012.cbz`, with
-  `ComicInfo.xml` injected into CBZs that lack one (CBRs left untouched).
+- **Output** — `Series Title (Year)/Series Title #012.cbz`, with existing
+  `ComicInfo.xml` safely merged/refreshed in CBZs (CBRs left untouched).
+- **Recoverable automation** — persisted background jobs, validated atomic
+  imports, transient-download retry/backoff, failed-download retry/block
+  controls, and collision quarantine.
 - ***arr-style API** — everything under `/api/v1` with `X-Api-Key` auth.
 
 ## Quick start (Docker)
@@ -56,6 +62,8 @@ First-run checklist, in the pullarr UI:
    direct). Leave blank to skip the VPN.
 4. **Add New**: search a title, pick a root folder, add. Issues appear after
    the automatic ComicVine sync (a few seconds).
+5. **Optional Metron**: create an account at <https://metron.cloud>, enter the
+   username/password under Settings → Metadata enrichment, and test it.
 
 ## How grabbing works
 

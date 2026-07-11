@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { RootFolder, Settings as SettingsType } from "../api/types";
 import { FolderBrowser } from "../components/FolderBrowser";
-import { Spinner, Toggle, Toolbar } from "../components/common";
+import { QueryError, Spinner, Toggle, Toolbar } from "../components/common";
 
 function RootFolders() {
   const queryClient = useQueryClient();
@@ -33,12 +33,13 @@ function RootFolders() {
       {data?.map((rf) => (
         <div className="form-row" key={rf.id}>
           <label style={{ width: "auto", flex: 1 }}>{rf.path}</label>
-          <button className="btn icon-btn" onClick={() => remove.mutate(rf.id)}>
+          <button className="btn icon-btn" title="Remove root folder" aria-label={`Remove ${rf.path}`} onClick={() => remove.mutate(rf.id)}>
             ✕
           </button>
         </div>
       ))}
       {add.isError && <div className="error-banner">{(add.error as Error).message}</div>}
+      {remove.isError && <div className="error-banner">{(remove.error as Error).message}</div>}
       <div className="form-row">
         <input
           type="text"
@@ -60,7 +61,7 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 const SOURCE_HINTS: Record<string, string> = {
-  getcomics: "Main-server direct downloads, with Pixeldrain fallback when available.",
+  getcomics: "Main-server direct downloads, with ordered Pixeldrain and MediaFire fallback.",
 };
 
 function SourcePriority({
@@ -122,7 +123,7 @@ function SourcePriority({
 
 export default function Settings() {
   const queryClient = useQueryClient();
-  const { data: saved, isLoading } = useQuery({
+  const { data: saved, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["settings"],
     queryFn: () => api.get<SettingsType>("/settings"),
   });
@@ -131,6 +132,14 @@ export default function Settings() {
   useEffect(() => {
     if (saved) setForm(saved);
   }, [saved]);
+  const dirty = Boolean(saved) && JSON.stringify(form) !== JSON.stringify(saved);
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (dirty) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   const save = useMutation({
     mutationFn: () => api.put<SettingsType>("/settings", form),
@@ -159,8 +168,20 @@ export default function Settings() {
     onSuccess: () => setCvTest("✔ ComicVine key works"),
     onError: (e) => setCvTest(`✖ ${(e as Error).message}`),
   });
+  const [metronTest, setMetronTest] = useState<string | null>(null);
+  const testMetron = useMutation({
+    mutationFn: () => api.post<{ results: number }>("/settings/metron/test", {
+      username: form.metron_username,
+      password: form.metron_password,
+    }),
+    onSuccess: (d) => setMetronTest(`✔ Connected — ${d.results} matching test results`),
+    onError: (e) => setMetronTest(`✖ ${(e as Error).message}`),
+  });
   const [browsingDdl, setBrowsingDdl] = useState(false);
 
+  if (isError) {
+    return <><Toolbar title="Settings" /><div className="content"><QueryError error={error} retry={() => refetch()} /></div></>;
+  }
   if (isLoading || !saved) {
     return (
       <>
@@ -181,13 +202,15 @@ export default function Settings() {
   return (
     <>
       <Toolbar title="Settings">
+        {dirty && <span style={{ color: "var(--warning)", fontSize: 13 }}>Unsaved changes</span>}
         {save.isSuccess && <span style={{ color: "var(--success)", fontSize: 13 }}>Saved</span>}
-        <button className="btn primary" onClick={() => save.mutate()} disabled={save.isPending}>
+        <button className="btn primary" onClick={() => save.mutate()} disabled={save.isPending || !dirty}>
           Save Changes
         </button>
       </Toolbar>
       <div className="content">
         <RootFolders />
+        {save.isError && <div className="error-banner" role="alert">{(save.error as Error).message}</div>}
 
         <div className="settings-section">
           <h3>Media Management</h3>
@@ -202,6 +225,25 @@ export default function Settings() {
           <div className="form-row">
             <label>Monitor interval (minutes)</label>
             {text("monitor_interval_minutes")}
+          </div>
+          <div className="form-row">
+            <label>Download retries</label>
+            {text("download_retry_attempts")}
+            <span style={{ color: "var(--text-faint)", fontSize: 13 }}>Retries transient failures with exponential backoff.</span>
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <h3>Metadata enrichment — Metron (optional)</h3>
+          <p className="section-hint">Adds issue summaries, creators, arcs, page counts, status, and collected-edition reprint mappings using ComicVine ID cross-references.</p>
+          <div className="form-row"><label>Enabled</label><Toggle on={form.metron_enabled === "true"} onChange={setBool("metron_enabled")} /></div>
+          <div className="form-row"><label>Username</label>{text("metron_username")}</div>
+          <div className="form-row"><label>Password</label>{text("metron_password", true)}</div>
+          <div className="form-row"><label>Issues per refresh</label>{text("metron_issue_enrichment_limit")}
+            <span style={{ color: "var(--text-faint)", fontSize: 13 }}>Gradually enriches large series while respecting Metron rate limits.</span>
+          </div>
+          <div className="form-row"><label></label><button className="btn" onClick={() => testMetron.mutate()} disabled={testMetron.isPending}>Test Metron</button>
+            {metronTest && <span style={{ fontSize: 13, color: metronTest.startsWith("✔") ? "var(--success)" : "var(--danger)" }}>{metronTest}</span>}
           </div>
         </div>
 
@@ -237,6 +279,11 @@ export default function Settings() {
           <div className="form-row">
             <label>GetComics base URL</label>
             {text("getcomics_base_url")}
+          </div>
+          <div className="form-row">
+            <label>Download service order</label>
+            {text("getcomics_service_preference")}
+            <span style={{ color: "var(--text-faint)", fontSize: 13 }}>Comma-separated: main, pixeldrain, mediafire.</span>
           </div>
           <div className="form-row">
             <label>HTTP proxy (optional)</label>

@@ -12,12 +12,19 @@ DEFAULTS: dict[str, str] = {
     "source_priority": "getcomics",
     # ComicVine metadata (free API key from comicvine.gamespot.com/api)
     "comicvine_api_key": "",
+    # Optional richer metadata enrichment. Metron uses HTTP Basic auth.
+    "metron_enabled": "false",
+    "metron_username": "",
+    "metron_password": "",
+    "metron_issue_enrichment_limit": "5",
     # GetComics
     "getcomics_base_url": "https://getcomics.org",
     # Optional HTTP(S) proxy for all GetComics traffic (searches + file
     # downloads) — point it at a VPN-side proxy (e.g. Privoxy on a
     # qbittorrentvpn container) to route downloads through the VPN
     "getcomics_proxy": "",
+    # Ordered download-host preference for links exposed by GetComics.
+    "getcomics_service_preference": "main,pixeldrain,mediafire",
     # Where DDL files land before import; empty → <data dir>/ddl
     "ddl_directory": "",
     # qBittorrent (optional, for manual magnet grabs)
@@ -30,11 +37,12 @@ DEFAULTS: dict[str, str] = {
     "source_getcomics_enabled": "true",
     # Jobs
     "monitor_interval_minutes": "60",
+    "download_retry_attempts": "4",
     # Library
     "library_scan_on_add": "true",  # adopt existing on-disk files on add/refresh
 }
 
-SECRET_KEYS = {"comicvine_api_key", "qbittorrent_password"}
+SECRET_KEYS = {"comicvine_api_key", "metron_password", "qbittorrent_password"}
 
 
 def parse_monitor_interval(value: str) -> int:
@@ -66,6 +74,22 @@ def validate_updates(values: dict[str, str]) -> dict[str, str]:
                 raise ValueError(f"Invalid naming template: {exc}") from exc
         elif key == "qbittorrent_category" and not value.strip():
             raise ValueError("qBittorrent category cannot be empty")
+        elif key in {"download_retry_attempts", "metron_issue_enrichment_limit"}:
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key.replace('_', ' ').title()} must be a whole number") from exc
+            maximum = 10 if key == "download_retry_attempts" else 25
+            if not 0 <= numeric <= maximum:
+                raise ValueError(f"{key.replace('_', ' ').title()} must be between 0 and {maximum}")
+            value = str(numeric)
+        elif key == "getcomics_service_preference":
+            allowed = {"main", "pixeldrain", "mediafire"}
+            order = [v.strip().lower() for v in value.split(",") if v.strip()]
+            unknown = [v for v in order if v not in allowed]
+            if unknown:
+                raise ValueError(f"Unknown GetComics download service: {unknown[0]}")
+            value = ",".join(dict.fromkeys(order)) or "main,pixeldrain,mediafire"
         cleaned[key] = value
     return cleaned
 

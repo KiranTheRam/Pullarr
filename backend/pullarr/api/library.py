@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from .. import settings_service
 from ..db import get_session
+from ..jobs.service import create_job
 from ..library.matcher import find_media_files, match_files
 from ..library.rename import apply_renames, plan_renames
 from ..library.scanner import (
@@ -19,7 +20,7 @@ from ..library.scanner import (
     scan_series,
     series_dir,
 )
-from ..models import RootFolder, Series, SeriesFolder, SeriesSourceLink
+from ..models import JobKind, RootFolder, Series, SeriesFolder, SeriesSourceLink
 from ..schemas import (
     CleanupApplyIn,
     CleanupFileOut,
@@ -104,11 +105,12 @@ async def scan(series_id: int, session: AsyncSession = Depends(get_session)):
 
 
 @router.post("/library/scan", status_code=202)
-async def scan_all():
+async def scan_all(session: AsyncSession = Depends(get_session)):
     from ..jobs.tasks import scan_all_series
 
-    asyncio.get_running_loop().create_task(scan_all_series())
-    return {"status": "scanning"}
+    job = await create_job(session, JobKind.SCAN_LIBRARY)
+    asyncio.get_running_loop().create_task(scan_all_series(job.id))
+    return {"status": "scanning", "job_id": job.id}
 
 
 # ----------------------------------------------------------------- rename

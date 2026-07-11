@@ -45,7 +45,10 @@ app.mount("/api/v1", api)
 async def initialize():
     """Bootstrap info for the web UI (same-origin only), mirroring how the
     *arr apps hand their UI the API key."""
-    return {"apiKey": get_api_key(), "version": __version__, "urlBase": ""}
+    return JSONResponse(
+        {"apiKey": get_api_key(), "version": __version__, "urlBase": ""},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # Serve the built frontend if present (production/Docker)
@@ -58,7 +61,10 @@ if STATIC_DIR.is_dir():
         candidate = STATIC_DIR / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(
+            STATIC_DIR / "index.html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 else:
 
     @app.get("/")

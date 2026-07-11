@@ -1,6 +1,6 @@
 [project]
 name = "pullarr"
-version = "0.1.0"
+version = "0.2.0"
 description = "Radarr/Sonarr-style automation for western comics"
 requires-python = ">=3.11"
 dependencies = [

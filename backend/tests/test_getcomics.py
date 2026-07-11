@@ -1,12 +1,18 @@
 from pathlib import Path
 
+import httpx
+import pytest
+import respx
+
 from pullarr.sources.getcomics import (
+    GetComicsSource,
     main_server_links,
     mirror_link,
     parse_download_buttons,
     parse_search_page,
     pixeldrain_api_url,
 )
+from pullarr.sources.base import SourceRelease
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -73,7 +79,7 @@ class TestPixeldrainApiUrl:
 
     def test_list_page(self):
         assert pixeldrain_api_url("https://pixeldrain.com/l/abc123") == \
-            "https://pixeldrain.com/api/file/abc123?download"
+            "https://pixeldrain.com/api/list/abc123/zip?download"
 
     def test_non_pixeldrain(self):
         assert pixeldrain_api_url("https://mega.nz/file/xyz") is None
@@ -91,3 +97,29 @@ class TestVolumeTitles:
         assert len(releases) == 1
         assert releases[0].issue_number is None
         assert releases[0].volume_number == 3
+
+    def test_collected_edition_kept_for_series_browse(self):
+        release = SourceRelease(
+            source_name="getcomics",
+            external_id="url",
+            title="Batman and Robin Vol. 3 - The Quiet Man (TPB) (2026)",
+            volume_number=3,
+        )
+        assert GetComicsSource._belongs_to_series(release, "batman and robin")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mediafire_page_resolves_direct_download():
+    client = httpx.AsyncClient()
+    source = GetComicsSource(client)
+    respx.get("https://www.mediafire.com/file/abc/book.cbz/file").mock(
+        return_value=httpx.Response(
+            200,
+            text='<a id="downloadButton" href="https://download123.mediafire.com/token/book.cbz">Download</a>',
+        )
+    )
+    assert await source._resolve_mediafire(
+        "https://www.mediafire.com/file/abc/book.cbz/file"
+    ) == "https://download123.mediafire.com/token/book.cbz"
+    await client.aclose()

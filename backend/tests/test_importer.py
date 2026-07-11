@@ -1,3 +1,4 @@
+import io
 import zipfile
 
 import pytest
@@ -33,6 +34,14 @@ def make_cbz(path, pages=2):
             zf.writestr(f"{i:03d}.png", PNG)
 
 
+def cbz_bytes(pages=2):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as zf:
+        for i in range(pages):
+            zf.writestr(f"{i:03d}.png", PNG)
+    return output.getvalue()
+
+
 class TestImportPayload:
     def test_single_cbz_matched_to_issue(self, tmp_path, series, issues):
         src = tmp_path / "payload" / "Absolute Batman 002 (2025) (Webrip).cbz"
@@ -63,18 +72,23 @@ class TestImportPayload:
         assert "<Number>2</Number>" in xml
         assert "<Publisher>DC Comics</Publisher>" in xml
 
-    def test_existing_comicinfo_untouched(self, tmp_path, series, issues):
+    def test_existing_comicinfo_merged_and_refreshed(self, tmp_path, series, issues):
         src = tmp_path / "payload" / "Absolute Batman 002.cbz"
         src.parent.mkdir()
         with zipfile.ZipFile(src, "w") as zf:
             zf.writestr("001.png", PNG)
-            zf.writestr("ComicInfo.xml", "<ComicInfo><Series>Original</Series></ComicInfo>")
+            zf.writestr(
+                "ComicInfo.xml",
+                "<ComicInfo><Series>Original</Series>"
+                "<ScanInformation>Keep me</ScanInformation></ComicInfo>",
+            )
 
         imported = run_import(src, series, issues, tmp_path / "lib")
 
         with zipfile.ZipFile(imported[0].dest) as zf:
             xml = zf.read("ComicInfo.xml").decode()
-        assert "Original" in xml
+        assert "Absolute Batman" in xml
+        assert "Keep me" in xml
 
     def test_mixed_archives_and_loose_image_dirs(self, tmp_path, series, issues):
         payload = tmp_path / "Absolute Batman (Digital)"
@@ -106,6 +120,30 @@ class TestImportPayload:
         assert r.issue is None
         assert r.dest.name == "Absolute Batman #001-003.cbz"
         assert sorted(i.number for i in r.covered) == [1.0, 2.0, 3.0]
+
+    def test_outer_zip_pack_imports_nested_archives(self, tmp_path, series, issues):
+        payload = tmp_path / "payload"
+        payload.mkdir()
+        pack = payload / "Absolute Batman (001-003+) (2024).zip"
+        with zipfile.ZipFile(pack, "w") as zf:
+            # The bonus preview also parses as #1; the real series archive
+            # must win that match instead of causing an import collision.
+            zf.writestr("House of Comics - Free Previews 01.cbz", cbz_bytes())
+            for number in range(1, 4):
+                zf.writestr(
+                    f"Absolute Batman {number:02d} (of 03).cbz", cbz_bytes()
+                )
+
+        imported = run_import(
+            payload, series, issues, tmp_path / "lib", force_issue=issues[0]
+        )
+
+        by_issue = {item.issue.number: item for item in imported if item.issue is not None}
+        assert set(by_issue) == {1.0, 2.0, 3.0}
+        assert all(item.dest.exists() for item in by_issue.values())
+        extras = [item for item in imported if item.status == "unmatched"]
+        assert len(extras) == 1
+        assert "Free Previews" in extras[0].dest.name
 
     def test_hash_range_title_covers_span(self, tmp_path, series, issues):
         payload = tmp_path / "payload"

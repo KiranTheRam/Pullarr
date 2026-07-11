@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type {
   Issue,
+  JobItem,
   QueueItem,
   Release,
   ScanResult,
@@ -13,6 +14,7 @@ import {
   issueLabel,
   formatBytes,
   Modal,
+  QueryError,
   Spinner,
   statusPill,
   Toolbar,
@@ -32,6 +34,55 @@ type SeriesLocationState = {
 };
 
 const ADD_SYNC_NOTICE_TIMEOUT_MS = 120000;
+
+function SeriesDescription({ description }: { description: string }) {
+  const descriptionRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [canExpand, setCanExpand] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [description]);
+
+  useEffect(() => {
+    const element = descriptionRef.current;
+    if (!element || expanded) return;
+
+    const measureOverflow = () => {
+      setCanExpand(element.scrollHeight > element.clientHeight + 1);
+    };
+
+    measureOverflow();
+    const observer = new ResizeObserver(measureOverflow);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [description, expanded]);
+
+  if (!description) return null;
+
+  return (
+    <div className="series-description">
+      <div
+        id="series-description"
+        ref={descriptionRef}
+        className={`series-desc${expanded ? " expanded" : " collapsed"}`}
+      >
+        {description}
+      </div>
+      {canExpand && (
+        <button
+          type="button"
+          className="series-desc-toggle"
+          aria-controls="series-description"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </div>
+  );
+}
 
 function InteractiveSearch({
   seriesId,
@@ -273,6 +324,7 @@ export default function SeriesDetail() {
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [workNotice, setWorkNotice] = useState<string | null>(null);
   const [showAddSyncNotice, setShowAddSyncNotice] = useState(false);
+  const [issueFilter, setIssueFilter] = useState<"all" | "missing" | "downloaded" | "monitored">("all");
 
   const showWorkNotice = (message: string, timeout = 9000) => {
     setWorkNotice(message);
@@ -282,7 +334,7 @@ export default function SeriesDetail() {
     );
   };
 
-  const { data: series, isLoading } = useQuery({
+  const { data: series, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["series", seriesId],
     queryFn: () => api.get<SeriesDetailType>(`/series/${seriesId}`),
     refetchInterval: 10000,
@@ -291,6 +343,11 @@ export default function SeriesDetail() {
   const { data: queue } = useQuery({
     queryKey: ["queue"],
     queryFn: () => api.get<QueueItem[]>("/queue"),
+    refetchInterval: 2000,
+  });
+  const { data: jobs } = useQuery({
+    queryKey: ["jobs", seriesId],
+    queryFn: () => api.get<JobItem[]>(`/jobs?series_id=${seriesId}&active=true`),
     refetchInterval: 2000,
   });
 
@@ -337,7 +394,7 @@ export default function SeriesDetail() {
   const searchMissing = useMutation({
     mutationFn: () => api.post(`/series/${seriesId}/search`),
     onSuccess: () => {
-      showWorkNotice("Searching sources for missing monitored issues — grabs land in the queue…");
+      showWorkNotice("Searching sources for every missing released issue — grabs land in the queue…");
       setTimeout(invalidate, 4000);
     },
   });
@@ -368,6 +425,9 @@ export default function SeriesDetail() {
     onSuccess: invalidate,
   });
 
+  if (isError) {
+    return <><Toolbar title="Series" /><div className="content"><QueryError error={error} retry={() => refetch()} /></div></>;
+  }
   if (isLoading || !series) {
     return (
       <>
@@ -395,10 +455,19 @@ export default function SeriesDetail() {
     showAddSyncNotice && series.issues.length === 0
       ? `Adding series. Pullarr is fetching the issue list, linking sources, and scanning the library${locationState?.searchNow ? " before searching for missing content" : ""}...`
       : null;
+  // Persisted jobs provide more specific, live progress. The temporary notice is
+  // only a fallback while the newly-created job has not appeared in polling yet.
+  const fallbackWorkNotice = jobs?.length ? null : workNotice || addSyncNotice;
   const hasTopBanners =
-    Boolean(workNotice || addSyncNotice || scanResult) || activeDownloads.length > 0;
+    Boolean(fallbackWorkNotice || scanResult) || activeDownloads.length > 0 || Boolean(jobs?.length);
 
-  const issueRows = (issues: Issue[]) => (
+  const issueRows = (issues: Issue[]) => {
+    const filtered = issues.filter((issue) =>
+      issueFilter === "all" ? true : issueFilter === "missing" ? !issue.downloaded :
+      issueFilter === "downloaded" ? issue.downloaded : issue.monitored
+    );
+    if (!filtered.length) return <p style={{ color: "var(--text-dim)", padding: 12 }}>No issues match this filter.</p>;
+    return (
     <table className="data-table">
       <thead>
         <tr>
@@ -410,7 +479,7 @@ export default function SeriesDetail() {
         </tr>
       </thead>
       <tbody>
-        {issues.map((ch) => (
+        {filtered.map((ch) => (
           <tr key={ch.id}>
             <td>
               <button
@@ -469,7 +538,8 @@ export default function SeriesDetail() {
         ))}
       </tbody>
     </table>
-  );
+    );
+  };
 
   return (
     <>
@@ -513,7 +583,7 @@ export default function SeriesDetail() {
         </button>
         <button
           className="btn"
-          title="Automatically search sources and grab all missing monitored issues"
+          title="Search sources now and grab every missing released issue, regardless of monitoring"
           onClick={() => searchMissing.mutate()}
           disabled={searchMissing.isPending}
         >
@@ -551,11 +621,21 @@ export default function SeriesDetail() {
         </button>
       </Toolbar>
       <div className="content">
-        {(workNotice || addSyncNotice) && (
+        {(refresh.isError || searchMissing.isError || scan.isError || toggleMonitor.isError || toggleIssue.isError) && (
+          <div className="error-banner" role="alert">{String((refresh.error || searchMissing.error || scan.error || toggleMonitor.error || toggleIssue.error) as Error)}</div>
+        )}
+        {jobs && jobs.length > 0 && jobs.map((job) => (
+          <div className="activity-banner" key={job.id}>
+            <span className="mini-spinner" />
+            <strong>{job.kind.replaceAll("_", " ")}.</strong>
+            <span>{job.phase} · {Math.round(job.progress * 100)}%</span>
+          </div>
+        ))}
+        {fallbackWorkNotice && (
           <div className="activity-banner">
             <span className="mini-spinner" />
             <strong>Working.</strong>
-            <span>{workNotice || addSyncNotice}</span>
+            <span>{fallbackWorkNotice}</span>
           </div>
         )}
         {activeDownloads.length > 0 && (
@@ -601,6 +681,7 @@ export default function SeriesDetail() {
                 {series.downloaded_count} / {series.issue_count} issues
               </span>
               {series.publisher && <span>{series.publisher}</span>}
+              {series.metron_id && <span className="tag">Metron enriched</span>}
             </div>
             <div style={{ marginBottom: 10 }}>
               {series.genres
@@ -612,7 +693,7 @@ export default function SeriesDetail() {
                   </span>
                 ))}
             </div>
-            <div className="series-desc">{series.description}</div>
+            <SeriesDescription description={series.description} />
             <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
               {series.source_links.map((sl) => (
                 <span className="tag" key={sl.id} title={sl.external_title}>
@@ -626,6 +707,18 @@ export default function SeriesDetail() {
             <FoldersPanel seriesId={seriesId} onChanged={invalidate} />
           </div>
         </div>
+
+        {series.issues.length > 0 && (
+          <div className="table-actions issue-filters">
+            {(["all", "missing", "downloaded", "monitored"] as const).map((value) => (
+              <button key={value} className={`btn sm${issueFilter === value ? " primary" : ""}`} onClick={() => setIssueFilter(value)}>
+                {value[0].toUpperCase() + value.slice(1)}
+              </button>
+            ))}
+            <button className="btn sm" onClick={() => setCollapsed(Object.fromEntries(groups.map((group) => [group.volume === null ? "none" : String(group.volume), true])))}>Collapse all</button>
+            <button className="btn sm" onClick={() => setCollapsed({})}>Expand all</button>
+          </div>
+        )}
 
         {series.issues.length === 0 ? (
           <p style={{ color: "var(--text-dim)" }}>

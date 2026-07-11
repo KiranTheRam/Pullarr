@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["queue"])
 
 ACTIVE = [DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING, DownloadStatus.IMPORTING]
+VISIBLE_QUEUE = [*ACTIVE, DownloadStatus.NEEDS_ATTENTION]
 
 
 @router.get("/queue", response_model=list[QueueItemOut])
@@ -23,7 +24,7 @@ async def get_queue(session: AsyncSession = Depends(get_session)):
     result = await session.execute(
         select(Download, Series.title)
         .outerjoin(Series, Download.series_id == Series.id)
-        .where(Download.status.in_(ACTIVE))
+        .where(Download.status.in_(VISIBLE_QUEUE))
         .order_by(Download.id)
     )
     items = []
@@ -32,6 +33,72 @@ async def get_queue(session: AsyncSession = Depends(get_session)):
         out.series_title = series_title or ""
         items.append(out)
     return items
+
+
+@router.get("/queue/failed", response_model=list[QueueItemOut])
+async def get_failed_queue(limit: int = 100, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Download, Series.title)
+        .outerjoin(Series, Download.series_id == Series.id)
+        .where(Download.status == DownloadStatus.FAILED)
+        .order_by(Download.id.desc())
+        .limit(min(max(limit, 1), 500))
+    )
+    items = []
+    for dl, series_title in result.all():
+        out = QueueItemOut.model_validate(dl)
+        out.series_title = series_title or ""
+        items.append(out)
+    return items
+
+
+@router.post("/queue/{download_id}/retry", response_model=QueueItemOut)
+async def retry_download(download_id: int, session: AsyncSession = Depends(get_session)):
+    dl = await session.get(Download, download_id)
+    if dl is None:
+        raise HTTPException(404, "Download not found")
+    if dl.status not in (DownloadStatus.FAILED, DownloadStatus.NEEDS_ATTENTION):
+        raise HTTPException(409, "Only failed downloads can be retried")
+    if dl.kind != DownloadKind.DIRECT:
+        raise HTTPException(409, "Torrent retries must be grabbed again from search")
+    dl.status = DownloadStatus.QUEUED
+    dl.attempt_count = 0
+    dl.next_retry_at = None
+    dl.error = ""
+    dl.error_code = ""
+    dl.blocked = False
+    session.add(HistoryEvent(
+        series_id=dl.series_id, issue_id=dl.issue_id, event="retrying",
+        source_name=dl.source_name, detail=f"Manual retry: {dl.title}",
+    ))
+    await session.commit()
+    await session.refresh(dl)
+    out = QueueItemOut.model_validate(dl)
+    series = await session.get(Series, dl.series_id) if dl.series_id else None
+    out.series_title = series.title if series else ""
+    return out
+
+
+@router.post("/queue/{download_id}/block", response_model=QueueItemOut)
+async def block_download(download_id: int, session: AsyncSession = Depends(get_session)):
+    dl = await session.get(Download, download_id)
+    if dl is None:
+        raise HTTPException(404, "Download not found")
+    dl.blocked = True
+    dl.status = DownloadStatus.FAILED
+    dl.error = dl.error or "blocked by user"
+    dl.error_code = dl.error_code or "blocked"
+    dl.next_retry_at = None
+    session.add(HistoryEvent(
+        series_id=dl.series_id, issue_id=dl.issue_id, event="blocked",
+        source_name=dl.source_name, detail=dl.title or dl.payload,
+    ))
+    await session.commit()
+    await session.refresh(dl)
+    out = QueueItemOut.model_validate(dl)
+    series = await session.get(Series, dl.series_id) if dl.series_id else None
+    out.series_title = series.title if series else ""
+    return out
 
 
 async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
@@ -45,6 +112,16 @@ async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
     for dl in downloads:
         dl.status = DownloadStatus.FAILED
         dl.error = "removed by user"
+        dl.error_code = "cancelled"
+        dl.next_retry_at = None
+        dl.blocked = False
+        session.add(HistoryEvent(
+            series_id=dl.series_id,
+            issue_id=dl.issue_id,
+            event="removed",
+            source_name=dl.source_name,
+            detail=dl.title or "Download removed by user",
+        ))
     await session.commit()
     cancel_downloads([
         dl.id for dl in downloads
@@ -123,13 +200,25 @@ async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/history", response_model=list[HistoryOut])
-async def get_history(limit: int = 100, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(
+async def get_history(
+    limit: int = 100,
+    offset: int = 0,
+    event: str | None = None,
+    series_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    query = (
         select(HistoryEvent, Series.title)
         .outerjoin(Series, HistoryEvent.series_id == Series.id)
         .order_by(HistoryEvent.id.desc())
-        .limit(limit)
+        .offset(max(offset, 0))
+        .limit(min(max(limit, 1), 500))
     )
+    if event:
+        query = query.where(HistoryEvent.event == event)
+    if series_id is not None:
+        query = query.where(HistoryEvent.series_id == series_id)
+    result = await session.execute(query)
     items = []
     for ev, series_title in result.all():
         out = HistoryOut.model_validate(ev)

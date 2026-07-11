@@ -8,9 +8,10 @@ from sqlalchemy.orm import selectinload
 
 from ..db import get_session
 from ..jobs.tasks import refresh_series_full
+from ..jobs.service import create_job
 from ..library.naming import series_folder
 from ..metadata.comicvine import ComicVineError, provider as comicvine
-from ..models import Issue, Series, SeriesFolder
+from ..models import Issue, JobKind, Series, SeriesFolder
 from ..schemas import (
     AddSeriesIn,
     IssueMonitorIn,
@@ -112,8 +113,14 @@ async def add_series(body: AddSeriesIn, session: AsyncSession = Depends(get_sess
     # Fetch the issue list + link sources in the background. `search_now`
     # explicitly queues missing released issues after the initial disk scan;
     # otherwise monitoring begins on the next scheduled pass.
+    job = await create_job(
+        session,
+        JobKind.SEARCH_MISSING if body.search_now else JobKind.REFRESH_SERIES,
+        series_id=series.id,
+        detail="Initial series sync",
+    )
     asyncio.get_running_loop().create_task(
-        refresh_series_full(series.id, grab_missing=body.search_now)
+        refresh_series_full(series.id, grab_missing=body.search_now, job_id=job.id)
     )
     return await get_series(series.id, session)
 
@@ -182,24 +189,30 @@ async def refresh_series(series_id: int, session: AsyncSession = Depends(get_ses
     series = await session.get(Series, series_id)
     if series is None:
         raise HTTPException(404, "Series not found")
-    asyncio.get_running_loop().create_task(refresh_series_full(series_id))
-    return {"status": "refreshing"}
+    job = await create_job(session, JobKind.REFRESH_SERIES, series_id=series_id)
+    asyncio.get_running_loop().create_task(refresh_series_full(series_id, job_id=job.id))
+    return {"status": "refreshing", "job_id": job.id}
 
 
 @router.post("/{series_id}/search", status_code=202)
 async def search_missing_issues(
     series_id: int, session: AsyncSession = Depends(get_session)
 ):
-    """On-demand hunt for this series' missing monitored issues — the same
-    refresh + grab pass the hourly monitor runs, regardless of the series'
-    monitor toggle."""
+    """On-demand hunt for every released missing issue in this series.
+
+    Monitoring controls automatic scheduled grabs; an explicit user search
+    intentionally ignores both the series and per-issue monitor toggles.
+    """
     series = await session.get(Series, series_id)
     if series is None:
         raise HTTPException(404, "Series not found")
+    job = await create_job(session, JobKind.SEARCH_MISSING, series_id=series_id)
     asyncio.get_running_loop().create_task(
-        refresh_series_full(series_id, grab_missing=True, only_monitored=True)
+        refresh_series_full(
+            series_id, grab_missing=True, only_monitored=False, job_id=job.id
+        )
     )
-    return {"status": "searching"}
+    return {"status": "searching", "job_id": job.id}
 
 
 @router.put("/{series_id}/issues/monitor", status_code=204)

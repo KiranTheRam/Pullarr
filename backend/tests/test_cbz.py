@@ -6,6 +6,8 @@ from pullarr.download.cbz import (
     guess_extension,
     has_comicinfo,
     inject_comicinfo,
+    read_comicinfo,
+    upsert_comicinfo,
     write_cbz,
 )
 
@@ -81,6 +83,24 @@ class TestInjectComicinfo:
         cbr = tmp_path / "x.cbr"
         cbr.write_bytes(b"Rar!\x1a\x07\x00fake")
         assert inject_comicinfo(cbr, "<ComicInfo/>") is False
+
+    def test_upsert_refreshes_owned_fields_and_preserves_unknown(self, tmp_path):
+        cbz = tmp_path / "x.cbz"
+        with zipfile.ZipFile(cbz, "w") as zf:
+            zf.writestr("001.png", PNG)
+            zf.writestr(
+                "ComicInfo.xml",
+                "<ComicInfo><Series>Old</Series><ScanInformation>Keep</ScanInformation></ComicInfo>",
+            )
+        assert upsert_comicinfo(cbz, build_comicinfo("New", number="1", year=2026))
+        xml = read_comicinfo(cbz)
+        root = fromstring(xml)
+        assert root.findtext("Series") == "New"
+        assert root.findtext("Number") == "1"
+        assert root.findtext("Year") == "2026"
+        assert root.findtext("ScanInformation") == "Keep"
+        with zipfile.ZipFile(cbz) as zf:
+            assert sum(n.lower() == "comicinfo.xml" for n in zf.namelist()) == 1
 
 
 class TestWriteCbz:

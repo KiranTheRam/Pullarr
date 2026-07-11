@@ -25,10 +25,30 @@ class SourceLinkOut(BaseModel):
 class IssueOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    metron_id: int | None
     number: float
     display_number: str
     volume: int | None
     title: str
+    summary: str
+    imprint: str
+    writers: str
+    pencillers: str
+    inkers: str
+    colorists: str
+    letterers: str
+    cover_artists: str
+    editors: str
+    translators: str
+    story_arcs: str
+    reprints: str
+    characters: str
+    teams: str
+    genres: str
+    web_url: str
+    format: str
+    language: str
+    page_count: int | None
     monitored: bool
     downloaded: bool
     file_path: str
@@ -39,6 +59,7 @@ class SeriesOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     comicvine_id: int | None
+    metron_id: int | None
     title: str
     description: str
     status: str
@@ -160,6 +181,10 @@ class QueueItemOut(BaseModel):
     source_name: str
     progress: float
     error: str
+    error_code: str
+    attempt_count: int
+    next_retry_at: datetime | None
+    blocked: bool
     created_at: datetime
     series_title: str = ""
 
@@ -185,6 +210,8 @@ class WantedItemOut(BaseModel):
     volume: int | None
     title: str
     released_at: datetime | None
+    series_monitored: bool
+    issue_monitored: bool
 
 
 class QbtTestIn(BaseModel):
@@ -195,6 +222,28 @@ class QbtTestIn(BaseModel):
 
 class ComicVineTestIn(BaseModel):
     api_key: str
+
+
+class MetronTestIn(BaseModel):
+    username: str
+    password: str
+
+
+class JobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    kind: str
+    status: str
+    series_id: int | None
+    progress: float
+    phase: str
+    detail: str
+    error: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    updated_at: datetime
+    series_title: str = ""
 
 
 class SystemStatus(BaseModel):

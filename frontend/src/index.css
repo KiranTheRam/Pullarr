@@ -264,6 +264,97 @@ input[type="checkbox"] {
   transition: transform 0.12s ease;
 }
 
+.poster-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.library-filters,
+.issue-filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.library-filters input {
+  width: min(360px, 100%);
+}
+
+@media (max-width: 760px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .main {
+    order: 1;
+    min-height: 0;
+  }
+
+  .sidebar {
+    order: 2;
+    width: 100%;
+    min-width: 0;
+    border-right: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .sidebar-logo,
+  .sidebar-footer {
+    display: none;
+  }
+
+  .sidebar nav {
+    display: flex;
+    padding: 0;
+  }
+
+  .nav-item {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 4px;
+    border-left: 0;
+    border-top: 3px solid transparent;
+    font-size: 11px;
+  }
+
+  .nav-item.active {
+    border-left-color: transparent;
+    border-top-color: var(--accent);
+  }
+
+  .nav-badge {
+    position: absolute;
+    margin: -16px 0 0 24px;
+  }
+
+  .toolbar {
+    padding: 0 12px;
+    overflow-x: auto;
+  }
+
+  .content {
+    padding: 14px;
+  }
+
+  .poster-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 10px;
+  }
+
+  .series-header {
+    align-items: flex-start;
+  }
+
+  .series-header .cover {
+    width: 110px;
+  }
+}
+
 .poster-card:hover {
   transform: scale(1.03);
 }
@@ -388,6 +479,31 @@ input[type="checkbox"] {
   max-width: 900px;
   font-size: 13.5px;
   white-space: pre-line;
+}
+
+.series-desc.collapsed {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+}
+
+.series-desc-toggle {
+  margin-top: 5px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.series-desc-toggle:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.series-desc-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
 }
 
 .tag {

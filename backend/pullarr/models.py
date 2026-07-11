@@ -80,6 +80,7 @@ class Series(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     comicvine_id: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
+    metron_id: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
     title: Mapped[str] = mapped_column(String)
     sort_title: Mapped[str] = mapped_column(String, default="")
     alt_titles: Mapped[str] = mapped_column(Text, default="")  # newline-separated
@@ -97,6 +98,7 @@ class Series(Base):
     root_folder_id: Mapped[int | None] = mapped_column(ForeignKey("root_folders.id"), nullable=True)
     folder_name: Mapped[str] = mapped_column(String, default="")
     added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    metadata_refreshed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     root_folder: Mapped[RootFolder | None] = relationship(back_populates="series")
     issues: Mapped[list[Issue]] = relationship(
@@ -159,12 +161,33 @@ class Issue(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     series_id: Mapped[int] = mapped_column(ForeignKey("series.id"))
     comicvine_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metron_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     number: Mapped[float] = mapped_column(Float)  # sortable numeric key
     display_number: Mapped[str] = mapped_column(String, default="")  # raw ComicVine issue number
     # collected-volume (TPB) number this issue belongs to; only populated by
     # manual file mapping — ComicVine has no issue→TPB data
     volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
     title: Mapped[str] = mapped_column(String, default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    imprint: Mapped[str] = mapped_column(String, default="")
+    writers: Mapped[str] = mapped_column(Text, default="")
+    pencillers: Mapped[str] = mapped_column(Text, default="")
+    inkers: Mapped[str] = mapped_column(Text, default="")
+    colorists: Mapped[str] = mapped_column(Text, default="")
+    letterers: Mapped[str] = mapped_column(Text, default="")
+    cover_artists: Mapped[str] = mapped_column(Text, default="")
+    editors: Mapped[str] = mapped_column(Text, default="")
+    translators: Mapped[str] = mapped_column(Text, default="")
+    story_arcs: Mapped[str] = mapped_column(Text, default="")
+    reprints: Mapped[str] = mapped_column(Text, default="")
+    characters: Mapped[str] = mapped_column(Text, default="")
+    teams: Mapped[str] = mapped_column(Text, default="")
+    genres: Mapped[str] = mapped_column(Text, default="")
+    web_url: Mapped[str] = mapped_column(String, default="")
+    format: Mapped[str] = mapped_column(String, default="")
+    language: Mapped[str] = mapped_column(String, default="")
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_refreshed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     monitored: Mapped[bool] = mapped_column(Boolean, default=True)
     downloaded: Mapped[bool] = mapped_column(Boolean, default=False)
     file_path: Mapped[str] = mapped_column(String, default="")
@@ -184,6 +207,7 @@ class DownloadStatus(str, enum.Enum):
     IMPORTING = "importing"
     DONE = "done"
     FAILED = "failed"
+    NEEDS_ATTENTION = "needs_attention"
 
 
 class Download(Base):
@@ -205,6 +229,10 @@ class Download(Base):
     torrent_hash: Mapped[str] = mapped_column(String, default="")
     progress: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1
     error: Mapped[str] = mapped_column(Text, default="")
+    error_code: Mapped[str] = mapped_column(String, default="")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=utcnow, onupdate=utcnow
@@ -234,3 +262,46 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
+
+
+class JobKind(str, enum.Enum):
+    REFRESH_SERIES = "refresh_series"
+    SEARCH_MISSING = "search_missing"
+    SCAN_SERIES = "scan_series"
+    SCAN_LIBRARY = "scan_library"
+
+
+class JobStatus(str, enum.Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class Job(Base):
+    """Persisted user/background work so the UI can report real state."""
+
+    __tablename__ = "jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[JobKind] = mapped_column(
+        Enum(JobKind, values_callable=lambda e: [m.value for m in e])
+    )
+    status: Mapped[JobStatus] = mapped_column(
+        Enum(JobStatus, values_callable=lambda e: [m.value for m in e]),
+        default=JobStatus.QUEUED,
+    )
+    series_id: Mapped[int | None] = mapped_column(ForeignKey("series.id"), nullable=True)
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    phase: Mapped[str] = mapped_column(String, default="queued")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    payload: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utcnow, onupdate=utcnow
+    )
+
+    series: Mapped[Series | None] = relationship()

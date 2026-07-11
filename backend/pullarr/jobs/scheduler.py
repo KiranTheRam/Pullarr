@@ -5,6 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ..db import session_scope
 from .. import settings_service
 from .tasks import monitor_all, process_direct_queue, sync_qbittorrent
+from .service import recover_interrupted_jobs
 
 log = logging.getLogger(__name__)
 
@@ -13,6 +14,9 @@ scheduler = AsyncIOScheduler()
 
 async def start() -> None:
     async with session_scope() as session:
+        recovered = await recover_interrupted_jobs(session)
+        if recovered:
+            log.warning("Marked %d interrupted background job(s) failed", recovered)
         raw_interval = await settings_service.get(session, "monitor_interval_minutes") or "60"
         try:
             interval = settings_service.parse_monitor_interval(raw_interval)

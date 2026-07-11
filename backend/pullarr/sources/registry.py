@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import settings_service
 from ..metadata.comicvine import provider as comicvine_provider
+from ..metadata.metron import provider as metron_provider
 from .base import DDLSource, TorrentIndexer
 from .getcomics import source as getcomics_source
 
@@ -20,9 +21,11 @@ async def apply_settings(session: AsyncSession) -> dict[str, str]:
     settings dict."""
     values = await settings_service.get_all(session)
     comicvine_provider.configure(values["comicvine_api_key"])
+    metron_provider.configure(values["metron_username"], values["metron_password"])
     await getcomics_source.configure(
         base_url=values["getcomics_base_url"],
         proxy=values["getcomics_proxy"],
+        service_preference=values["getcomics_service_preference"],
     )
     return values
 

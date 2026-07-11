@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { HistoryItem, QueueItem } from "../api/types";
-import { EmptyState, Spinner, statusPill, Toolbar } from "../components/common";
+import type { HistoryItem, JobItem, QueueItem } from "../api/types";
+import { EmptyState, QueryError, Spinner, statusPill, Toolbar } from "../components/common";
 
 function Queue() {
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["queue"],
     queryFn: () => api.get<QueueItem[]>("/queue"),
     refetchInterval: 2000,
@@ -27,6 +27,7 @@ function Queue() {
   });
 
   if (isLoading) return <Spinner />;
+  if (isError) return <QueryError error={error} retry={() => refetch()} />;
   if (!data || data.length === 0)
     return <EmptyState icon="⇅" title="Queue is empty" hint="Grabbed releases will appear here." />;
 
@@ -88,7 +89,10 @@ function Queue() {
                   onChange={() => toggle(item.id)}
                 />
               </td>
-              <td>{item.title || item.series_title}</td>
+              <td>
+                {item.title || item.series_title}
+                {item.error && <div className="filepath">{item.error}</div>}
+              </td>
               <td>{item.source_name}</td>
               <td>
                 <span className={`pill ${item.kind === "torrent" ? "orange" : "blue"}`}>
@@ -123,17 +127,23 @@ function Queue() {
 }
 
 function History() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["history"],
-    queryFn: () => api.get<HistoryItem[]>("/history"),
+  const [eventFilter, setEventFilter] = useState("");
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ["history", eventFilter],
+    queryFn: () => api.get<HistoryItem[]>(`/history${eventFilter ? `?event=${eventFilter}` : ""}`),
     refetchInterval: 5000,
   });
 
   if (isLoading) return <Spinner />;
+  if (isError) return <QueryError error={error} retry={() => refetch()} />;
   if (!data || data.length === 0) return <EmptyState icon="🕘" title="No history yet" />;
 
   return (
-    <table className="data-table">
+    <><div className="table-actions issue-filters">
+      {["", "failed", "retrying", "imported", "needs_attention"].map((value) => (
+        <button key={value || "all"} className={`btn sm${eventFilter === value ? " primary" : ""}`} onClick={() => setEventFilter(value)}>{value ? value.replaceAll("_", " ") : "all"}</button>
+      ))}
+    </div><table className="data-table">
       <thead>
         <tr>
           <th style={{ width: 100 }}>Event</th>
@@ -158,17 +168,93 @@ function History() {
           </tr>
         ))}
       </tbody>
+    </table></>
+  );
+}
+
+function FailedDownloads() {
+  const queryClient = useQueryClient();
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ["queue", "failed"],
+    queryFn: () => api.get<QueueItem[]>("/queue/failed"),
+    refetchInterval: 10000,
+  });
+  const retry = useMutation({
+    mutationFn: (id: number) => api.post(`/queue/${id}/retry`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["queue"] });
+      queryClient.invalidateQueries({ queryKey: ["queue", "failed"] });
+    },
+  });
+  const block = useMutation({
+    mutationFn: (id: number) => api.post(`/queue/${id}/block`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["queue", "failed"] }),
+  });
+  if (isLoading) return <Spinner />;
+  if (isError) return <QueryError error={error} retry={() => refetch()} />;
+  if (!data?.length) return <EmptyState icon="✔" title="No failed downloads" />;
+  return (
+    <>{(retry.isError || block.isError) && <div className="error-banner">{String((retry.error || block.error) as Error)}</div>}<table className="data-table">
+      <thead><tr><th>Release</th><th>Failure</th><th>Attempts</th><th>Date</th><th></th></tr></thead>
+      <tbody>{data.map((item) => (
+        <tr key={item.id}>
+          <td>{item.title || item.series_title}<div className="filepath">{item.source_name}</div></td>
+          <td><span className="pill red">{item.error_code || "failed"}</span> {item.error}</td>
+          <td>{item.attempt_count}</td>
+          <td>{new Date(item.created_at).toLocaleString()}</td>
+          <td style={{ whiteSpace: "nowrap" }}>
+            <button className="btn sm" disabled={retry.isPending || item.kind !== "direct"} title={item.kind === "direct" ? "Retry download" : "Re-grab torrents from interactive search"} onClick={() => retry.mutate(item.id)}>Retry</button>{" "}
+            <button className="btn sm" disabled={item.blocked || block.isPending} onClick={() => block.mutate(item.id)}>{item.blocked ? "Blocked" : "Block"}</button>
+          </td>
+        </tr>
+      ))}</tbody>
+    </table></>
+  );
+}
+
+function Jobs() {
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ["jobs"],
+    queryFn: () => api.get<JobItem[]>("/jobs"),
+    refetchInterval: 3000,
+  });
+  if (isLoading) return <Spinner />;
+  if (isError) return <QueryError error={error} retry={() => refetch()} />;
+  if (!data?.length) return <EmptyState icon="⚙" title="No background jobs yet" />;
+  return (
+    <table className="data-table">
+      <thead><tr><th>Job</th><th>Series</th><th>Status</th><th>Phase</th><th>Progress</th><th>Detail</th></tr></thead>
+      <tbody>{data.map((job) => (
+        <tr key={job.id}>
+          <td>{job.kind.replaceAll("_", " ")}</td><td>{job.series_title || "—"}</td>
+          <td><span className={`pill ${statusPill[job.status] ?? "gray"}`}>{job.status}</span></td>
+          <td>{job.phase}</td><td>{Math.round(job.progress * 100)}%</td>
+          <td style={{ color: job.error ? "var(--danger)" : "var(--text-dim)" }}>{job.error || job.detail || "—"}</td>
+        </tr>
+      ))}</tbody>
     </table>
   );
 }
 
 export default function Activity() {
-  const [tab, setTab] = useState<"queue" | "history">("queue");
+  const [tab, setTab] = useState<"queue" | "failed" | "jobs" | "history">("queue");
   return (
     <>
       <Toolbar title="Activity">
         <button className={`btn${tab === "queue" ? " primary" : ""}`} onClick={() => setTab("queue")}>
           Queue
+        </button>
+        <button
+          className={`btn${tab === "failed" ? " primary" : ""}`}
+          onClick={() => setTab("failed")}
+        >
+          Failed
+        </button>
+        <button
+          className={`btn${tab === "jobs" ? " primary" : ""}`}
+          onClick={() => setTab("jobs")}
+        >
+          Jobs
         </button>
         <button
           className={`btn${tab === "history" ? " primary" : ""}`}
@@ -177,7 +263,9 @@ export default function Activity() {
           History
         </button>
       </Toolbar>
-      <div className="content">{tab === "queue" ? <Queue /> : <History />}</div>
+      <div className="content">
+        {tab === "queue" ? <Queue /> : tab === "failed" ? <FailedDownloads /> : tab === "jobs" ? <Jobs /> : <History />}
+      </div>
     </>
   );
 }

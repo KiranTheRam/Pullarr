@@ -7,6 +7,8 @@ never opens or writes files."""
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
+import zipfile
+from xml.etree.ElementTree import ParseError, fromstring
 
 from ..models import Issue
 from ..util import (
@@ -29,6 +31,9 @@ class MediaFile:
     volume_number: int | None
     # a multi-issue bundle in one file ("#1-3" / "001-003"), inclusive
     issue_range: tuple[float, float] | None = None
+    metadata_series: str = ""
+    metadata_number: str = ""
+    metadata_volume: int | None = None
 
     @property
     def label(self) -> str:
@@ -85,19 +90,56 @@ def find_media_files(content_path: Path) -> list[MediaFile]:
 
 def _media_of(path: Path, is_dir: bool) -> MediaFile:
     text = _name_source(path, is_dir)
+    metadata_series, metadata_number, metadata_volume = _comicinfo_identity(path, is_dir)
     volume = parse_volume_number(text)
     issue = parse_issue_number(text)
+    if metadata_volume is not None:
+        volume = metadata_volume
+    if metadata_number:
+        try:
+            issue = float(metadata_number)
+        except ValueError:
+            parsed_metadata = parse_issue_number(f"#{metadata_number}")
+            if parsed_metadata is not None:
+                issue = parsed_metadata
     # a multi-issue bundle ("#1-3" / "001-003") covers a span of issues, not a
     # single one — detect it first so the trailing number isn't read as one issue
     issue_range = parse_issue_range(text)
+    if metadata_number:
+        issue_range = None
     if issue_range is not None:
         issue = None
     # a bare volume name ("Volume 01", "v40 (2019)") has no explicit issue
     # token, so its trailing number is the volume, not a issue
-    elif volume is not None and issue is not None and not has_issue_marker(text):
+    elif (not metadata_number and volume is not None and issue is not None
+          and not has_issue_marker(text)):
         issue = None
-    return MediaFile(path=path, is_dir=is_dir, issue_number=issue,
-                     volume_number=volume, issue_range=issue_range)
+    return MediaFile(
+        path=path, is_dir=is_dir, issue_number=issue,
+        volume_number=volume, issue_range=issue_range,
+        metadata_series=metadata_series, metadata_number=metadata_number,
+        metadata_volume=metadata_volume,
+    )
+
+
+def _comicinfo_identity(path: Path, is_dir: bool) -> tuple[str, str, int | None]:
+    if is_dir or path.suffix.lower() not in {".cbz", ".zip"}:
+        return "", "", None
+    try:
+        with zipfile.ZipFile(path) as zf:
+            name = next((n for n in zf.namelist() if n.lower() == "comicinfo.xml"), None)
+            if name is None:
+                return "", "", None
+            root = fromstring(zf.read(name))
+    except (OSError, zipfile.BadZipFile, KeyError, ParseError):
+        return "", "", None
+    series = (root.findtext("Series") or "").strip()
+    number = (root.findtext("Number") or "").strip()
+    try:
+        volume = int(root.findtext("Volume") or "")
+    except ValueError:
+        volume = None
+    return series, number, volume
 
 
 def _plain_display_number(issue: Issue) -> bool:
@@ -106,6 +148,14 @@ def _plain_display_number(issue: Issue) -> bool:
 
 
 def _pick_issue(mf: MediaFile, candidates: list[Issue]) -> Issue | None:
+    if mf.metadata_number:
+        exact = [
+            issue for issue in candidates
+            if (issue.display_number or f"{issue.number:g}").strip().casefold()
+            == mf.metadata_number.strip().casefold()
+        ]
+        if len(exact) == 1:
+            return exact[0]
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:

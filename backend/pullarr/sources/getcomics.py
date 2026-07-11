@@ -130,12 +130,17 @@ def mirror_link(buttons: list[DownloadButton], label: str) -> str | None:
 
 
 PIXELDRAIN_ID_RE = re.compile(r"pixeldrain\.com/(?:u|l)/([A-Za-z0-9]+)")
+MEDIAFIRE_DIRECT_RE = re.compile(r"https://download[^\"'\\s]+\.mediafire\.com/[^\"'\\s<]+", re.I)
 
 
 def pixeldrain_api_url(page_url: str) -> str | None:
     """Direct-download API URL for a pixeldrain file/list page."""
     m = PIXELDRAIN_ID_RE.search(page_url)
-    return f"https://pixeldrain.com/api/file/{m.group(1)}?download" if m else None
+    if not m:
+        return None
+    kind = "/list/" if "/l/" in page_url else "/file/"
+    suffix = "/zip?download" if kind == "/list/" else "?download"
+    return f"https://pixeldrain.com/api{kind}{m.group(1)}{suffix}"
 
 
 class GetComicsSource(DDLSource):
@@ -145,6 +150,7 @@ class GetComicsSource(DDLSource):
         self._client = client or self._make_client(None)
         self._base_url = DEFAULT_BASE_URL
         self._proxy: str | None = None
+        self._service_preference = ["main", "pixeldrain", "mediafire"]
         self._external_client = client is not None
 
     @staticmethod
@@ -156,7 +162,7 @@ class GetComicsSource(DDLSource):
             proxy=proxy or None,
         )
 
-    async def configure(self, base_url: str, proxy: str) -> None:
+    async def configure(self, base_url: str, proxy: str, service_preference: str = "") -> None:
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         proxy = proxy.strip() or None
         if not self._external_client and proxy != self._proxy:
@@ -164,6 +170,9 @@ class GetComicsSource(DDLSource):
             self._proxy = proxy
             self._client = self._make_client(proxy)
             await old_client.aclose()
+        requested = [v.strip().lower() for v in service_preference.split(",") if v.strip()]
+        if requested:
+            self._service_preference = list(dict.fromkeys(requested))
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -220,8 +229,23 @@ class GetComicsSource(DDLSource):
         releases = await self._search_pages(external_id, pages=SEARCH_PAGES)
         return [
             r for r in releases
-            if normalize_title(strip_issue_suffix(r.title)) == wanted
+            if self._belongs_to_series(r, wanted)
         ]
+
+    @staticmethod
+    def _belongs_to_series(release: SourceRelease, wanted: str) -> bool:
+        parsed = normalize_title(strip_issue_suffix(release.title))
+        if parsed == wanted:
+            return True
+        if release.issue_number is not None:
+            return False
+        # Collected editions normally retain the base title and append a
+        # volume/format/subtitle. Keep the prefix boundary strict so similarly
+        # named series do not bleed into one another.
+        return any(
+            parsed.startswith(f"{wanted} {marker}")
+            for marker in ("vol ", "volume ", "tpb", "hc", "hardcover", "omnibus")
+        )
 
     async def search_releases(self, query: str) -> list[SourceRelease]:
         return await self._search_pages(query, pages=1)
@@ -232,12 +256,12 @@ class GetComicsSource(DDLSource):
         )
         resp.raise_for_status()
         buttons = parse_download_buttons(resp.text)
-        options: list[list[str]] = []
+        by_service: dict[str, list[str]] = {}
 
         # primary: the main server (may be multi-part)
         main = main_server_links(buttons)
         if main:
-            options.append(main)
+            by_service["main"] = main
 
         # fallback: the Pixeldrain mirror — a clean direct download when the
         # main server is blocked/down (older files often 403 on comicfiles).
@@ -247,7 +271,18 @@ class GetComicsSource(DDLSource):
         if px_dls:
             api_url = await self._resolve_pixeldrain(px_dls)
             if api_url:
-                options.append([api_url])
+                by_service["pixeldrain"] = [api_url]
+
+        mediafire_dls = mirror_link(buttons, "MEDIAFIRE")
+        if mediafire_dls:
+            direct = await self._resolve_mediafire(mediafire_dls)
+            if direct:
+                by_service["mediafire"] = [direct]
+
+        options = [by_service[name] for name in self._service_preference if name in by_service]
+        for name, links in by_service.items():
+            if links not in options:
+                options.append(links)
 
         if not options:
             raise RuntimeError("post has no usable download link")
@@ -260,6 +295,24 @@ class GetComicsSource(DDLSource):
             return pixeldrain_api_url(location)
         except httpx.HTTPError as exc:
             log.warning("pixeldrain resolve failed: %s", exc)
+            return None
+
+    async def _resolve_mediafire(self, dls_url: str) -> str | None:
+        try:
+            resp = await self._client.get(dls_url)
+            resp.raise_for_status()
+            final = str(resp.url)
+            host = (resp.url.host or "").lower()
+            if "download" in host and "mediafire.com" in host:
+                return final
+            soup = BeautifulSoup(resp.text, "lxml")
+            button = soup.select_one("a#downloadButton[href], a.input.popsok[href]")
+            if button and button.get("href"):
+                return urljoin(final, button["href"])
+            match = MEDIAFIRE_DIRECT_RE.search(resp.text.replace("\\/", "/"))
+            return match.group(0) if match else None
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("mediafire resolve failed: %s", exc)
             return None
 
 

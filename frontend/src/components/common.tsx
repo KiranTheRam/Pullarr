@@ -1,3 +1,4 @@
+import { useEffect, useId, useRef } from "react";
 import type { ReactNode } from "react";
 
 export function Toolbar({
@@ -35,6 +36,16 @@ export function EmptyState({ icon, title, hint }: { icon: string; title: string;
   );
 }
 
+export function QueryError({ error, retry }: { error: unknown; retry?: () => void }) {
+  return (
+    <div className="error-banner" role="alert">
+      <strong>Could not load this view.</strong>{" "}
+      {error instanceof Error ? error.message : "An unexpected request error occurred."}
+      {retry && <button className="btn sm" onClick={retry}>Retry</button>}
+    </div>
+  );
+}
+
 export function Modal({
   title,
   onClose,
@@ -44,12 +55,22 @@ export function Modal({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const titleId = useId();
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header" id={titleId}>
           {title}
-          <button onClick={onClose} style={{ fontSize: 18, color: "var(--text-dim)" }}>
+          <button ref={closeRef} onClick={onClose} aria-label="Close dialog" style={{ fontSize: 18, color: "var(--text-dim)" }}>
             ✕
           </button>
         </div>
@@ -60,7 +81,7 @@ export function Modal({
 }
 
 export function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
-  return <button type="button" className={`toggle${on ? " on" : ""}`} onClick={() => onChange(!on)} />;
+  return <button type="button" role="switch" aria-checked={on} className={`toggle${on ? " on" : ""}`} onClick={() => onChange(!on)} />;
 }
 
 export function formatBytes(bytes: number): string {
@@ -90,9 +111,13 @@ export const statusPill: Record<string, string> = {
   queued: "gray",
   downloading: "blue",
   importing: "orange",
+  running: "blue",
   done: "green",
   failed: "red",
+  needs_attention: "orange",
+  retrying: "orange",
   grabbed: "blue",
   imported: "green",
   deleted: "red",
+  removed: "red",
 };

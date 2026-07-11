@@ -104,3 +104,21 @@ class TestMatchFiles:
 
         assert res.matched == []
         assert [m.path.name for m in res.unmatched] == ["Series #001.cbz"]
+
+    def test_comicinfo_number_beats_ambiguous_filename(self, tmp_path):
+        tracked = [
+            Issue(id=1, series_id=1, number=78.0, display_number="78"),
+            Issue(id=2, series_id=1, number=78.0, display_number="78.BEY"),
+        ]
+        archive = tmp_path / "Unknown release.cbz"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("001.png", PNG)
+            zf.writestr(
+                "ComicInfo.xml",
+                "<ComicInfo><Series>Amazing Spider-Man</Series><Number>78.BEY</Number></ComicInfo>",
+            )
+
+        result = match_files(find_media_files(tmp_path), tracked)
+
+        assert len(result.matched) == 1
+        assert result.matched[0].issue.id == 2
