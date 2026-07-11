@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/pullarr-icon.svg" alt="Pullarr" width="160" height="160">
+</p>
+
 # pullarr
 
 Radarr/Sonarr-style automation for **western comics**. Monitor series, grab new

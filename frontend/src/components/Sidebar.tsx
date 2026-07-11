@@ -21,7 +21,7 @@ export default function Sidebar() {
   return (
     <div className="sidebar">
       <div className="sidebar-logo">
-        <span className="logo-mark">▛</span> pullarr
+        <img className="logo-mark" src="/pullarr-icon.svg" alt="" /> pullarr
       </div>
       <nav>
         {items.map((item) => (
