@@ -1,52 +1,10 @@
 services:
   pullarr:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    image: kirantheram/mangarr:latest
     container_name: pullarr
     ports:
       - "6997:6997"
     volumes:
       - ./data/pullarr-config:/config
       - ./data/comics:/comics
-    depends_on:
-      - pullarr-vpn
-    restart: unless-stopped
-
-  # VPN sidecar (binhex). Runs PIA WireGuard + Privoxy; pullarr routes its
-  # GetComics traffic (searches + file downloads) through it by setting
-  # Settings → Sources → HTTP proxy to http://pullarr-vpn:8118. ComicVine
-  # metadata goes direct (pullarr keeps normal networking, so its web UI is
-  # reachable on the LAN). Delete this service if you don't want a VPN.
-  # Requires PIA_USER / PIA_PASS in a .env file next to this compose file.
-  pullarr-vpn:
-    image: binhex/arch-qbittorrentvpn:latest
-    container_name: pullarr-vpn
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    environment:
-      - VPN_ENABLED=yes
-      - VPN_USER=${PIA_USER}
-      - VPN_PASS=${PIA_PASS}
-      - VPN_PROV=pia
-      - VPN_CLIENT=wireguard
-      - USERSPACE_WIREGUARD=yes
-      - STRICT_PORT_FORWARD=no
-      - ENABLE_STARTUP_SCRIPTS=no
-      - ENABLE_PRIVOXY=yes
-      - ENABLE_SOCKS=no
-      # include the docker bridge subnet so pullarr can reach Privoxy by name
-      - LAN_NETWORK=192.168.1.0/24,172.16.0.0/12
-      - NAME_SERVERS=1.1.1.1,1.0.0.1
-      - DEBUG=false
-      - WEBUI_PORT=8090
-      - UMASK=000
-      - PUID=1000
-      - PGID=1000
-    volumes:
-      - ./data/vpn-config:/config
-      - ./data/downloads:/data
-      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped

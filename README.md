@@ -50,24 +50,42 @@ git clone <this repo> pullarr && cd pullarr
 docker compose up -d
 ```
 
-Open <http://localhost:6997>. The compose file also starts a
-[binhex/arch-qbittorrentvpn](https://github.com/binhex/arch-qbittorrentvpn)
-`pullarr-vpn` sidecar (PIA WireGuard + Privoxy) — supply `PIA_USER`/`PIA_PASS`
-in `.env`, or delete that service if you don't want a VPN. pullarr itself keeps
-normal networking (so its UI is reachable on the LAN); only its GetComics
-traffic is routed through the sidecar's Privoxy.
+The default compose file runs the `kirantheram/mangarr:latest` Docker Hub image
+and does not include a VPN or download-client sidecar. Open
+<http://localhost:6997> after the container starts.
 
 First-run checklist, in the pullarr UI:
 
 1. **Settings → Root Folders**: add `/comics` (mapped to `./data/comics`).
 2. **Settings → Metadata**: paste your ComicVine API key, *Test Key*.
-3. **Settings → Sources**: set the HTTP proxy to `http://pullarr-vpn:8118` so
-   GetComics searches and downloads exit through the VPN (ComicVine stays
-   direct). Leave blank to skip the VPN.
+3. **Settings → Sources**: optionally configure an HTTP proxy for GetComics
+   traffic. Leave it blank for a direct connection.
 4. **Add New**: search a title, pick a root folder, add. Issues appear after
    the automatic ComicVine sync (a few seconds).
 5. **Optional Metron**: create an account at <https://metron.cloud>, enter the
    username/password under Settings → Metadata enrichment, and test it.
+
+### Optional Gluetun proxy
+
+Pullarr can use the HTTP proxy from an existing
+[Gluetun](https://github.com/qdm12/gluetun) container without routing the
+Pullarr web UI or ComicVine traffic through the VPN. Enable Gluetun's HTTP
+proxy (`HTTPPROXY=on`; port `8888` by default), then attach both containers to
+the same user-defined Docker network. For example, if the containers are named
+`gluetun` and `pullarr`:
+
+```bash
+docker network create vpn-proxy
+docker network connect vpn-proxy gluetun
+docker network connect vpn-proxy pullarr
+```
+
+If that network already exists, skip the first command. In Pullarr, set
+**Settings → Sources → HTTP proxy** to `http://gluetun:8888`. Only GetComics
+searches and downloads use this application-level proxy; Pullarr remains
+available at port `6997`. Add the shared external network to both Compose files
+if you want the connection to persist automatically when containers are
+recreated.
 
 ## How grabbing works
 
