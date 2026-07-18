@@ -174,6 +174,22 @@ class ComicVineProvider(MetadataProvider):
         result = data.get("results")
         return self._to_metadata(result) if result else None
 
+    async def issues_in_stores(
+        self, start: str, end: str, issue_number: str | None = None, limit: int = 100
+    ) -> list[dict]:
+        """Raw issues with a store date in [start, end] (ISO dates), newest
+        first. issue_number="1" restricts to series launches."""
+        filters = [f"store_date:{start}|{end}"]
+        if issue_number is not None:
+            filters.append(f"issue_number:{issue_number}")
+        data = await self._get("issues", {
+            "filter": ",".join(filters),
+            "sort": "store_date:desc",
+            "field_list": "id,name,issue_number,store_date,image,volume",
+            "limit": min(limit, 100),
+        })
+        return data.get("results") or []
+
     async def list_issues(self, provider_id: str) -> list[IssueMetadata]:
         raw_items: list[dict] = []
         offset = 0
