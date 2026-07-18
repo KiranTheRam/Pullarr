@@ -175,7 +175,8 @@ class ComicVineProvider(MetadataProvider):
         return self._to_metadata(result) if result else None
 
     async def issues_in_stores(
-        self, start: str, end: str, issue_number: str | None = None, limit: int = 100
+        self, start: str, end: str, issue_number: str | None = None,
+        limit: int = 100, offset: int = 0,
     ) -> list[dict]:
         """Raw issues with a store date in [start, end] (ISO dates), newest
         first. issue_number="1" restricts to series launches."""
@@ -187,8 +188,26 @@ class ComicVineProvider(MetadataProvider):
             "sort": "store_date:desc",
             "field_list": "id,name,issue_number,store_date,image,volume",
             "limit": min(limit, 100),
+            "offset": offset,
         })
         return data.get("results") or []
+
+    async def volumes_by_ids(self, volume_ids: list[int]) -> dict[int, SeriesMetadata]:
+        """Look up many volumes at once. ComicVine's list filters take several
+        values for one field separated by "|", so a whole discovery page costs
+        a single request instead of one per volume."""
+        out: dict[int, SeriesMetadata] = {}
+        unique = list(dict.fromkeys(volume_ids))
+        for start in range(0, len(unique), 100):
+            chunk = unique[start:start + 100]
+            data = await self._get("volumes", {
+                "filter": "id:" + "|".join(str(v) for v in chunk),
+                "field_list": VOLUME_FIELDS,
+                "limit": 100,
+            })
+            for volume in data.get("results") or []:
+                out[int(volume["id"])] = self._to_metadata(volume)
+        return out
 
     async def list_issues(self, provider_id: str) -> list[IssueMetadata]:
         raw_items: list[dict] = []

@@ -1,11 +1,17 @@
 """Recent-release discovery, backing NextPanel's comic recommendation rows.
 
 ComicVine has no popularity or rating data, so discovery is recency-based:
-issues that hit stores in a window, deduped to their volumes. Results are
-cached in-memory to protect the ComicVine quota (200 requests/resource/hour);
-the in-library annotation is computed fresh on every call.
+issues that hit stores in a window, deduped to their volumes. ComicVine also
+indexes Japanese tankobon, which would otherwise crowd out actual comics, so
+each page's volumes are resolved to their publishers and the manga houses are
+dropped (see metadata.publishers).
+
+Results are cached in-memory to protect the ComicVine quota (200
+requests/resource/hour); the in-library annotation is computed fresh on every
+call.
 """
 
+import logging
 import time
 from datetime import date, timedelta
 
@@ -15,13 +21,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..metadata.comicvine import ComicVineError, provider as comicvine
+from ..metadata.publishers import is_manga_publisher
 from ..models import Series
 from ..sources import registry
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/discover", tags=["discover"])
 
 CACHE_TTL_SECONDS = 6 * 3600
 MAX_VOLUMES = 30
+# most of a store-date page is manga, so read a couple of pages to still end
+# up with a full row of comics after filtering
+ISSUE_PAGES = 2
+ISSUES_PER_PAGE = 100
 
 # cache key -> (fetched_at, grouped volume entries)
 _cache: dict[str, tuple[float, list[dict]]] = {}
@@ -41,7 +54,7 @@ def _short_date(iso: str | None) -> str:
         return iso
 
 
-def group_volumes(raw_issues: list[dict], limit: int = MAX_VOLUMES) -> list[dict]:
+def group_volumes(raw_issues: list[dict], limit: int | None = MAX_VOLUMES) -> list[dict]:
     """Collapse an issue list (newest first) to one entry per volume."""
     items: list[dict] = []
     seen: set[int] = set()
@@ -67,9 +80,32 @@ def group_volumes(raw_issues: list[dict], limit: int = MAX_VOLUMES) -> list[dict
             "subtitle": subtitle,
             "cover_url": image.get("medium_url") or image.get("original_url") or "",
         })
-        if len(items) >= limit:
+        if limit is not None and len(items) >= limit:
             break
     return items
+
+
+async def drop_manga_volumes(items: list[dict]) -> list[dict]:
+    """Remove volumes published by manga houses, and enrich the survivors
+    with their publisher. If the lookup fails the list is returned as-is —
+    an unfiltered row beats an empty one."""
+    if not items:
+        return items
+    try:
+        volumes = await comicvine.volumes_by_ids(
+            [item["comicvine_volume_id"] for item in items]
+        )
+    except Exception as exc:  # ComicVine errors and transport failures alike
+        log.warning("publisher lookup failed, serving unfiltered discovery: %s", exc)
+        return items
+    kept = []
+    for item in items:
+        volume = volumes.get(item["comicvine_volume_id"])
+        publisher = volume.publisher if volume else ""
+        if is_manga_publisher(publisher):
+            continue
+        kept.append({**item, "publisher": publisher})
+    return kept
 
 
 @router.get("/releases")
@@ -88,14 +124,21 @@ async def recent_releases(
     else:
         today = date.today()
         start = today - timedelta(days=days)
+        raw: list[dict] = []
         try:
-            raw = await comicvine.issues_in_stores(
-                start.isoformat(), today.isoformat(),
-                issue_number="1" if first_issues else None,
-            )
+            for page in range(ISSUE_PAGES):
+                batch = await comicvine.issues_in_stores(
+                    start.isoformat(), today.isoformat(),
+                    issue_number="1" if first_issues else None,
+                    limit=ISSUES_PER_PAGE, offset=page * ISSUES_PER_PAGE,
+                )
+                raw.extend(batch)
+                if len(batch) < ISSUES_PER_PAGE:
+                    break
         except ComicVineError as exc:
             raise HTTPException(400, str(exc)) from exc
-        items = group_volumes(raw)
+        items = await drop_manga_volumes(group_volumes(raw, limit=None))
+        items = items[:MAX_VOLUMES]
         _cache[cache_key] = (time.monotonic(), items)
 
     in_library = {
