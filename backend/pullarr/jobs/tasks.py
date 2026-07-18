@@ -12,6 +12,7 @@ from pathlib import Path
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import notifications
 from ..config import config
 from ..db import session_scope
 from ..download.ddl import DownloadCancelled, download_release
@@ -673,6 +674,8 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
                 if needs_attention else f"{len(imported)} file(s) from {dl.title}"),
     ))
     await session.commit()
+    if not needs_attention:
+        notifications.notify_import(values, series.id, f"{covered_count} issue(s) from {dl.title}")
 
 
 def _mark_imported(series: Series, imported: list) -> int:
@@ -764,6 +767,8 @@ async def _import_torrent(
                 if covered_count else f"{len(imported)} file(s) need manual matching from {dl.title}"),
     ))
     await session.commit()
+    if covered_count:
+        notifications.notify_import(values, series.id, f"{covered_count} issue(s) from {dl.title}")
 
 
 # ------------------------------------------------------------ monitor loop

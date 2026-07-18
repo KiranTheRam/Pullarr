@@ -40,9 +40,16 @@ DEFAULTS: dict[str, str] = {
     "download_retry_attempts": "4",
     # Library
     "library_scan_on_add": "true",  # adopt existing on-disk files on add/refresh
+    # Outbound webhook fired when issues are imported (e.g. NextPanel's
+    # /api/v1/webhooks/pullarr endpoint). Secret is sent as X-Webhook-Secret.
+    "webhook_enabled": "false",
+    "webhook_url": "",
+    "webhook_secret": "",
 }
 
-SECRET_KEYS = {"comicvine_api_key", "metron_password", "qbittorrent_password"}
+SECRET_KEYS = {
+    "comicvine_api_key", "metron_password", "qbittorrent_password", "webhook_secret",
+}
 
 
 def parse_monitor_interval(value: str) -> int:

@@ -264,6 +264,20 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text, default="")
 
 
+class ApiKey(Base):
+    """A named API key for scripted/external access (e.g. NextPanel). The web
+    UI uses the bootstrap key from initialize.json; these are user-managed keys
+    created and revoked from Settings, any of which authenticates API calls."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    key: Mapped[str] = mapped_column(String, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
 class JobKind(str, enum.Enum):
     REFRESH_SERIES = "refresh_series"
     SEARCH_MISSING = "search_missing"

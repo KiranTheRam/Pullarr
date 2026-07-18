@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import settings_service
+from .. import notifications, settings_service
 from ..db import get_session
 from ..download.qbittorrent import QbtError, test_connection
 from ..metadata.comicvine import ComicVineError, provider as comicvine
 from ..metadata.metron import MetronError, provider as metron
-from ..schemas import ComicVineTestIn, MetronTestIn, QbtTestIn
+from ..schemas import ComicVineTestIn, MetronTestIn, QbtTestIn, WebhookTestIn
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -41,6 +41,19 @@ async def update_settings(
         except ValueError:
             pass
     return await get_settings(session)
+
+
+@router.post("/webhook/test")
+async def webhook_test(body: WebhookTestIn, session: AsyncSession = Depends(get_session)):
+    secret = body.secret
+    if secret == MASK:
+        secret = await settings_service.get(session, "webhook_secret")
+    ok = await notifications.send_webhook(
+        body.url, secret, {"app": notifications.APP_NAME, "event": "test", "series_id": 0}
+    )
+    if not ok:
+        raise HTTPException(400, "Webhook endpoint rejected the test event or is unreachable")
+    return {"ok": True}
 
 
 @router.post("/qbittorrent/test")
