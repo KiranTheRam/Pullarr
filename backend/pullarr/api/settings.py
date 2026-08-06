@@ -1,12 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import notifications, settings_service
+from .. import kavita, notifications, settings_service
 from ..db import get_session
 from ..download.qbittorrent import QbtError, test_connection
 from ..metadata.comicvine import ComicVineError, provider as comicvine
 from ..metadata.metron import MetronError, provider as metron
-from ..schemas import ComicVineTestIn, MetronTestIn, QbtTestIn, WebhookTestIn
+from ..schemas import (
+    ComicVineTestIn,
+    KavitaLibraryOut,
+    KavitaTestIn,
+    KavitaTestOut,
+    MetronTestIn,
+    QbtTestIn,
+    WebhookTestIn,
+)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -66,6 +74,26 @@ async def qbt_test(body: QbtTestIn, session: AsyncSession = Depends(get_session)
     except QbtError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "version": version}
+
+
+@router.post("/kavita/test", response_model=KavitaTestOut)
+async def kavita_test(body: KavitaTestIn, session: AsyncSession = Depends(get_session)):
+    """Verify the connection and return the libraries, so the settings page can
+    offer real libraries to map root folders onto."""
+    api_key = body.api_key
+    if api_key == MASK or not api_key:
+        api_key = await settings_service.get(session, "kavita_api_key")
+    try:
+        version, libraries = await kavita.test_connection(body.url, api_key)
+    except kavita.KavitaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return KavitaTestOut(
+        ok=True, version=version,
+        libraries=[
+            KavitaLibraryOut(id=lib.id, name=lib.name, folders=lib.folders)
+            for lib in libraries
+        ],
+    )
 
 
 @router.post("/comicvine/test")

@@ -41,6 +41,10 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
 - **Recoverable automation** — persisted background jobs, validated atomic
   imports, transient-download retry/backoff, failed-download retry/block
   controls, and collision quarantine.
+- **Kavita scans** — optionally tell Kavita to scan after an import, so new
+  issues appear in the reader immediately. Scans the affected series when
+  Kavita already knows it, and the whole library when it does not (a series
+  pullarr just created, or a title Kavita holds more than once).
 - ***arr-style API** — everything under `/api/v1` with `X-Api-Key` auth.
 
 ## Quick start (Docker)
@@ -64,6 +68,30 @@ First-run checklist, in the pullarr UI:
    the automatic ComicVine sync (a few seconds).
 5. **Optional Metron**: create an account at <https://metron.cloud>, enter the
    username/password under Settings → Metadata enrichment, and test it.
+
+### Triggering Kavita scans
+
+Kavita only picks up new issue files when it scans. To have imports show up in
+the reader immediately:
+
+1. In Kavita, go to **Settings → Account** and copy the **API Key**.
+2. In Pullarr, go to **Settings → Connect — Kavita**, turn it on, enter
+   Kavita's URL (e.g. `http://kavita:5000`) and the API key, then select
+   **Test Connection** — this also loads Kavita's libraries.
+3. Check the **Library mapping** rows. Pullarr matches a root folder to a
+   Kavita library by folder name, so `/comics/DC` finds a library at
+   `/data/comics/DC` even when the containers mount it differently. Pick a
+   library explicitly if the two paths have nothing in common — useful when DC,
+   Marvel and other publishers live in separate Kavita libraries.
+
+**Scan scope** decides how much Kavita re-reads. *Series* scans only the
+affected series folder, which is much cheaper on a large library. Pullarr tries
+the year-qualified name first (`Batman (2016)`), because a bare title Kavita
+holds more than once is ambiguous — rather than guess between reboots it falls
+back to a library scan, as it also does for a series Kavita has never indexed.
+*Whole library every time* skips the lookup. Bursts of imports are batched into
+a single scan, and a Kavita that is down or misconfigured never fails a
+download.
 
 ### Optional Gluetun proxy
 
