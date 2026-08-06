@@ -285,21 +285,49 @@ input[type="checkbox"] {
 }
 
 @media (max-width: 760px) {
+  :root {
+    --bottom-nav-height: 56px;
+  }
+
+  /* dvh, not vh: the bar must not hide behind collapsing browser chrome */
   .app {
-    flex-direction: column;
+    height: 100dvh;
   }
 
-  .main {
-    order: 1;
+  /* 16px inputs stop iOS Safari from zooming the page on focus */
+  input,
+  select {
+    font-size: 16px;
+    min-height: 42px;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
     min-height: 0;
+    width: 18px;
+    height: 18px;
   }
 
+  /* ----- sidebar becomes a bottom tab bar ----- */
+
+  /* fixed rather than in flow, so the safe-area padding below the last row of
+     labels belongs to the bar itself instead of pushing it off-screen */
   .sidebar {
-    order: 2;
-    width: 100%;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    width: auto;
     min-width: 0;
-    border-right: 0;
+    height: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    flex-direction: row;
+    border-right: none;
     border-top: 1px solid var(--border);
+    background: rgba(34, 38, 47, 0.96);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
   }
 
   .sidebar-logo,
@@ -309,33 +337,75 @@ input[type="checkbox"] {
 
   .sidebar nav {
     display: flex;
-    padding: 0;
+    flex: 1;
+    padding-top: 0;
   }
 
   .nav-item {
+    position: relative;
     flex: 1;
     min-width: 0;
-    justify-content: center;
     flex-direction: column;
-    gap: 2px;
-    padding: 8px 4px;
-    border-left: 0;
-    border-top: 3px solid transparent;
-    font-size: 11px;
+    justify-content: center;
+    gap: 3px;
+    padding: 7px 0 5px;
+    font-size: 10.5px;
+    border-left: none;
   }
 
+  .nav-item .icon {
+    width: auto;
+    font-size: 19px;
+    line-height: 22px;
+  }
+
+  .nav-item:hover {
+    background: none;
+  }
+
+  /* the desktop raised-row treatment reads as a stray block on a tab bar */
   .nav-item.active {
-    border-left-color: transparent;
-    border-top-color: var(--accent);
+    background: none;
+    color: var(--accent);
+  }
+
+  /* the desktop left-edge accent, rotated for thumbs: a bar atop the active tab */
+  .nav-item.active::before {
+    content: "";
+    position: absolute;
+    top: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 36px;
+    height: 3px;
+    border-radius: 0 0 3px 3px;
+    background: var(--accent);
   }
 
   .nav-badge {
     position: absolute;
-    margin: -16px 0 0 24px;
+    top: 3px;
+    left: calc(50% + 4px);
+    margin: 0;
+    padding: 0 6px;
+    font-size: 10px;
+    line-height: 16px;
   }
 
+  /* keep scrolling content clear of the fixed tab bar */
+  .main {
+    padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* ----- toolbar ----- */
+
+  /* viewport-fit=cover puts the page under the translucent status bar, so the
+     title needs the top inset back — and the bar has to grow to absorb it
+     rather than keep its fixed desktop height */
   .toolbar {
-    padding: 0 12px;
+    height: auto;
+    min-height: var(--toolbar-height);
+    padding: env(safe-area-inset-top, 0px) 12px 0;
     overflow-x: auto;
   }
 
