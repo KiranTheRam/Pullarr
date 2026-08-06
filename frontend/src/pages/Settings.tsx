@@ -37,7 +37,7 @@ function RootFolders() {
       <p className="section-hint">Library locations where series folders and CBZ files are created.</p>
       {data?.map((rf) => (
         <div className="form-row" key={rf.id}>
-          <label style={{ width: "auto", flex: 1 }}>{rf.path}</label>
+          <label className="form-path">{rf.path}</label>
           <button className="btn icon-btn" title="Remove root folder" aria-label={`Remove ${rf.path}`} onClick={() => remove.mutate(rf.id)}>
             ✕
           </button>
@@ -51,7 +51,6 @@ function RootFolders() {
           placeholder="/data/comics"
           value={path}
           onChange={(e) => setPath(e.target.value)}
-          style={{ flex: 1, maxWidth: 380 }}
         />
         <button className="btn primary" disabled={!path || add.isPending} onClick={() => add.mutate()}>
           + Add
@@ -367,9 +366,7 @@ function KavitaSettings({
       )}
       {rootFolders?.map((rf) => (
         <div className="form-row" key={rf.id}>
-          <label style={{ width: "auto", flex: 1, minWidth: 0, wordBreak: "break-all" }}>
-            {rf.path}
-          </label>
+          <label className="form-path">{rf.path}</label>
           <select
             value={map[String(rf.id)] ?? ""}
             onChange={(e) => setMapping(rf.id, e.target.value)}
