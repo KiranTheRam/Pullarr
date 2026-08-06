@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import notifications
+from .. import kavita, notifications
 from ..config import config
 from ..db import session_scope
 from ..download.ddl import DownloadCancelled, download_release
@@ -368,6 +368,29 @@ async def scan_all_series(job_id: int | None = None) -> None:
         )
 
 
+def _notify_kavita(values: dict[str, str], series: Series) -> None:
+    """Ask Kavita to scan the library this series' files live in.
+
+    Kavita names a series from what its parser reads on disk, usually the
+    folder name. Comic titles repeat across reboots, so the year-qualified
+    names go first — matching "Batman (2016)" avoids having to choose between
+    every Batman in the library.
+    """
+    if series.root_folder is None:
+        return
+    from ..library.naming import series_folder
+
+    titles = [
+        series.folder_name,
+        series_folder(series.title, series.year),
+        series.title,
+        *(t.strip() for t in (series.alt_titles or "").split("\n")),
+    ]
+    seen: set[str] = set()
+    ordered = [t for t in titles if t and not (t in seen or seen.add(t))]
+    kavita.notify_import(values, series.root_folder_id, series.root_folder.path, ordered)
+
+
 async def _load_series(session: AsyncSession, series_id: int) -> Series | None:
     from sqlalchemy.orm import selectinload
 
@@ -676,6 +699,7 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
     await session.commit()
     if not needs_attention:
         notifications.notify_import(values, series.id, f"{covered_count} issue(s) from {dl.title}")
+        _notify_kavita(values, series)
 
 
 def _mark_imported(series: Series, imported: list) -> int:
@@ -769,6 +793,7 @@ async def _import_torrent(
     await session.commit()
     if covered_count:
         notifications.notify_import(values, series.id, f"{covered_count} issue(s) from {dl.title}")
+        _notify_kavita(values, series)
 
 
 # ------------------------------------------------------------ monitor loop

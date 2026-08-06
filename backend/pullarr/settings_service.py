@@ -45,10 +45,21 @@ DEFAULTS: dict[str, str] = {
     "webhook_enabled": "false",
     "webhook_url": "",
     "webhook_secret": "",
+    # Kavita: ask the reader to scan after imports so new issues appear
+    # without waiting for its own scheduled scan.
+    "kavita_enabled": "false",
+    "kavita_url": "",
+    "kavita_api_key": "",
+    # "series" scans just the affected series when Kavita already knows it
+    # (falling back to its library otherwise); "library" always scans whole.
+    "kavita_scan_mode": "series",
+    # JSON {"<root_folder_id>": <kavita library id>}; empty = match by path
+    "kavita_library_map": "",
 }
 
 SECRET_KEYS = {
     "comicvine_api_key", "metron_password", "qbittorrent_password", "webhook_secret",
+    "kavita_api_key",
 }
 
 
@@ -116,7 +127,14 @@ async def get(session: AsyncSession, key: str) -> str:
 
 
 async def set_many(session: AsyncSession, values: dict[str, str]) -> None:
-    for key, value in validate_updates(values).items():
+    cleaned = validate_updates(values)
+    if any(key.startswith("kavita_") for key in cleaned):
+        # "enabled needs a URL and key" spans several settings, and the page
+        # may submit only the one that changed — check the resulting state
+        from .kavita import validate_settings as validate_kavita
+
+        validate_kavita({**await get_all(session), **cleaned})
+    for key, value in cleaned.items():
         row = await session.get(Setting, key)
         if row is None:
             session.add(Setting(key=key, value=value))

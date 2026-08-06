@@ -247,6 +247,23 @@ class MetronTestIn(BaseModel):
     password: str
 
 
+class KavitaTestIn(BaseModel):
+    url: str
+    api_key: str = ""
+
+
+class KavitaLibraryOut(BaseModel):
+    id: int
+    name: str
+    folders: list[str] = []
+
+
+class KavitaTestOut(BaseModel):
+    ok: bool
+    version: str
+    libraries: list[KavitaLibraryOut]
+
+
 class JobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
