@@ -413,6 +413,65 @@ input[type="checkbox"] {
     padding: 14px;
   }
 
+  /* ----- library filters ----- */
+
+  /* full-width search on its own row, the selects sharing the row below it
+     rather than shrinking to their label text */
+  .library-filters input {
+    width: 100%;
+  }
+
+  .library-filters select {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  /* ----- forms: labels stack above their inputs ----- */
+
+  /* the 190px label gutter leaves no room for an input beside it on a phone,
+     so the row wraps and every control spans the card */
+  .form-row {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    margin-bottom: 16px;
+  }
+
+  .form-row label,
+  .form-row label.form-path {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .form-row label:empty {
+    display: none;
+  }
+
+  .form-row input:not([type="checkbox"]):not([type="radio"]),
+  .form-row select {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: none;
+  }
+
+  .settings-section {
+    padding: 16px 14px;
+  }
+
+  /* source priority rows: hint text drops to its own line */
+  .priority-row {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .priority-name {
+    min-width: 0;
+  }
+
+  .priority-hint {
+    flex: 1 1 100%;
+    order: 5;
+  }
+
   .poster-grid {
     grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
     gap: 10px;
@@ -424,6 +483,17 @@ input[type="checkbox"] {
 
   .series-header .cover {
     width: 110px;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Avoid clipping the longer library filter labels on narrow phones. */
+  .library-filters select {
+    flex: 1 1 calc(50% - 4px);
+  }
+
+  .library-filters select:last-of-type {
+    flex-basis: 100%;
   }
 }
 
@@ -852,6 +922,15 @@ table.data-table {
   min-width: 190px;
   color: var(--text-dim);
   font-size: 13px;
+}
+
+/* a filesystem path standing in for a label: it grows with the row and breaks
+   mid-token, since paths carry no spaces to wrap at */
+.form-row label.form-path {
+  width: auto;
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
 }
 
 .form-row input[type="text"],
