@@ -454,15 +454,24 @@ async def enqueue_direct(
     return dl
 
 
-async def enqueue_torrent(
-    session: AsyncSession, series: Series | None, magnet: str, title: str, values: dict[str, str],
-) -> Download:
+async def submit_torrent(
+    magnet: str, values: dict[str, str], *, keep_existing: bool = False,
+) -> str:
+    """Submit a magnet to qBittorrent and return its info hash.
+
+    Kept separate from the database row creation so a failed torrent can be
+    submitted again without replacing its Activity entry. With
+    ``keep_existing``, a torrent qBittorrent still has (e.g. one whose import
+    failed) is tracked again instead of re-added, which qBittorrent rejects.
+    """
     m = BTIH_RE.search(magnet)
     torrent_hash = m.group(1).lower() if m else ""
     client = QbtClient(
         values["qbittorrent_url"], values["qbittorrent_username"], values["qbittorrent_password"]
     )
     try:
+        if keep_existing and torrent_hash and await client.get_torrent(torrent_hash):
+            return torrent_hash
         category = values["qbittorrent_category"]
         # put grabs in a category subfolder so they stay organized and separate
         # from other qBittorrent downloads, regardless of its auto-management
@@ -472,6 +481,13 @@ async def enqueue_torrent(
         await client.add_magnet(magnet, category=category, save_path=save_path)
     finally:
         await client.close()
+    return torrent_hash
+
+
+async def enqueue_torrent(
+    session: AsyncSession, series: Series | None, magnet: str, title: str, values: dict[str, str],
+) -> Download:
+    torrent_hash = await submit_torrent(magnet, values)
     dl = Download(
         series_id=series.id if series else None,
         kind=DownloadKind.TORRENT,

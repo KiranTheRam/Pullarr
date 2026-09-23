@@ -203,7 +203,7 @@ function FailedDownloads() {
           <td>{item.attempt_count}</td>
           <td>{new Date(item.created_at).toLocaleString()}</td>
           <td style={{ whiteSpace: "nowrap" }}>
-            <button className="btn sm" disabled={retry.isPending || item.kind !== "direct"} title={item.kind === "direct" ? "Retry download" : "Re-grab torrents from interactive search"} onClick={() => retry.mutate(item.id)}>Retry</button>{" "}
+            <button className="btn sm" disabled={retry.isPending} title="Retry download" aria-label={`Retry ${item.title || item.series_title}`} onClick={() => retry.mutate(item.id)}>Retry</button>{" "}
             <button className="btn sm" disabled={item.blocked || block.isPending} onClick={() => block.mutate(item.id)}>{item.blocked ? "Blocked" : "Block"}</button>
           </td>
         </tr>
