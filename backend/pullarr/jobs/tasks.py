@@ -2,6 +2,8 @@
 source linking, grabbing, DDL download processing, qBittorrent sync, and the
 monitor loop."""
 
+import base64
+import binascii
 import logging
 import re
 import shutil
@@ -454,6 +456,22 @@ async def enqueue_direct(
     return dl
 
 
+def magnet_btih_hex(magnet: str) -> str:
+    """The magnet's info-hash in the lowercase hex form qBittorrent reports.
+    Base32 hashes (older magnet links) are converted — matching against
+    qBittorrent by their raw form would never succeed."""
+    m = BTIH_RE.search(magnet)
+    if not m:
+        return ""
+    raw = m.group(1)
+    if len(raw) == 40:
+        return raw.lower()
+    try:
+        return base64.b32decode(raw).hex()
+    except (binascii.Error, ValueError):
+        return ""
+
+
 async def submit_torrent(
     magnet: str, values: dict[str, str], *, keep_existing: bool = False,
 ) -> str:
@@ -464,13 +482,14 @@ async def submit_torrent(
     ``keep_existing``, a torrent qBittorrent still has (e.g. one whose import
     failed) is tracked again instead of re-added, which qBittorrent rejects.
     """
-    m = BTIH_RE.search(magnet)
-    torrent_hash = m.group(1).lower() if m else ""
+    torrent_hash = magnet_btih_hex(magnet)
+    if not torrent_hash:
+        raise ValueError("magnet link must include a valid btih info hash")
     client = QbtClient(
         values["qbittorrent_url"], values["qbittorrent_username"], values["qbittorrent_password"]
     )
     try:
-        if keep_existing and torrent_hash and await client.get_torrent(torrent_hash):
+        if keep_existing and await client.get_torrent(torrent_hash):
             return torrent_hash
         category = values["qbittorrent_category"]
         # put grabs in a category subfolder so they stay organized and separate
@@ -755,6 +774,11 @@ async def sync_qbittorrent() -> None:
         )
         try:
             for dl in downloads:
+                # rows saved before base32 hashes were converted hold a hash
+                # qBittorrent never reports; recover it from the magnet
+                torrent_hash = magnet_btih_hex(dl.payload)
+                if torrent_hash and torrent_hash != dl.torrent_hash:
+                    dl.torrent_hash = torrent_hash
                 if not dl.torrent_hash:
                     continue
                 torrent = await client.get_torrent(dl.torrent_hash)
