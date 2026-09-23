@@ -1,8 +1,14 @@
+import base64
+
 import httpx
 import pytest
 import respx
+from fastapi import HTTPException
 
+from pullarr.api import queue
 from pullarr.download.qbittorrent import QbtClient
+from pullarr.jobs import tasks
+from pullarr.schemas import GrabIn
 
 BASE = "http://qbt:8080"
 
@@ -67,3 +73,36 @@ async def test_delete_torrents_removes_hashes_and_files():
     body = route.calls.last.request.content.decode()
     assert "hashes=abc%7Cdef" in body
     assert "deleteFiles=true" in body
+
+
+HEX_HASH = "0123456789abcdef0123456789abcdef01234567"
+BASE32_HASH = base64.b32encode(bytes.fromhex(HEX_HASH)).decode()
+
+
+@pytest.mark.parametrize("magnet,expected", [
+    (f"magnet:?xt=urn:btih:{HEX_HASH}&dn=x", HEX_HASH),
+    (f"magnet:?xt=urn:btih:{HEX_HASH.upper()}", HEX_HASH),
+    # older base32 links must match the hex hash qBittorrent reports
+    (f"magnet:?xt=urn:btih:{BASE32_HASH}&dn=x", HEX_HASH),
+    ("magnet:?xt=urn:btih:abc", ""),
+    ("magnet:?dn=no-hash", ""),
+])
+def test_magnet_btih_hex(magnet, expected):
+    assert tasks.magnet_btih_hex(magnet) == expected
+
+
+async def test_submit_torrent_rejects_magnet_without_btih():
+    with pytest.raises(ValueError, match="btih"):
+        await tasks.submit_torrent("magnet:?dn=no-hash", {})
+
+
+async def test_grab_rejects_magnet_without_btih(monkeypatch):
+    async def fake_settings(session):
+        return {"qbittorrent_enabled": "true"}
+
+    monkeypatch.setattr(queue.registry, "apply_settings", fake_settings)
+
+    with pytest.raises(HTTPException) as exc:
+        await queue.grab(GrabIn(magnet="magnet:?dn=no-hash"), session=None)
+
+    assert exc.value.status_code == 422

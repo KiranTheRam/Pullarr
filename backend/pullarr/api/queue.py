@@ -6,7 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..download.qbittorrent import QbtClient
-from ..jobs.tasks import cancel_downloads, enqueue_direct, enqueue_torrent
+from ..jobs.tasks import (
+    cancel_downloads,
+    enqueue_direct,
+    enqueue_torrent,
+    magnet_btih_hex,
+    submit_torrent,
+)
 from ..models import Download, DownloadKind, DownloadStatus, HistoryEvent, Issue, Series
 from ..schemas import GrabIn, HistoryOut, QueueItemOut, QueueRemoveIn, QueueRemoveOut
 from ..sources import registry
@@ -54,14 +60,24 @@ async def get_failed_queue(limit: int = 100, session: AsyncSession = Depends(get
 
 @router.post("/queue/{download_id}/retry", response_model=QueueItemOut)
 async def retry_download(download_id: int, session: AsyncSession = Depends(get_session)):
+    """Retry a failed Activity item using its original source payload."""
     dl = await session.get(Download, download_id)
     if dl is None:
         raise HTTPException(404, "Download not found")
     if dl.status not in (DownloadStatus.FAILED, DownloadStatus.NEEDS_ATTENTION):
         raise HTTPException(409, "Only failed downloads can be retried")
-    if dl.kind != DownloadKind.DIRECT:
-        raise HTTPException(409, "Torrent retries must be grabbed again from search")
-    dl.status = DownloadStatus.QUEUED
+    if dl.kind == DownloadKind.TORRENT:
+        values = await registry.apply_settings(session)
+        if values["qbittorrent_enabled"] != "true":
+            raise HTTPException(400, "qBittorrent is not enabled in settings")
+        try:
+            dl.torrent_hash = await submit_torrent(dl.payload, values, keep_existing=True)
+        except Exception as exc:
+            raise HTTPException(502, f"qBittorrent error: {exc}") from exc
+        dl.status = DownloadStatus.DOWNLOADING
+    else:
+        dl.status = DownloadStatus.QUEUED
+    dl.progress = 0.0
     dl.attempt_count = 0
     dl.next_retry_at = None
     dl.error = ""
@@ -184,6 +200,8 @@ async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
     elif body.magnet:
         if values["qbittorrent_enabled"] != "true":
             raise HTTPException(400, "qBittorrent is not enabled in settings")
+        if not magnet_btih_hex(body.magnet):
+            raise HTTPException(422, "Magnet link must include a valid btih info hash")
         series = await session.get(Series, body.series_id) if body.series_id else None
         try:
             dl = await enqueue_torrent(
