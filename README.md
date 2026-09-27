@@ -18,6 +18,9 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
 - **Library management** — add series via ComicVine metadata search (covers,
   descriptions, publishers, full issue lists with release dates), poster-grid
   library, per-series issue tables with monitor toggles, wanted/missing view.
+  Choose all issues, future issues, or a starting issue for automatic grabs.
+  The library editor can change monitoring or root folders for several series
+  at once, refresh or search them, and remove records while keeping their files.
 - **Metadata: ComicVine + optional Metron enrichment** — a ComicVine "volume" (e.g. *Batman (2016)*) is a
   pullarr series; its issues drive what gets hunted. Needs a free API key from
   <https://comicvine.gamespot.com/api> (Settings → Metadata). Optional Metron
@@ -35,7 +38,14 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
 - **Existing libraries** — point a series at a folder you already have: scan
   adopts files in place (never re-downloads), rename previews/applies the
   naming convention format-preservingly, cleanup finds duplicate files, and
-  unmatched TPB archives can be mapped to issue ranges by hand.
+  unmatched TPB archives can be mapped to issue ranges by hand. The import page
+  discovers untracked folders, lets you confirm ComicVine matches, and adds
+  several series without moving files. Root changes can optionally move a
+  series folder after collision and in-progress work checks.
+- **Finding releases** — jump to a series or ComicVine search with Ctrl/Cmd+K,
+  and browse known issue dates on the release calendar. Downloaded files show
+  their recorded source when Pullarr imported them; older files have no source
+  label. Completed series are checked less often, using a Settings interval.
 - **Output** — `Series Title (Year)/Series Title #012.cbz`, with existing
   `ComicInfo.xml` safely merged/refreshed in CBZs (CBRs left untouched).
 - **Recoverable automation** — persisted background jobs, validated atomic

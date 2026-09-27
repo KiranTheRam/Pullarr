@@ -1,6 +1,10 @@
 from datetime import datetime
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+MonitorMode = Literal["all", "future", "from_issue"]
 
 
 class RootFolderOut(BaseModel):
@@ -52,6 +56,8 @@ class IssueOut(BaseModel):
     monitored: bool
     downloaded: bool
     file_path: str
+    file_source: str = ""
+    file_download_id: int | None = None
     released_at: datetime | None
 
 
@@ -61,6 +67,7 @@ class SeriesOut(BaseModel):
     comicvine_id: int | None
     metron_id: int | None
     title: str
+    alt_titles: str
     description: str
     status: str
     publisher: str
@@ -68,6 +75,8 @@ class SeriesOut(BaseModel):
     cover_url: str
     genres: str
     monitored: bool
+    monitor_mode: MonitorMode = "all"
+    monitor_from: float | None = None
     root_folder_id: int | None
     folder_name: str
     total_issues: int | None
@@ -85,10 +94,56 @@ class AddSeriesIn(BaseModel):
     comicvine_id: int
     root_folder_id: int
     monitored: bool = True
+    monitor_mode: MonitorMode = "all"
+    monitor_from: float | None = None
     search_now: bool = False
     # series folder under the root; empty means derive from title/year
     folder_name: str = ""
     extra_folders: list[str] = Field(default_factory=list)
+
+
+class ImportFolderOut(BaseModel):
+    folder_name: str
+    path: str
+    file_count: int
+    query: str
+
+
+class ImportItemIn(BaseModel):
+    folder_name: str
+    comicvine_id: int
+
+
+class LibraryImportIn(BaseModel):
+    root_folder_id: int
+    items: list[ImportItemIn]
+    monitored: bool = True
+    monitor_mode: MonitorMode = "all"
+    monitor_from: float | None = None
+    search_now: bool = False
+
+
+class LibraryImportResultOut(BaseModel):
+    folder_name: str
+    status: Literal["added", "exists", "failed"]
+    series_id: int | None = None
+    detail: str = ""
+
+
+class SeriesBulkIn(BaseModel):
+    series_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class SeriesBulkEditIn(SeriesBulkIn):
+    monitored: bool | None = None
+    monitor_mode: MonitorMode | None = None
+    monitor_from: float | None = None
+    root_folder_id: int | None = None
+    move_files: bool = False
+
+
+class SeriesBulkRefreshIn(SeriesBulkIn):
+    search_missing: bool = False
 
 
 class FolderPreviewIn(BaseModel):
@@ -108,6 +163,8 @@ class FolderPreviewOut(BaseModel):
 
 class SeriesUpdateIn(BaseModel):
     monitored: bool | None = None
+    monitor_mode: MonitorMode | None = None
+    monitor_from: float | None = None
     root_folder_id: int | None = None
     folder_name: str | None = None
 

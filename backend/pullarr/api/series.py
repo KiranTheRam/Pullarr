@@ -2,7 +2,6 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Integer, cast, func, select
-from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -11,7 +10,8 @@ from ..jobs.tasks import refresh_series_full
 from ..jobs.service import create_job
 from ..library.naming import series_folder
 from ..metadata.comicvine import ComicVineError, provider as comicvine
-from ..models import Issue, JobKind, Series, SeriesFolder
+from ..monitoring import apply_mode, issue_wanted
+from ..models import Issue, JobKind, RootFolder, Series, SeriesFolder
 from ..schemas import (
     AddSeriesIn,
     IssueMonitorIn,
@@ -70,6 +70,27 @@ async def list_series(session: AsyncSession = Depends(get_session)):
 
 @router.post("", response_model=SeriesDetailOut, status_code=201)
 async def add_series(body: AddSeriesIn, session: AsyncSession = Depends(get_session)):
+    series = await create_series_record(body, session)
+    # Fetch the issue list + link sources in the background. `search_now`
+    # explicitly queues missing released issues after the initial disk scan.
+    job = await create_job(
+        session,
+        JobKind.SEARCH_MISSING if body.search_now else JobKind.REFRESH_SERIES,
+        series_id=series.id,
+        detail="Initial series sync",
+    )
+    asyncio.get_running_loop().create_task(
+        refresh_series_full(series.id, grab_missing=body.search_now, job_id=job.id)
+    )
+    return await get_series(series.id, session)
+
+
+async def create_series_record(body: AddSeriesIn, session: AsyncSession) -> Series:
+    """Shared add path for the search page and confirmed library imports."""
+    if body.monitor_mode == "from_issue" and (body.monitor_from is None or body.monitor_from <= 0):
+        raise HTTPException(422, "Starting issue must be greater than zero")
+    if await session.get(RootFolder, body.root_folder_id) is None:
+        raise HTTPException(404, "Root folder not found")
     existing = await session.execute(
         select(Series).where(Series.comicvine_id == body.comicvine_id)
     )
@@ -94,6 +115,8 @@ async def add_series(body: AddSeriesIn, session: AsyncSession = Depends(get_sess
         genres=",".join(meta.genres),
         total_issues=meta.total_issues,
         monitored=body.monitored,
+        monitor_mode=body.monitor_mode,
+        monitor_from=body.monitor_from if body.monitor_mode == "from_issue" else None,
         root_folder_id=body.root_folder_id,
         folder_name=series_folder(meta.title, meta.year),
     )
@@ -110,19 +133,7 @@ async def add_series(body: AddSeriesIn, session: AsyncSession = Depends(get_sess
     session.add(series)
     await session.commit()
     await session.refresh(series)
-    # Fetch the issue list + link sources in the background. `search_now`
-    # explicitly queues missing released issues after the initial disk scan;
-    # otherwise monitoring begins on the next scheduled pass.
-    job = await create_job(
-        session,
-        JobKind.SEARCH_MISSING if body.search_now else JobKind.REFRESH_SERIES,
-        series_id=series.id,
-        detail="Initial series sync",
-    )
-    asyncio.get_running_loop().create_task(
-        refresh_series_full(series.id, grab_missing=body.search_now, job_id=job.id)
-    )
-    return await get_series(series.id, session)
+    return series
 
 
 @router.get("/{series_id}", response_model=SeriesDetailOut)
@@ -145,21 +156,29 @@ async def get_series(series_id: int, session: AsyncSession = Depends(get_session
 async def update_series(
     series_id: int, body: SeriesUpdateIn, session: AsyncSession = Depends(get_session)
 ):
-    series = await session.get(Series, series_id)
+    result = await session.execute(select(Series).options(selectinload(Series.issues)).where(Series.id == series_id))
+    series = result.scalar_one_or_none()
     if series is None:
         raise HTTPException(404, "Series not found")
+    monitoring_changed = False
     if body.monitored is not None and body.monitored != series.monitored:
         series.monitored = body.monitored
-        # Series monitoring is the broad "want this volume" switch. When it
-        # changes, issue monitor flags follow; users can then unmonitor
-        # individual issues or TPB groups again.
-        await session.execute(
-            sa_update(Issue)
-            .where(Issue.series_id == series_id)
-            .values(monitored=body.monitored)
-        )
+        monitoring_changed = True
+    if body.monitor_mode is not None and (
+        body.monitor_mode != series.monitor_mode
+        or (body.monitor_mode == "from_issue" and body.monitor_from != series.monitor_from)
+    ):
+        if body.monitor_mode == "from_issue" and (body.monitor_from is None or body.monitor_from <= 0):
+            raise HTTPException(422, "Starting issue must be greater than zero")
+        series.monitor_mode = body.monitor_mode
+        series.monitor_from = body.monitor_from if body.monitor_mode == "from_issue" else None
+        apply_mode(series, series.issues)
+    elif monitoring_changed:
+        for issue in series.issues:
+            issue.monitored = issue_wanted(series, issue.number)
     if body.root_folder_id is not None:
-        series.root_folder_id = body.root_folder_id
+        if body.root_folder_id != series.root_folder_id:
+            raise HTTPException(400, "Use the library editor to change root folders safely")
     if body.folder_name is not None:
         series.folder_name = await _normalize_folder_name(session, series, body.folder_name)
     await session.commit()
@@ -168,18 +187,24 @@ async def update_series(
 
 @router.delete("/{series_id}", status_code=204)
 async def delete_series(series_id: int, session: AsyncSession = Depends(get_session)):
-    from sqlalchemy import delete as sa_delete
-
-    from ..models import Download, HistoryEvent
-
     series = await session.get(Series, series_id)
     if series is None:
         raise HTTPException(404, "Series not found")
+    await remove_series_record(series, session)
+
+
+async def remove_series_record(series: Series, session: AsyncSession) -> None:
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
+
+    from ..models import Download, HistoryEvent, Job
+
     # remove this series' download + history rows too, so a later series that
     # reuses the id doesn't inherit stale failed-grab records (which would
     # otherwise block re-grabbing those issues)
-    await session.execute(sa_delete(Download).where(Download.series_id == series_id))
-    await session.execute(sa_delete(HistoryEvent).where(HistoryEvent.series_id == series_id))
+    await session.execute(sa_delete(Download).where(Download.series_id == series.id))
+    await session.execute(sa_delete(HistoryEvent).where(HistoryEvent.series_id == series.id))
+    await session.execute(sa_update(Job).where(Job.series_id == series.id).values(series_id=None))
     await session.delete(series)
     await session.commit()
 

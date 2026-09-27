@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { FolderPreview, MetadataResult, RootFolder } from "../api/types";
+import type { FolderPreview, MetadataResult, MonitorMode, RootFolder } from "../api/types";
 import { FolderBrowser } from "../components/FolderBrowser";
 import { EmptyState, Modal, QueryError, Spinner, Toggle, Toolbar, statusPill } from "../components/common";
 
@@ -20,6 +20,8 @@ function AddSeriesModal({
 
   const [rootFolderId, setRootFolderId] = useState<number>(rootFolders[0].id);
   const [monitored, setMonitored] = useState(true);
+  const [monitorMode, setMonitorMode] = useState<MonitorMode>("all");
+  const [monitorFrom, setMonitorFrom] = useState("");
   const [searchNow, setSearchNow] = useState(false);
   const [folderName, setFolderName] = useState("");
   const [folderTouched, setFolderTouched] = useState(false);
@@ -47,6 +49,8 @@ function AddSeriesModal({
         comicvine_id: Number(result.provider_id),
         root_folder_id: rootFolderId,
         monitored,
+        monitor_mode: monitorMode,
+        monitor_from: monitorMode === "from_issue" ? Number(monitorFrom) : null,
         search_now: searchNow,
         folder_name: folderName.trim(),
         extra_folders: extraFolders,
@@ -152,6 +156,16 @@ function AddSeriesModal({
       </div>
 
       <div className="form-row">
+        <label htmlFor="add-monitor-mode">Automatic grabs</label>
+        <select id="add-monitor-mode" value={monitorMode} onChange={(e) => setMonitorMode(e.target.value as MonitorMode)}>
+          <option value="all">All released missing issues</option>
+          <option value="future">Issues released after the current last issue</option>
+          <option value="from_issue">From a chosen issue number</option>
+        </select>
+        {monitorMode === "from_issue" && <input aria-label="Starting issue number" type="number" min="0.01" step="any" value={monitorFrom} onChange={(e) => setMonitorFrom(e.target.value)} placeholder="Issue #" />}
+      </div>
+
+      <div className="form-row">
         <label>Search for missing content</label>
         <Toggle label="Search for missing issues now" on={searchNow} onChange={setSearchNow} />
         <span style={{ color: "var(--text-faint)", fontSize: 13 }}>
@@ -169,7 +183,7 @@ function AddSeriesModal({
         </button>
         <button
           className="btn primary"
-          disabled={addMutation.isPending || !folderName.trim()}
+          disabled={addMutation.isPending || !folderName.trim() || (monitorMode === "from_issue" && !(Number(monitorFrom) > 0))}
           onClick={() => addMutation.mutate()}
         >
           {addMutation.isPending ? "Adding..." : `Add ${result.title}`}
@@ -195,8 +209,11 @@ function AddSeriesModal({
 }
 
 export default function AddSeries() {
-  const [query, setQuery] = useState("");
-  const [submitted, setSubmitted] = useState("");
+  const [params] = useSearchParams();
+  const initialQuery = params.get("q") ?? "";
+  const [query, setQuery] = useState(initialQuery);
+  const [submitted, setSubmitted] = useState(initialQuery);
+  useEffect(() => { setQuery(initialQuery); setSubmitted(initialQuery); }, [initialQuery]);
   const [adding, setAdding] = useState<MetadataResult | null>(null);
 
   const { data: rootFolders, isError: rootsError, error: rootsErrorValue, refetch: refetchRoots } = useQuery({

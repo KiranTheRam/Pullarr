@@ -196,6 +196,8 @@ async def map_file(
         raise HTTPException(400, "File not found on disk")
     issue.downloaded = True
     issue.file_path = body.file_path
+    issue.file_source = ""
+    issue.file_download_id = None
     await session.commit()
 
 
@@ -218,6 +220,8 @@ async def map_file_range(
         if lo <= issue.number <= hi:
             issue.downloaded = True
             issue.file_path = body.file_path
+            issue.file_source = ""
+            issue.file_download_id = None
             if volume is not None:
                 issue.volume = volume
             mapped += 1

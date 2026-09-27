@@ -36,6 +36,7 @@ from ..models import (
     SeriesSourceLink,
     SeriesStatus,
 )
+from ..monitoring import issue_wanted, resolve_initial_future
 from .service import update_job
 from ..sources import registry
 from ..sources.base import SourceRelease
@@ -154,7 +155,7 @@ async def update_issues(session: AsyncSession, series: Series) -> int:
                 display_number=display_number,
                 title=im.title,
                 released_at=im.released_at,
-                monitored=series.monitored,
+                monitored=issue_wanted(series, im.number),
             )
             # append via the relationship so series.issues is current for
             # the scan/grab logic later in this same pass
@@ -173,6 +174,7 @@ async def update_issues(session: AsyncSession, series: Series) -> int:
                 issue.released_at = im.released_at
             if issue.comicvine_id is None and comicvine_id is not None:
                 issue.comicvine_id = comicvine_id
+    resolve_initial_future(series, series.issues)
     # ComicVine volumes carry no status — derive it from issue recency
     series.status = SeriesStatus(derive_status(issue_meta, series.total_issues))
     await session.commit()
@@ -241,6 +243,8 @@ async def reconcile_downloaded_files(session: AsyncSession, series: Series) -> i
         if not issue.file_path or not Path(issue.file_path).is_file():
             issue.downloaded = False
             issue.file_path = ""
+            issue.file_source = ""
+            issue.file_download_id = None
             missing += 1
     if missing:
         await session.commit()
@@ -269,12 +273,12 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
 
 async def refresh_series_full(
     series_id: int, grab_missing: bool = False, only_monitored: bool = False,
-    job_id: int | None = None,
+    job_id: int | None = None, force_scan: bool = False,
 ) -> None:
     try:
         await _refresh_series_full_impl(
             series_id, grab_missing=grab_missing,
-            only_monitored=only_monitored, job_id=job_id,
+            only_monitored=only_monitored, job_id=job_id, force_scan=force_scan,
         )
     except Exception as exc:
         log.exception("series job failed for %d", series_id)
@@ -287,7 +291,7 @@ async def refresh_series_full(
 
 async def _refresh_series_full_impl(
     series_id: int, grab_missing: bool = False, only_monitored: bool = False,
-    job_id: int | None = None,
+    job_id: int | None = None, force_scan: bool = False,
 ) -> None:
     async with session_scope() as session:
         await update_job(session, job_id, status=JobStatus.RUNNING,
@@ -333,7 +337,7 @@ async def _refresh_series_full_impl(
         await update_job(session, job_id, phase="sources", progress=0.35)
         await link_sources(session, series, values)
         # adopt existing on-disk files before the monitor considers grabbing
-        if values.get("library_scan_on_add", "true") == "true":
+        if force_scan or values.get("library_scan_on_add", "true") == "true":
             await update_job(session, job_id, phase="scanning", progress=0.55)
             try:
                 await scan_series_folder(session, series)
@@ -757,7 +761,7 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
         if payload_dir is not None:
             await run_in_threadpool(shutil.rmtree, payload_dir, ignore_errors=True)
 
-    covered_count = _mark_imported(series, imported)
+    covered_count = _mark_imported(series, imported, dl)
     needs_attention = covered_count == 0
     dl.status = DownloadStatus.NEEDS_ATTENTION if needs_attention else DownloadStatus.DONE
     dl.progress = 1.0
@@ -777,7 +781,7 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
         _notify_kavita(values, series)
 
 
-def _mark_imported(series: Series, imported: list) -> int:
+def _mark_imported(series: Series, imported: list, download: Download | None = None) -> int:
     marked: set[int] = set()
     for item in imported:
         covered = list(item.covered)
@@ -785,8 +789,16 @@ def _mark_imported(series: Series, imported: list) -> int:
             # a volume archive covers every issue assigned to that volume
             covered = [i for i in series.issues if i.volume == item.volume]
         for issue in covered:
+            was_same_file = issue.file_path == str(item.dest)
             issue.downloaded = True
             issue.file_path = str(item.dest)
+            if item.status != "duplicate":
+                issue.file_source = download.source_name if download else ""
+                issue.file_download_id = download.id if download else None
+            elif not was_same_file:
+                # The existing file was not written by this download.
+                issue.file_source = ""
+                issue.file_download_id = None
             marked.add(issue.id)
     return len(marked)
 
@@ -860,7 +872,7 @@ async def _import_torrent(
         dl.error = str(exc)[:500]
         await session.commit()
         return
-    covered_count = _mark_imported(series, imported)
+    covered_count = _mark_imported(series, imported, dl)
     dl.status = DownloadStatus.DONE if covered_count else DownloadStatus.NEEDS_ATTENTION
     dl.progress = 1.0
     session.add(HistoryEvent(
@@ -915,6 +927,8 @@ async def grab_missing_issues(
     recurring monitor keeps the default so its hourly footprint stays small,
     while explicit one-time searches pass None to hunt every missing issue
     (still paced by the source's rate limiter)."""
+    if only_monitored and not series.monitored:
+        return 0
     # active downloads for this series → don't double-grab
     result = await session.execute(
         select(Download).where(
@@ -1008,6 +1022,16 @@ async def monitor_all() -> None:
             series = await _load_series(session, series_id)
             if series is None:
                 continue
+            # Finished status from ComicVine is inferred from issue recency, so
+            # slow complete series down without ever silently unmonitoring them.
+            if (
+                series.status in (SeriesStatus.FINISHED, SeriesStatus.CANCELLED)
+                and series.issues and all(issue.downloaded for issue in series.issues)
+                and series.last_monitored_at is not None
+            ):
+                days = int(values.get("finished_series_check_days", "7"))
+                if datetime.now(timezone.utc) - series.last_monitored_at < timedelta(days=days):
+                    continue
             if metadata_refresh_due(series):
                 try:
                     await refresh_series_metadata(session, series)
@@ -1025,6 +1049,8 @@ async def monitor_all() -> None:
             except Exception as exc:
                 log.warning("library scan failed for series %d: %s", series_id, exc)
             await grab_missing_issues(session, series, values)
+            series.last_monitored_at = datetime.now(timezone.utc)
+            await session.commit()
 
 
 async def _grab_matches(
