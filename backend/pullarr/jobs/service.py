@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Job, JobKind, JobStatus, utcnow
+from ..models import Download, DownloadKind, DownloadStatus, HistoryEvent, Job, JobKind, JobStatus, utcnow
 
 
 async def create_job(
@@ -76,3 +76,28 @@ async def recover_interrupted_jobs(session: AsyncSession) -> int:
     if jobs:
         await session.commit()
     return len(jobs)
+
+
+async def recover_interrupted_downloads(session: AsyncSession) -> int:
+    """Expose interrupted direct attempts for safe, explicit retry.
+
+    An import may already have placed some files. Preserve its payload and
+    ownership records; the importer's duplicate checks make retry idempotent.
+    Torrent state is reconciled separately with qBittorrent.
+    """
+    downloads = (await session.execute(select(Download).where(
+        Download.kind == DownloadKind.DIRECT,
+        Download.status.in_([DownloadStatus.DOWNLOADING, DownloadStatus.IMPORTING]),
+    ))).scalars().all()
+    for dl in downloads:
+        dl.status = DownloadStatus.FAILED
+        dl.error_code = "interrupted"
+        dl.error = "Pullarr restarted during this download. Retry to finish importing; existing files are preserved."
+        dl.next_retry_at = None
+        session.add(HistoryEvent(
+            series_id=dl.series_id, issue_id=dl.issue_id, event="failed",
+            source_name=dl.source_name, detail=dl.error,
+        ))
+    if downloads:
+        await session.commit()
+    return len(downloads)

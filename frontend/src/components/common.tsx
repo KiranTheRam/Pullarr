@@ -56,18 +56,52 @@ export function Modal({
   children: ReactNode;
 }) {
   const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
+    const previousFocus = document.activeElement as HTMLElement | null;
     closeRef.current?.focus();
+    const isTopDialog = () => {
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      return dialogs[dialogs.length - 1] === dialogRef.current;
+    };
+    const focusable = () => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+    ) ?? []).filter((element) => !element.hidden && !element.closest('[hidden]'));
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (!isTopDialog()) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        onCloseRef.current();
+      }
+      if (event.key === "Tab") {
+        const elements = focusable();
+        const first = elements[0];
+        const last = elements[elements.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault(); last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault(); first?.focus();
+        }
+      }
+    };
+    const keepFocus = (event: FocusEvent) => {
+      if (isTopDialog() && !dialogRef.current?.contains(event.target as Node)) closeRef.current?.focus();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    document.addEventListener("focusin", keepFocus);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("focusin", keepFocus);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header" id={titleId}>
           {title}
           <button ref={closeRef} onClick={onClose} aria-label="Close dialog" style={{ fontSize: 18, color: "var(--text-dim)" }}>
@@ -80,8 +114,8 @@ export function Modal({
   );
 }
 
-export function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
-  return <button type="button" role="switch" aria-checked={on} className={`toggle${on ? " on" : ""}`} onClick={() => onChange(!on)} />;
+export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+  return <button type="button" role="switch" aria-label={label} aria-checked={on} className={`toggle${on ? " on" : ""}`} onClick={() => onChange(!on)} />;
 }
 
 export function formatBytes(bytes: number): string {
@@ -120,4 +154,5 @@ export const statusPill: Record<string, string> = {
   imported: "green",
   deleted: "red",
   removed: "red",
+  resolved: "green",
 };

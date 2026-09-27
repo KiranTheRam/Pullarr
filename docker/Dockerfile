@@ -11,9 +11,13 @@ RUN npm run build -- --outDir /build/static
 FROM python:3.12-slim
 WORKDIR /app
 
-COPY backend/pyproject.toml ./
+# Decode RAR/7z to validate downloads without extracting untrusted paths.
+RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/pyproject.toml backend/constraints.txt ./
 COPY backend/pullarr ./pullarr
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -c constraints.txt .
 
 COPY --from=frontend /build/static ./static
 

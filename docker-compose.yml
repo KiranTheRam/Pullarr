@@ -1,6 +1,6 @@
 services:
   pullarr:
-    image: kirantheram/mangarr:latest
+    image: kirantheram/pullarr:latest
     container_name: pullarr
     ports:
       - "6997:6997"

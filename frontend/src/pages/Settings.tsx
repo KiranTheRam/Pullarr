@@ -213,6 +213,7 @@ function SourcePriority({
             <span className="priority-name">{SOURCE_LABELS[name] ?? name}</span>
             {SOURCE_HINTS[name] && <span className="priority-hint">{SOURCE_HINTS[name]}</span>}
             <Toggle
+              label={`Enable ${SOURCE_LABELS[name] ?? name}`}
               on={enabled}
               onChange={(v) => setForm({ ...form, [`source_${name}_enabled`]: v ? "true" : "false" })}
             />
@@ -304,7 +305,7 @@ function KavitaSettings({
       </p>
       <div className="form-row">
         <label>Enabled</label>
-        <Toggle on={form.kavita_enabled === "true"} onChange={setBool("kavita_enabled")} />
+        <Toggle label="Enable Kavita" on={form.kavita_enabled === "true"} onChange={setBool("kavita_enabled")} />
       </div>
       <div className="form-row">
         <label>URL</label>
@@ -385,6 +386,9 @@ function KavitaSettings({
   );
 }
 
+// Keep unsaved values only in this tab’s memory, never in browser storage.
+let settingsDraft: SettingsType | null = null;
+
 export default function Settings() {
   const queryClient = useQueryClient();
   const { data: saved, isLoading, isError, error, refetch } = useQuery({
@@ -392,10 +396,10 @@ export default function Settings() {
     queryFn: () => api.get<SettingsType>("/settings"),
   });
 
-  const [form, setForm] = useState<SettingsType>({});
-  useEffect(() => {
-    if (saved) setForm(saved);
-  }, [saved]);
+  const [draft, setDraft] = useState<SettingsType | null>(() => settingsDraft);
+  const form = draft ?? saved ?? {};
+  const setForm = (value: SettingsType) => { settingsDraft = value; setDraft(value); };
+  const discardDraft = () => { settingsDraft = null; setDraft(null); };
   const dirty = Boolean(saved) && JSON.stringify(form) !== JSON.stringify(saved);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
@@ -409,7 +413,7 @@ export default function Settings() {
     mutationFn: () => api.put<SettingsType>("/settings", form),
     onSuccess: (data) => {
       queryClient.setQueryData(["settings"], data);
-      setForm(data);
+      discardDraft();
     },
   });
 
@@ -476,8 +480,8 @@ export default function Settings() {
   return (
     <>
       <Toolbar title="Settings">
-        {dirty && <span style={{ color: "var(--warning)", fontSize: 13 }}>Unsaved changes</span>}
-        {save.isSuccess && <span style={{ color: "var(--success)", fontSize: 13 }}>Saved</span>}
+        {dirty && <><span style={{ color: "var(--warning)", fontSize: 13 }}>Unsaved draft — kept while you navigate</span><button className="btn" onClick={discardDraft}>Discard changes</button></>}
+        {save.isSuccess && !dirty && <span style={{ color: "var(--success)", fontSize: 13 }}>Saved</span>}
         <button className="btn primary" onClick={() => save.mutate()} disabled={save.isPending || !dirty}>
           Save Changes
         </button>
@@ -511,7 +515,7 @@ export default function Settings() {
         <div className="settings-section">
           <h3>Metadata enrichment — Metron (optional)</h3>
           <p className="section-hint">Adds issue summaries, creators, arcs, page counts, status, and collected-edition reprint mappings using ComicVine ID cross-references.</p>
-          <div className="form-row"><label>Enabled</label><Toggle on={form.metron_enabled === "true"} onChange={setBool("metron_enabled")} /></div>
+          <div className="form-row"><label>Enabled</label><Toggle label="Enable Metron" on={form.metron_enabled === "true"} onChange={setBool("metron_enabled")} /></div>
           <div className="form-row"><label>Username</label>{text("metron_username")}</div>
           <div className="form-row"><label>Password</label>{text("metron_password", true)}</div>
           <div className="form-row"><label>Issues per refresh</label>{text("metron_issue_enrichment_limit")}
@@ -588,7 +592,7 @@ export default function Settings() {
           </p>
           <div className="form-row">
             <label>Enabled</label>
-            <Toggle on={form.qbittorrent_enabled === "true"} onChange={setBool("qbittorrent_enabled")} />
+            <Toggle label="Enable qBittorrent" on={form.qbittorrent_enabled === "true"} onChange={setBool("qbittorrent_enabled")} />
           </div>
           <div className="form-row">
             <label>URL</label>
@@ -636,7 +640,7 @@ export default function Settings() {
           </p>
           <div className="form-row">
             <label>Enabled</label>
-            <Toggle on={form.webhook_enabled === "true"} onChange={setBool("webhook_enabled")} />
+            <Toggle label="Enable webhooks" on={form.webhook_enabled === "true"} onChange={setBool("webhook_enabled")} />
           </div>
           <div className="form-row">
             <label>Webhook URL</label>

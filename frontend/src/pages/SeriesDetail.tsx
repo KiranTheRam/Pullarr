@@ -7,6 +7,7 @@ import type {
   JobItem,
   QueueItem,
   Release,
+  ReleaseSearch,
   ScanResult,
   SeriesDetail as SeriesDetailType,
 } from "../api/types";
@@ -97,10 +98,11 @@ function InteractiveSearch({
 }) {
   const queryClient = useQueryClient();
   const params = issueId != null ? `issue_id=${issueId}` : `series_id=${seriesId}`;
-  const { data, isLoading, isError, error } = useQuery({
+  const { data: result, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["releases", params],
-    queryFn: () => api.get<Release[]>(`/search/releases?${params}`),
+    queryFn: () => api.get<ReleaseSearch>(`/search/releases?${params}&include_source_status=true`),
   });
+  const data = result?.releases;
 
   const [activeSource, setActiveSource] = useState("");
   const [selectedDdl, setSelectedDdl] = useState<Set<string>>(() => new Set());
@@ -185,13 +187,14 @@ function InteractiveSearch({
 
   return (
     <Modal title={`Search — ${title}`} onClose={onClose}>
+      {result?.warnings.map((warning) => <div className="error-banner" role="status" key={warning}>{warning} <button className="btn sm" onClick={() => refetch()}>Retry search</button></div>)}
       {isLoading ? (
         <Spinner />
       ) : isError ? (
-        <div className="error-banner">{(error as Error).message}</div>
+        <QueryError error={error} retry={() => refetch()} />
       ) : !data || data.length === 0 ? (
         <p style={{ color: "var(--text-dim)" }}>
-          No releases found. Check source links and that sources are enabled in Settings.
+          No matching releases found from the sources that responded.
         </p>
       ) : (
         <>
@@ -318,7 +321,7 @@ export default function SeriesDetail() {
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const toggleReveal = (k: string) => setRevealed((r) => ({ ...r, [k]: !r[k] }));
   const [showRename, setShowRename] = useState(false);
-  const [showFiles, setShowFiles] = useState(false);
+  const [showFiles, setShowFiles] = useState(() => new URLSearchParams(location.search).get("files") === "1");
   const [showSources, setShowSources] = useState(false);
   const [showCleanup, setShowCleanup] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -621,8 +624,8 @@ export default function SeriesDetail() {
         </button>
       </Toolbar>
       <div className="content">
-        {(refresh.isError || searchMissing.isError || scan.isError || toggleMonitor.isError || toggleIssue.isError) && (
-          <div className="error-banner" role="alert">{String((refresh.error || searchMissing.error || scan.error || toggleMonitor.error || toggleIssue.error) as Error)}</div>
+        {(refresh.isError || searchMissing.isError || scan.isError || toggleMonitor.isError || toggleIssue.isError || deleteSeries.isError) && (
+          <div className="error-banner" role="alert">{String((refresh.error || searchMissing.error || scan.error || toggleMonitor.error || toggleIssue.error || deleteSeries.error) as Error)}</div>
         )}
         {jobs && jobs.length > 0 && jobs.map((job) => (
           <div className="activity-banner" key={job.id}>

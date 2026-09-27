@@ -1,9 +1,19 @@
+import io
+import zipfile
+
 import httpx
 import pytest
 import respx
 
 from pullarr.download.ddl import DownloadCancelled, download_release, filename_from_response
 from pullarr.sources.base import DDLSource
+
+
+def comic_bytes():
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("001.png", b"image test fixture")
+    return output.getvalue()
 
 
 class FakeSource(DDLSource):
@@ -50,7 +60,7 @@ class TestFilenameFromResponse:
 @pytest.mark.asyncio
 @respx.mock
 async def test_download_release_streams_files(tmp_path):
-    payload = b"comic-bytes" * 100
+    payload = comic_bytes()
     respx.get("https://getcomics.org/dls/abc").respond(
         302, headers={"Location": "https://fs1.comicfiles.ru/Batman%20015.cbr"}
     )
@@ -75,7 +85,7 @@ async def test_download_release_streams_files(tmp_path):
 @pytest.mark.asyncio
 @respx.mock
 async def test_download_release_falls_back_to_next_mirror(tmp_path):
-    payload = b"comic" * 50
+    payload = comic_bytes()
     # primary mirror 403s, fallback works
     respx.get("https://fs2.comicfiles.ru/x.cbr").respond(403)
     respx.get("https://pixeldrain.com/api/file/abc?download").respond(
@@ -124,3 +134,30 @@ async def test_download_release_cancellation_cleans_payload(tmp_path):
 
     assert not list(tmp_path.rglob("*.partial"))
     assert not list(tmp_path.rglob("*.cbr"))
+
+
+@respx.mock
+async def test_invalid_successful_response_tries_next_mirror(tmp_path):
+    respx.get("https://mirror.test/bad.cbz").respond(200, content=b"<html>blocked</html>")
+    respx.get("https://mirror.test/good.cbz").respond(200, content=comic_bytes())
+    source = FakeSource([["https://mirror.test/bad.cbz"], ["https://mirror.test/good.cbz"]])
+    try:
+        payload = await download_release(source, "https://example.test/post", tmp_path)
+        assert [p.name for p in payload.iterdir()] == ["good.cbz"]
+    finally:
+        await source.client.aclose()
+
+
+@respx.mock
+async def test_invalid_nested_comic_tries_next_mirror(tmp_path):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("broken.cbz", b"not a comic")
+    respx.get("https://mirror.test/pack.zip").respond(200, content=output.getvalue())
+    respx.get("https://mirror.test/good.cbz").respond(200, content=comic_bytes())
+    source = FakeSource([["https://mirror.test/pack.zip"], ["https://mirror.test/good.cbz"]])
+    try:
+        payload = await download_release(source, "https://example.test/post", tmp_path)
+        assert [p.name for p in payload.iterdir()] == ["good.cbz"]
+    finally:
+        await source.client.aclose()

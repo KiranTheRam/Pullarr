@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 from ..db import get_session
 from ..metadata.comicvine import ComicVineError, provider as comicvine
 from ..models import Issue, Series
-from ..schemas import MetadataResult, ReleaseOut
+from ..schemas import MetadataResult, ReleaseOut, ReleaseSearchOut
 from ..sources import registry
 from ..util import normalize_title, release_covers_issue, strip_issue_suffix
 
@@ -44,11 +44,12 @@ async def search_metadata(q: str, session: AsyncSession = Depends(get_session)):
     ]
 
 
-@router.get("/releases", response_model=list[ReleaseOut])
+@router.get("/releases", response_model=list[ReleaseOut] | ReleaseSearchOut)
 async def search_releases(
     series_id: int | None = None,
     issue_id: int | None = None,
     session: AsyncSession = Depends(get_session),
+    include_source_status: bool = False,
 ):
     """Interactive search. With issue_id: releases for that issue. With
     series_id only: everything the sources have for the series (single
@@ -73,12 +74,16 @@ async def search_releases(
 
     values = await registry.apply_settings(session)
     releases: list[ReleaseOut] = []
+    warnings: list[str] = []
+    attempted = 0
+    succeeded = 0
     links = {sl.source_name: sl for sl in series.source_links}
     wanted = {normalize_title(series.title)}
     wanted.update(normalize_title(t) for t in series.alt_titles.split("\n") if t)
     wanted.discard("")
 
     for src in registry.enabled_ddl_sources(values):
+        attempted += 1
         link = links.get(src.name)
         term = link.external_id if link else series.title
         wanted.add(normalize_title(term))
@@ -103,8 +108,10 @@ async def search_releases(
                         if r.issue_number is None
                         or any(release_covers_issue(r, i) for i in series.issues)
                     ]
-        except Exception:
+        except Exception as exc:
+            warnings.append(_source_error(src.name, exc))
             continue
+        succeeded += 1
         for r in found[:40]:
             releases.append(ReleaseOut(
                 kind="ddl",
@@ -122,10 +129,13 @@ async def search_releases(
 
     if values["qbittorrent_enabled"] == "true":
         for indexer in registry.enabled_torrent_indexers(values):
+            attempted += 1
             try:
                 torrents = await indexer.search(series.title)
-            except Exception:
+            except Exception as exc:
+                warnings.append(_source_error(indexer.name, exc))
                 continue
+            succeeded += 1
             for t in torrents[:25]:
                 releases.append(ReleaseOut(
                     kind="torrent",
@@ -137,4 +147,17 @@ async def search_releases(
                     seeders=t.seeders,
                     leechers=t.leechers,
                 ))
+    if attempted and not succeeded:
+        raise HTTPException(502, "All release sources failed. " + " ".join(warnings))
+    if not attempted:
+        warnings.append("No release sources are enabled. Enable a source in Settings.")
+    if include_source_status:
+        return ReleaseSearchOut(releases=releases, warnings=warnings)
     return releases
+
+
+def _source_error(name: str, error: Exception) -> str:
+    # Exception messages may contain proxy credentials or signed download URLs.
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    reason = f"HTTP {status}" if status else type(error).__name__
+    return f"{name}: {reason}. Check the source and its configured proxy, then retry."

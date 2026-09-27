@@ -8,11 +8,13 @@ import logging
 import re
 import shutil
 import time
+from threading import Event
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from .. import kavita, notifications
 from ..config import config
@@ -20,6 +22,7 @@ from ..db import session_scope
 from ..download.ddl import DownloadCancelled, download_release
 from ..download.qbittorrent import QbtClient
 from ..library.importer import import_payload
+from ..library.work import run_library_work
 from ..metadata.comicvine import derive_status, provider as comicvine
 from ..metadata.metron import provider as metron
 from ..models import (
@@ -52,15 +55,35 @@ BTIH_RE = re.compile(r"btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})")
 # freshly added long series doesn't hammer the source
 ISSUE_SEARCH_CAP = 5
 
-_cancelled_downloads: set[int] = set()
+_active_downloads: dict[int, Event] = {}
+_importing_downloads: set[int] = set()
 
 
 def cancel_downloads(ids: list[int]) -> None:
-    _cancelled_downloads.update(ids)
+    for download_id in ids:
+        if token := _active_downloads.get(download_id):
+            token.set()
+
+
+def download_is_active(download_id: int) -> bool:
+    return download_id in _active_downloads
+
+
+def download_is_importing(download_id: int) -> bool:
+    return download_id in _importing_downloads
+
+
+async def _import_download_payload(download_id: int, *args, **kwargs):
+    _importing_downloads.add(download_id)
+    try:
+        return await run_library_work(import_payload, *args, **kwargs)
+    finally:
+        _importing_downloads.discard(download_id)
 
 
 def _is_cancelled(download_id: int) -> bool:
-    return download_id in _cancelled_downloads
+    token = _active_downloads.get(download_id)
+    return token is not None and token.is_set()
 
 
 # ---------------------------------------------------------------- metadata
@@ -228,7 +251,7 @@ async def reconcile_downloaded_files(session: AsyncSession, series: Series) -> i
 async def scan_series_folder(session: AsyncSession, series: Series) -> None:
     """Adopt existing library folders for the series and mark issues that are
     already on disk as owned (so they aren't re-downloaded)."""
-    from ..library.scanner import find_existing_folder, resolve_folders, scan_series
+    from ..library.scanner import find_existing_folder, resolve_folders, scan_series_async
 
     if series.root_folder is None:
         return
@@ -236,11 +259,11 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
     extras = [f.path for f in series.extra_folders]
     folders = resolve_folders(root, series, extras)
     if not folders[0].exists() and not extras:
-        found = find_existing_folder(root, series)
+        found = await run_in_threadpool(find_existing_folder, root, series)
         if found:
             series.folder_name = found
             folders = resolve_folders(root, series, extras)
-    scan_series(series, list(series.issues), folders)
+    await scan_series_async(series, list(series.issues), folders)
     await session.commit()
 
 
@@ -632,7 +655,21 @@ async def process_direct_queue() -> None:
 
 
 async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
+    # A cancellation belongs to one active attempt, never to a queued retry.
+    if download_is_active(dl.id):
+        return
+    _active_downloads[dl.id] = Event()
+    try:
+        await _run_direct_attempt(session, dl)
+    finally:
+        _active_downloads.pop(dl.id, None)
+
+
+async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
     values = await registry.apply_settings(session)
+    await session.refresh(dl)
+    if dl.status != DownloadStatus.QUEUED or _is_cancelled(dl.id):
+        return
     series = await _load_series(session, dl.series_id) if dl.series_id else None
     issue = await session.get(Issue, dl.issue_id) if dl.issue_id else None
     source = registry.DDL_SOURCES.get(dl.source_name)
@@ -663,6 +700,8 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
 
     async def on_progress(done: int, total: int) -> None:
         nonlocal last_progress_commit
+        if _is_cancelled(dl.id):
+            raise DownloadCancelled("removed by user")
         if total > 0:
             dl.progress = min(done / total, 1.0)
         now = time.monotonic()
@@ -693,7 +732,9 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
                     await session.commit()
             except Exception as exc:
                 log.warning("Metron issue enrichment failed for %s: %s", issue.id, exc)
-        imported = import_payload(
+        if _is_cancelled(dl.id):
+            raise DownloadCancelled("removed by user")
+        imported = await _import_download_payload(dl.id,
             payload_dir, series, list(series.issues), Path(root),
             values["naming_template"], force_issue=issue, move=True,
         )
@@ -713,9 +754,8 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
         await _record_direct_failure(session, dl, series, issue, exc, values)
         return
     finally:
-        _cancelled_downloads.discard(dl.id)
         if payload_dir is not None:
-            shutil.rmtree(payload_dir, ignore_errors=True)
+            await run_in_threadpool(shutil.rmtree, payload_dir, ignore_errors=True)
 
     covered_count = _mark_imported(series, imported)
     needs_attention = covered_count == 0
@@ -810,7 +850,7 @@ async def _import_torrent(
         await session.commit()
         return
     try:
-        imported = import_payload(
+        imported = await _import_download_payload(dl.id,
             content_path, series, list(series.issues), Path(series.root_folder.path),
             values["naming_template"],
         )
@@ -909,7 +949,6 @@ async def grab_missing_issues(
         select(Download).where(
             Download.series_id == series.id,
             Download.status == DownloadStatus.FAILED,
-            Download.issue_id.isnot(None),
         )
     )
     failed_downloads = result.scalars().all()
@@ -918,7 +957,6 @@ async def grab_missing_issues(
         dl for dl in failed_downloads
         if dl.blocked or (dl.updated_at is not None and dl.updated_at >= cooldown)
     ]
-    failed_pairs = {(dl.issue_id, dl.source_name) for dl in suppressed if dl.issue_id is not None}
     failed_releases = {(dl.source_name, dl.payload) for dl in suppressed if dl.payload}
 
     links = {sl.source_name: sl for sl in series.source_links}
@@ -940,14 +978,11 @@ async def grab_missing_issues(
             log.warning("monitor: %s list failed for %r: %s", src.name, series.title, exc)
             continue
         queued += await _grab_matches(session, series, src.name, releases,
-                                      remaining, wanted_titles, failed_pairs,
-                                      failed_releases)
+                                      remaining, wanted_titles, failed_releases)
 
         # targeted per-issue searches for stragglers (older issues that fell
         # off the recent-posts pages), capped per pass
         for issue in list(remaining.values())[:straggler_cap]:
-            if (issue.id, src.name) in failed_pairs:
-                continue
             query = f"{link.external_id} {issue.display_number or f'{issue.number:g}'}"
             try:
                 results = await src.search_releases(query)
@@ -955,8 +990,7 @@ async def grab_missing_issues(
                 log.warning("monitor: %s search %r failed: %s", src.name, query, exc)
                 continue
             queued += await _grab_matches(session, series, src.name, results,
-                                          remaining, wanted_titles, failed_pairs,
-                                          failed_releases)
+                                          remaining, wanted_titles, failed_releases)
     if queued:
         log.info("Queued %d missing issue(s) for %r", queued, series.title)
     return queued
@@ -1000,7 +1034,6 @@ async def _grab_matches(
     releases: list[SourceRelease],
     remaining: dict[float, Issue],
     wanted_titles: set[str],
-    failed_pairs: set[tuple[int, str]],
     failed_releases: set[tuple[str, str]] | None = None,
 ) -> int:
     """Enqueue every release that matches a still-wanted issue. A multi-issue
@@ -1017,7 +1050,7 @@ async def _grab_matches(
         # or a variant point issue matched by display number
         covered = [
             i for i in remaining.values()
-            if (i.id, source_name) not in failed_pairs and release_covers_issue(r, i)
+            if release_covers_issue(r, i)
         ]
         if not covered:
             continue
