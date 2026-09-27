@@ -273,12 +273,12 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
 
 async def refresh_series_full(
     series_id: int, grab_missing: bool = False, only_monitored: bool = False,
-    job_id: int | None = None,
+    job_id: int | None = None, force_scan: bool = False,
 ) -> None:
     try:
         await _refresh_series_full_impl(
             series_id, grab_missing=grab_missing,
-            only_monitored=only_monitored, job_id=job_id,
+            only_monitored=only_monitored, job_id=job_id, force_scan=force_scan,
         )
     except Exception as exc:
         log.exception("series job failed for %d", series_id)
@@ -291,7 +291,7 @@ async def refresh_series_full(
 
 async def _refresh_series_full_impl(
     series_id: int, grab_missing: bool = False, only_monitored: bool = False,
-    job_id: int | None = None,
+    job_id: int | None = None, force_scan: bool = False,
 ) -> None:
     async with session_scope() as session:
         await update_job(session, job_id, status=JobStatus.RUNNING,
@@ -337,7 +337,7 @@ async def _refresh_series_full_impl(
         await update_job(session, job_id, phase="sources", progress=0.35)
         await link_sources(session, series, values)
         # adopt existing on-disk files before the monitor considers grabbing
-        if values.get("library_scan_on_add", "true") == "true":
+        if force_scan or values.get("library_scan_on_add", "true") == "true":
             await update_job(session, job_id, phase="scanning", progress=0.55)
             try:
                 await scan_series_folder(session, series)

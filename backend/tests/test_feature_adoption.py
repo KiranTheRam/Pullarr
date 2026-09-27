@@ -1,18 +1,24 @@
 """Behavior that protects library files and per-issue choices."""
 
+import asyncio
 import zipfile
+from contextlib import asynccontextmanager
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from pullarr.api import library_import as import_api
 from pullarr.api.library_editor import _change_root, _load
 from pullarr.api.library_import import _candidate_dirs, _conflicts, _identity
+from pullarr.jobs import tasks
 from pullarr.jobs.tasks import _mark_imported
 from pullarr.library.importer import ImportedFile
 from pullarr.library.move import MoveError
 from pullarr.library.scanner import scan_series
 from pullarr.models import Base, Download, DownloadKind, Issue, RootFolder, Series
 from pullarr.monitoring import apply_mode, issue_wanted, resolve_initial_future
+from pullarr.schemas import ImportItemIn, LibraryImportIn
 
 
 def test_future_mode_resolves_once_and_keeps_manual_issue_choices():
@@ -136,3 +142,110 @@ def test_import_folder_discovery_distinguishes_series_and_publisher_subfolders(t
             archive.writestr("001.png", b"image")
     names = {item.folder_name for item in _candidate_dirs(root, set(), set())}
     assert names == {"Batman (2024)", "Marvel/X-Men (2025)"}
+
+
+def test_import_folder_discovery_keeps_untracked_publisher_siblings(tmp_path):
+    root = tmp_path / "comics"
+    tracked = root / "Marvel" / "Batman"
+    untracked = root / "Marvel" / "X-Men"
+    tracked.mkdir(parents=True)
+    untracked.mkdir()
+    for folder in (tracked, untracked):
+        with zipfile.ZipFile(folder / "Issue #1.cbz", "w") as archive:
+            archive.writestr("001.png", b"image")
+    claimed = {_identity(tracked)}
+    ancestors = {_identity(parent) for parent in tracked.parents}
+
+    names = {item.folder_name for item in _candidate_dirs(root, claimed, ancestors)}
+
+    assert names == {"Marvel/X-Men"}
+
+
+@pytest.mark.asyncio
+async def test_import_batch_continues_after_stale_folder_and_starts_prior_jobs(tmp_path, monkeypatch):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    root_path = tmp_path / "comics"
+    root_path.mkdir()
+    for name in ("Batman", "Superman"):
+        (root_path / name).mkdir()
+    scheduled = []
+
+    async def fake_create_series(body, session):
+        series = Series(comicvine_id=body.comicvine_id, title=body.folder_name,
+                        root_folder_id=body.root_folder_id, folder_name=body.folder_name)
+        session.add(series)
+        await session.commit()
+        return series
+
+    async def fake_refresh(series_id, *, grab_missing, job_id, force_scan):
+        scheduled.append((series_id, force_scan))
+
+    monkeypatch.setattr(import_api, "create_series_record", fake_create_series)
+    monkeypatch.setattr(import_api, "refresh_series_full", fake_refresh)
+    async with Session() as session:
+        root = RootFolder(path=str(root_path))
+        session.add(root)
+        await session.commit()
+        body = LibraryImportIn(root_folder_id=root.id, items=[
+            ImportItemIn(folder_name="Batman", comicvine_id=1),
+            ImportItemIn(folder_name="Gone", comicvine_id=2),
+            ImportItemIn(folder_name="Superman", comicvine_id=3),
+        ])
+        results = await import_api.import_library(body, session)
+        await asyncio.sleep(0)
+        series_ids = (await session.execute(select(Series.id).order_by(Series.id))).scalars().all()
+
+    assert [result.status for result in results] == ["added", "failed", "added"]
+    assert [series_id for series_id, _ in scheduled] == series_ids
+    assert all(force_scan for _, force_scan in scheduled)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_path, monkeypatch):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    root_path = tmp_path / "comics"
+    folder = root_path / "Batman"
+    folder.mkdir(parents=True)
+    archive_path = folder / "Batman #1.cbz"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("001.png", b"image")
+    async with Session() as session:
+        series = Series(title="Batman", alt_titles="", folder_name="Batman",
+                        root_folder=RootFolder(path=str(root_path)),
+                        issues=[Issue(number=1, display_number="1")])
+        session.add(series)
+        await session.commit()
+
+        @asynccontextmanager
+        async def use_session():
+            yield session
+
+        async def no_op(*args, **kwargs):
+            pass
+
+        async def settings(_session):
+            return {"library_scan_on_add": "false"}
+
+        async def grab(_session, loaded, _values, **kwargs):
+            assert loaded.issues[0].downloaded
+            return 0
+
+        monkeypatch.setattr(tasks, "session_scope", use_session)
+        monkeypatch.setattr(tasks.registry, "apply_settings", settings)
+        monkeypatch.setattr(tasks, "refresh_series_metadata", no_op)
+        monkeypatch.setattr(tasks, "update_issues", no_op)
+        monkeypatch.setattr(tasks, "link_sources", no_op)
+        monkeypatch.setattr(tasks, "grab_missing_issues", grab)
+
+        await tasks.refresh_series_full(series.id, grab_missing=True, force_scan=True)
+        await session.refresh(series.issues[0])
+        assert series.issues[0].downloaded
+        assert series.issues[0].file_path == str(archive_path)
+    await engine.dispose()

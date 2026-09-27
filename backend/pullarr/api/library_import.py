@@ -78,8 +78,9 @@ def _candidate_dirs(root: Path, claimed: set[tuple[int, int]],
     for folder in sorted(root.iterdir(), key=lambda path: path.name.casefold()):
         if not folder.is_dir() or folder.name.startswith("."):
             continue
-        if _conflicts(folder, claimed, ancestors):
-            continue
+        # A publisher folder can be an ancestor of a tracked series while
+        # still containing untracked sibling series. Check each candidate
+        # below instead of pruning the publisher folder here.
         try:
             children = [p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")]
             own_media = any(p.is_file() and p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS
@@ -122,7 +123,8 @@ def _safe_folder(root: Path, relative: str) -> Path:
 
 async def _refresh_in_order(jobs: list[tuple[int, int, bool]]) -> None:
     for series_id, job_id, search_now in jobs:
-        await refresh_series_full(series_id, grab_missing=search_now, job_id=job_id)
+        await refresh_series_full(series_id, grab_missing=search_now,
+                                  job_id=job_id, force_scan=True)
 
 
 @router.post("", response_model=list[LibraryImportResultOut])
@@ -140,7 +142,12 @@ async def import_library(body: LibraryImportIn, session: AsyncSession = Depends(
     jobs: list[tuple[int, int, bool]] = []
     results: list[LibraryImportResultOut] = []
     for item in body.items:
-        folder = _safe_folder(root_path, item.folder_name)
+        try:
+            folder = _safe_folder(root_path, item.folder_name)
+        except HTTPException as exc:
+            results.append(LibraryImportResultOut(folder_name=item.folder_name,
+                                                  status="failed", detail=str(exc.detail)))
+            continue
         identity = _identity(folder)
         if identity is None:
             results.append(LibraryImportResultOut(folder_name=item.folder_name, status="failed",
