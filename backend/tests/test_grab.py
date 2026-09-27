@@ -42,7 +42,7 @@ async def test_grab_matches_enqueues_matching_and_pops(monkeypatch):
     session = Recorder()
 
     count = await tasks._grab_matches(session, series, "getcomics", releases,
-                                      remaining, wanted, failed_pairs=set())
+                                      remaining, wanted, failed_releases=set())
 
     assert count == 2
     assert sorted(n for n, _ in session.grabbed) == [13.0, 14.0]
@@ -66,7 +66,7 @@ async def test_grab_matches_bundle_grabbed_once_covers_span(monkeypatch):
 
     count = await tasks._grab_matches(
         session, series, "getcomics", releases, remaining,
-        {tasks.normalize_title("Absolute Carnage: Miles Morales")}, failed_pairs=set(),
+        {tasks.normalize_title("Absolute Carnage: Miles Morales")}, failed_releases=set(),
     )
 
     # one grab (anchored to #1), and all three issues removed from wanted
@@ -76,7 +76,7 @@ async def test_grab_matches_bundle_grabbed_once_covers_span(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_grab_matches_skips_failed_pairs(monkeypatch):
+async def test_grab_matches_skips_blocked_release(monkeypatch):
     async def fake_enqueue(session, series, issue, source_name, external_id, title=""):
         session.grabbed.append((issue.number, title))
 
@@ -91,7 +91,7 @@ async def test_grab_matches_skips_failed_pairs(monkeypatch):
     count = await tasks._grab_matches(
         session, series, "getcomics", releases, remaining,
         {tasks.normalize_title("Absolute Batman")},
-        failed_pairs={(5, "getcomics")},
+        failed_releases={("getcomics", "url")},
     )
     assert count == 0
     assert session.grabbed == []
@@ -124,7 +124,7 @@ async def test_grab_matches_leading_article_and_relaunch_year(monkeypatch):
     session = Recorder()
 
     count = await tasks._grab_matches(session, series, "getcomics", releases,
-                                      remaining, wanted, failed_pairs=set())
+                                      remaining, wanted, failed_releases=set())
 
     assert count == 1
     assert session.grabbed == [(73.0, "Amazing Spider-Man #73 (2021)")]
@@ -153,7 +153,7 @@ async def test_grab_matches_variant_issue_display_number(monkeypatch):
     session = Recorder()
 
     count = await tasks._grab_matches(session, series, "getcomics", releases,
-                                      remaining, wanted, failed_pairs=set())
+                                      remaining, wanted, failed_releases=set())
 
     assert count == 2
     assert sorted(session.grabbed) == [
@@ -203,7 +203,6 @@ async def test_grab_matches_skips_failed_release_payload(monkeypatch):
     count = await tasks._grab_matches(
         session, series, "getcomics", releases, remaining,
         {tasks.normalize_title("Absolute Batman")},
-        failed_pairs=set(),
         failed_releases={("getcomics", "dead-url")},
     )
 

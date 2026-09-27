@@ -18,6 +18,7 @@ from ..models import Issue, Series
 from ..util import normalize_title
 from .matcher import MediaFile, find_media_files, match_files
 from .naming import series_folder
+from .work import apply_file_state, copy_issues, run_library_work
 
 log = logging.getLogger(__name__)
 
@@ -147,6 +148,14 @@ def scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sca
              "%d unmatched, -%d cleared", series.title, len(existing),
              result.matched_issues, result.volume_files, result.unmatched_count,
              result.cleared)
+    return result
+
+
+async def scan_series_async(series: Series, issues: list[Issue], folders: list[Path]) -> ScanResult:
+    """Scan detached values in a worker; update session-owned rows on its loop."""
+    copies = copy_issues(issues)
+    result = await run_library_work(scan_series, Series(title=series.title), copies, folders)
+    apply_file_state(issues, copies)
     return result
 
 

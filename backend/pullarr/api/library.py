@@ -8,16 +8,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 
 from .. import settings_service
 from ..db import get_session
 from ..jobs.service import create_job
 from ..library.matcher import find_media_files, match_files
 from ..library.rename import apply_renames, plan_renames
+from ..library.work import apply_file_state, copy_issues, run_library_work
 from ..library.scanner import (
     find_existing_folder,
     resolve_folders,
-    scan_series,
+    scan_series_async,
     series_dir,
 )
 from ..models import JobKind, RootFolder, Series, SeriesFolder, SeriesSourceLink
@@ -88,11 +90,11 @@ async def scan(series_id: int, session: AsyncSession = Depends(get_session)):
     folders = _folders_of(series)
     # adopt a matching folder if the primary one doesn't exist yet
     if not folders[0].exists() and not series.extra_folders:
-        found = find_existing_folder(root, series)
+        found = await run_in_threadpool(find_existing_folder, root, series)
         if found:
             series.folder_name = found
             folders = _folders_of(series)
-    result = scan_series(series, list(series.issues), folders)
+    result = await scan_series_async(series, list(series.issues), folders)
     await session.commit()
     return ScanResultOut(
         folder=", ".join(str(f) for f in folders),
@@ -117,7 +119,7 @@ async def scan_all(session: AsyncSession = Depends(get_session)):
 
 async def _plan(session: AsyncSession, series: Series):
     values = await settings_service.get_all(session)
-    return plan_renames(series, list(series.issues), values["naming_template"])
+    return await run_library_work(plan_renames, series, list(series.issues), values["naming_template"])
 
 
 @router.get("/series/{series_id}/rename", response_model=list[RenameItemOut])
@@ -142,7 +144,9 @@ async def rename_apply(
     if body.issue_ids is not None:
         wanted = set(body.issue_ids)
         items = [i for i in items if wanted & set(i.issue_ids)]
-    outcomes = apply_renames(items, {i.id: i for i in series.issues})
+    copies = copy_issues(list(series.issues))
+    outcomes = await run_library_work(apply_renames, items, {i.id: i for i in copies})
+    apply_file_state(list(series.issues), copies)
     await session.commit()
     return [
         RenameOutcomeOut(
@@ -161,7 +165,7 @@ async def series_files(series_id: int, session: AsyncSession = Depends(get_sessi
     media = []
     for folder in _folders_of(series):
         if folder.exists():
-            media.extend(find_media_files(folder))
+            media.extend(await run_library_work(find_media_files, folder))
     result = match_files(media, list(series.issues))
     out: list[SeriesFileOut] = []
     for mf in result.matched:
@@ -229,7 +233,7 @@ async def cleanup_plan(series_id: int, session: AsyncSession = Depends(get_sessi
 
     series = await _load(session, series_id)
     values = await settings_service.get_all(session)
-    plan = analyze(series, list(series.issues), _folders_of(series),
+    plan = await run_library_work(analyze, series, list(series.issues), _folders_of(series),
                    values["naming_template"])
 
     def out(f):
@@ -250,7 +254,9 @@ async def cleanup_apply(
     from ..library.cleanup import apply_cleanup
 
     series = await _load(session, series_id)
-    result = apply_cleanup(series, list(series.issues), _folders_of(series), body.delete)
+    copies = copy_issues(list(series.issues))
+    result = await run_library_work(apply_cleanup, series, copies, _folders_of(series), body.delete)
+    apply_file_state(list(series.issues), copies)
     await session.commit()
     return CleanupResultOut(
         deleted=result.deleted, repointed=result.repointed,
@@ -400,7 +406,7 @@ async def resync_issues(series_id: int, session: AsyncSession = Depends(get_sess
 
 
 async def _scan_now(session: AsyncSession, series: Series) -> int:
-    result = scan_series(series, list(series.issues), _folders_of(series))
+    result = await scan_series_async(series, list(series.issues), _folders_of(series))
     await session.commit()
     return result.matched_issues
 
@@ -423,7 +429,7 @@ async def folder_preview(body: FolderPreviewIn, session: AsyncSession = Depends(
         year=body.year,
         alt_titles="\n".join(body.alt_titles),
     )
-    found = find_existing_folder(Path(root.path), probe)
+    found = await run_in_threadpool(find_existing_folder, Path(root.path), probe)
     name = found or series_folder(body.title, body.year)
     resolved = Path(root.path) / name
     return FolderPreviewOut(

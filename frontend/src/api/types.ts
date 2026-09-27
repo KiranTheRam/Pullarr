@@ -120,6 +120,11 @@ export interface Release {
   leechers: number;
 }
 
+export interface ReleaseSearch {
+  releases: Release[];
+  warnings: string[];
+}
+
 export interface QueueItem {
   id: number;
   series_id: number | null;

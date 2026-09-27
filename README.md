@@ -54,7 +54,7 @@ git clone <this repo> pullarr && cd pullarr
 docker compose up -d
 ```
 
-The default compose file runs the `kirantheram/mangarr:latest` Docker Hub image
+The default compose file runs the `kirantheram/pullarr:latest` Docker Hub image
 and does not include a VPN or download-client sidecar. Open
 <http://localhost:6997> after the container starts.
 
@@ -135,6 +135,10 @@ recreated.
 
 Backend (Python ≥3.11):
 
+Install `bsdtar` (`libarchive-tools` on Debian/Ubuntu, `libarchive` on macOS)
+for RAR/7z validation. The Docker image includes it. Invalid, encrypted or
+unsupported archives fail validation instead of being marked downloaded.
+
 ```bash
 cd backend
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
@@ -153,10 +157,33 @@ Tests:
 
 ```bash
 cd backend && .venv/bin/python -m pytest
+# From frontend/: npm test
 ```
 
 `npm run build` writes the production bundle to `backend/static/`, which the
 FastAPI app serves when present.
+
+The Python 3.12 Linux image installs with `backend/constraints.txt`, using the
+existing pip toolchain to pin runtime dependencies. To refresh it, resolve the
+dependencies in a clean Python 3.12 Linux environment, update the exact versions,
+then run backend tests, `pip-audit`, the image build and integration checks.
+The base-image tags and OS packages still follow upstream updates; use immutable
+image digests when deploying a validated release.
+
+### Recovering downloads
+
+After a restart, interrupted direct downloads appear under **Activity → Failed**
+with an explanation and a Retry action. Existing library files are preserved;
+retry handles identical files as duplicates. Staged leftovers from an interrupted
+process are retained rather than deleting potentially recoverable data.
+
+**Block release** excludes that release only; alternatives remain eligible.
+For **needs attention** items, use **Map files** to associate downloaded files with
+issues, then **Mark resolved** to acknowledge the repair without downloading again.
+Resolving an item does not itself mark any issues as downloaded.
+
+Heavy archive, import, scan, rename and cleanup work runs outside the API event
+loop. Filesystem operations share a worker lane to avoid concurrent file writes.
 
 ## Configuration
 
@@ -176,6 +203,19 @@ handed to the UI via `GET /initialize.json`. To give external clients (e.g.
 NextPanel or scripts) their own keys, create named keys under **Settings → API
 Keys**; any of them authenticates `/api/v1` calls via `X-Api-Key` and can be
 revoked independently.
+
+### Access and VPN boundaries
+
+Pullarr has no built-in user login. Anyone who can reach `/initialize.json` can
+obtain the UI's API key. Keep the entire application on a trusted network or behind
+an authenticated reverse proxy, including `/initialize.json`, `/api/v1`, and the
+frontend routes. Named API keys are integration credentials, not a replacement
+for that access boundary.
+
+When VPN routing is required, keep the GetComics proxy configured for both
+searches and downloads. Mirror fallback uses the same proxy-aware client; proxy
+failures never trigger a direct-connection retry. qBittorrent's VPN and kill switch
+remain the responsibility of its container/network configuration.
 
 Please be a good citizen: keep the honest User-Agent and don't lower the
 rate limits — GetComics is a small site and ComicVine caps free keys at 200

@@ -145,7 +145,7 @@ function AddSeriesModal({
 
       <div className="form-row">
         <label>Monitor</label>
-        <Toggle on={monitored} onChange={setMonitored} />
+        <Toggle label="Monitor series" on={monitored} onChange={setMonitored} />
         <span style={{ color: "var(--text-faint)", fontSize: 13 }}>
           Grab newly released issues automatically at each monitor interval
         </span>
@@ -153,7 +153,7 @@ function AddSeriesModal({
 
       <div className="form-row">
         <label>Search for missing content</label>
-        <Toggle on={searchNow} onChange={setSearchNow} />
+        <Toggle label="Search for missing issues now" on={searchNow} onChange={setSearchNow} />
         <span style={{ color: "var(--text-faint)", fontSize: 13 }}>
           Search GetComics for released missing issues right after the first disk scan
         </span>

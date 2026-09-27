@@ -8,6 +8,8 @@ from ..db import get_session
 from ..download.qbittorrent import QbtClient
 from ..jobs.tasks import (
     cancel_downloads,
+    download_is_active,
+    download_is_importing,
     enqueue_direct,
     enqueue_torrent,
     magnet_btih_hex,
@@ -42,12 +44,13 @@ async def get_queue(session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/queue/failed", response_model=list[QueueItemOut])
-async def get_failed_queue(limit: int = 100, session: AsyncSession = Depends(get_session)):
+async def get_failed_queue(limit: int = 100, offset: int = 0, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
         select(Download, Series.title)
         .outerjoin(Series, Download.series_id == Series.id)
         .where(Download.status == DownloadStatus.FAILED)
         .order_by(Download.id.desc())
+        .offset(max(offset, 0))
         .limit(min(max(limit, 1), 500))
     )
     items = []
@@ -66,6 +69,8 @@ async def retry_download(download_id: int, session: AsyncSession = Depends(get_s
         raise HTTPException(404, "Download not found")
     if dl.status not in (DownloadStatus.FAILED, DownloadStatus.NEEDS_ATTENTION):
         raise HTTPException(409, "Only failed downloads can be retried")
+    if download_is_active(download_id):
+        raise HTTPException(409, "This download is still stopping. Retry in a moment.")
     if dl.kind == DownloadKind.TORRENT:
         values = await registry.apply_settings(session)
         if values["qbittorrent_enabled"] != "true":
@@ -100,6 +105,8 @@ async def block_download(download_id: int, session: AsyncSession = Depends(get_s
     dl = await session.get(Download, download_id)
     if dl is None:
         raise HTTPException(404, "Download not found")
+    if dl.status != DownloadStatus.FAILED or download_is_active(download_id):
+        raise HTTPException(409, "Only stopped, failed downloads can be blocked")
     dl.blocked = True
     dl.status = DownloadStatus.FAILED
     dl.error = dl.error or "blocked by user"
@@ -117,10 +124,31 @@ async def block_download(download_id: int, session: AsyncSession = Depends(get_s
     return out
 
 
+@router.post("/queue/{download_id}/resolve", status_code=204)
+async def resolve_download(download_id: int, session: AsyncSession = Depends(get_session)):
+    """Acknowledge manual repair without fetching the payload again."""
+    dl = await session.get(Download, download_id)
+    if dl is None:
+        raise HTTPException(404, "Download not found")
+    if dl.status != DownloadStatus.NEEDS_ATTENTION:
+        raise HTTPException(409, "Only downloads needing attention can be resolved")
+    dl.status = DownloadStatus.DONE
+    dl.error = ""
+    dl.error_code = ""
+    dl.next_retry_at = None
+    session.add(HistoryEvent(
+        series_id=dl.series_id, issue_id=dl.issue_id, event="resolved",
+        source_name=dl.source_name, detail=f"Manually resolved: {dl.title}",
+    ))
+    await session.commit()
+
+
 async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
     """Mark downloads as removed and stop matching qBittorrent transfers."""
     result = await session.execute(select(Download).where(Download.id.in_(ids)))
     downloads = result.scalars().all()
+    if any(download_is_importing(dl.id) for dl in downloads):
+        raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
     hashes = [
         dl.torrent_hash for dl in downloads
         if dl.kind == DownloadKind.TORRENT and dl.torrent_hash and dl.status in ACTIVE

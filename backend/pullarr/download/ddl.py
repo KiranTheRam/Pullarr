@@ -10,7 +10,9 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import httpx
+from starlette.concurrency import run_in_threadpool
 
+from .archive import ImportValidationError, validate_archive
 from ..sources.base import DDLSource
 from ..util import sanitize_filename
 
@@ -65,7 +67,13 @@ async def download_release(
                     source.client, url, payload_dir, f"part{i}",
                     progress_cb, cancel_cb, done_total,
                 )
-        except (httpx.HTTPError, OSError) as exc:
+            files = list(payload_dir.iterdir())
+            if not files:
+                raise ImportValidationError("invalid archive: mirror returned no files")
+            for path in files:
+                await run_in_threadpool(validate_archive, path, allow_pack=True)
+            await _raise_if_cancelled(cancel_cb)
+        except (httpx.HTTPError, OSError, ImportValidationError) as exc:
             last_error = exc
             log.warning("download option %d/%d failed (%s); trying next mirror",
                         opt_index + 1, len(options), exc)

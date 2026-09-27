@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..download.cbz import build_comicinfo, upsert_comicinfo
+from ..download.archive import ImportValidationError, validate_archive
 from ..models import Issue, Series
 from ..util import normalize_title, strip_issue_suffix
 from .matcher import ARCHIVE_EXTS, IMAGE_EXTS, MediaFile, find_media_files, match_files
@@ -30,10 +31,6 @@ class ImportedFile:
     volume: int | None  # a whole-volume (TPB) archive
     covered: list[Issue] = field(default_factory=list)  # every issue this file backs
     status: str = "imported"  # imported | duplicate | unmatched
-
-
-class ImportValidationError(RuntimeError):
-    pass
 
 
 MAX_PACK_ARCHIVES = 1000
@@ -58,20 +55,6 @@ def _content_hash(path: Path) -> str:
             digest.update(name.encode("utf-8", errors="surrogateescape"))
             digest.update(zf.read(name))
     return digest.hexdigest()
-
-
-def validate_archive(path: Path) -> None:
-    """Reject empty/corrupt ZIP payloads before they become library state."""
-    if not path.is_file() or path.stat().st_size == 0:
-        raise ImportValidationError(f"invalid archive: {path.name} is empty")
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as zf:
-            corrupt = zf.testzip()
-            if corrupt:
-                raise ImportValidationError(f"corrupt ZIP member: {corrupt}")
-            images = [n for n in zf.namelist() if Path(n).suffix.lower() in IMAGE_EXTS]
-            if not images:
-                raise ImportValidationError(f"invalid archive: {path.name} contains no images")
 
 
 def _nested_archive_members(path: Path) -> list[zipfile.ZipInfo]:

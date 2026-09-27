@@ -1,8 +1,29 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { HistoryItem, JobItem, QueueItem } from "../api/types";
 import { EmptyState, QueryError, Spinner, statusPill, Toolbar } from "../components/common";
+
+const PAGE_SIZE = 50;
+
+function PageControls({ offset, next, pending, setOffset }: {
+  offset: number; next: boolean; pending: boolean; setOffset: (offset: number) => void;
+}) {
+  return <div className="table-actions" style={{ display: "flex", gap: 12, marginBlock: 12 }}>
+    <button className="btn" disabled={offset === 0 || pending} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
+    <span>Page {Math.floor(offset / PAGE_SIZE) + 1}</span>
+    <button className="btn" disabled={!next || pending} onClick={() => setOffset(offset + PAGE_SIZE)}>Next</button>
+  </div>;
+}
+
+function RetryStatus({ item }: { item: QueueItem }) {
+  const seconds = item.next_retry_at ? Math.max(0, Math.ceil((Date.parse(item.next_retry_at) - Date.now()) / 1000)) : null;
+  return <div className="filepath">
+    {item.attempt_count > 0 && `Attempt ${item.attempt_count}`}
+    {seconds !== null && ` · ${seconds > 0 ? `Retry in ${Math.ceil(seconds / 60)}m` : "Retry ready"}`}
+  </div>;
+}
 
 function Queue() {
   const queryClient = useQueryClient();
@@ -16,6 +37,14 @@ function Queue() {
   const remove = useMutation({
     mutationFn: (id: number) => api.del(`/queue/${id}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["queue"] }),
+  });
+
+  const resolve = useMutation({
+    mutationFn: (id: number) => api.post(`/queue/${id}/resolve`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["queue"] });
+      queryClient.invalidateQueries({ queryKey: ["history"] });
+    },
   });
 
   const removeSelected = useMutation({
@@ -45,6 +74,7 @@ function Queue() {
 
   return (
     <>
+      {(remove.isError || removeSelected.isError || resolve.isError) && <div className="error-banner" role="alert">{String(remove.error || removeSelected.error || resolve.error)}</div>}
       <div className="table-actions" style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
         <button
           className="btn"
@@ -67,6 +97,7 @@ function Queue() {
             <th style={{ width: 34 }}>
               <input
                 type="checkbox"
+                aria-label="Select all downloads"
                 checked={allSelected}
                 onChange={() => setSelected(allSelected ? new Set() : new Set(data.map((i) => i.id)))}
               />
@@ -85,12 +116,14 @@ function Queue() {
               <td>
                 <input
                   type="checkbox"
+                  aria-label={`Select ${item.title || item.series_title}`}
                   checked={selected.has(item.id)}
                   onChange={() => toggle(item.id)}
                 />
               </td>
               <td>
-                {item.title || item.series_title}
+                {item.series_id ? <Link to={`/series/${item.series_id}`}>{item.title || item.series_title}</Link> : item.title || item.series_title}
+                {item.status === "needs_attention" && <div className="filepath">Map the downloaded files, then mark this item resolved.</div>}
                 {item.error && <div className="filepath">{item.error}</div>}
               </td>
               <td>{item.source_name}</td>
@@ -103,6 +136,7 @@ function Queue() {
                 <span className={`pill ${statusPill[item.status] ?? "gray"}`}>{item.status}</span>
               </td>
               <td>
+                <RetryStatus item={item} />
                 <div className="progress-bar">
                   <div style={{ width: `${Math.round(item.progress * 100)}%` }} />
                   <span>{Math.round(item.progress * 100)}%</span>
@@ -112,11 +146,16 @@ function Queue() {
                 <button
                   className="btn icon-btn"
                   title="Remove"
+                  aria-label={`Remove ${item.title || item.series_title}`}
                   disabled={remove.isPending}
                   onClick={() => remove.mutate(item.id)}
                 >
                   X
                 </button>
+                {item.status === "needs_attention" && <>
+                  {item.series_id && <Link className="btn sm" to={`/series/${item.series_id}?files=1`}>Map files</Link>}
+                  <button className="btn sm" disabled={resolve.isPending} onClick={() => resolve.mutate(item.id)}>Mark resolved</button>
+                </>}
               </td>
             </tr>
           ))}
@@ -128,55 +167,41 @@ function Queue() {
 
 function History() {
   const [eventFilter, setEventFilter] = useState("");
-  const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ["history", eventFilter],
-    queryFn: () => api.get<HistoryItem[]>(`/history${eventFilter ? `?event=${eventFilter}` : ""}`),
+  const [offset, setOffset] = useState(0);
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: ["history", eventFilter, offset],
+    queryFn: () => api.get<HistoryItem[]>(`/history?limit=${PAGE_SIZE + 1}&offset=${offset}${eventFilter ? `&event=${eventFilter}` : ""}`),
     refetchInterval: 5000,
   });
-
-  if (isLoading) return <Spinner />;
-  if (isError) return <QueryError error={error} retry={() => refetch()} />;
-  if (!data || data.length === 0) return <EmptyState icon="🕘" title="No history yet" />;
-
-  return (
-    <><div className="table-actions issue-filters">
-      {["", "failed", "retrying", "imported", "needs_attention"].map((value) => (
-        <button key={value || "all"} className={`btn sm${eventFilter === value ? " primary" : ""}`} onClick={() => setEventFilter(value)}>{value ? value.replaceAll("_", " ") : "all"}</button>
+  const items = data?.slice(0, PAGE_SIZE) ?? [];
+  return <>
+    <div className="table-actions issue-filters">
+      {["", "failed", "retrying", "imported", "needs_attention", "resolved"].map((value) => (
+        <button key={value || "all"} className={`btn sm${eventFilter === value ? " primary" : ""}`} onClick={() => { setEventFilter(value); setOffset(0); }}>{value ? value.replaceAll("_", " ") : "all"}</button>
       ))}
-    </div><table className="data-table">
-      <thead>
-        <tr>
-          <th style={{ width: 100 }}>Event</th>
-          <th style={{ width: 220 }}>Series</th>
-          <th>Detail</th>
-          <th style={{ width: 110 }}>Source</th>
-          <th style={{ width: 170 }}>Date</th>
-        </tr>
-      </thead>
-      <tbody>
-        {data.map((ev) => (
-          <tr key={ev.id}>
-            <td>
-              <span className={`pill ${statusPill[ev.event] ?? "gray"}`}>{ev.event}</span>
-            </td>
-            <td>{ev.series_title}</td>
-            <td style={{ color: "var(--text-dim)", wordBreak: "break-all" }}>{ev.detail}</td>
-            <td>{ev.source_name}</td>
-            <td style={{ color: "var(--text-dim)" }}>
-              {new Date(ev.created_at).toLocaleString()}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table></>
-  );
+    </div>
+    {isLoading ? <Spinner /> : isError ? <QueryError error={error} retry={() => refetch()} /> : !items.length ? <>
+      <EmptyState icon="🕘" title={eventFilter ? "No events match this filter" : offset ? "No more history" : "No history yet"} />
+      {eventFilter && <button className="btn" onClick={() => { setEventFilter(""); setOffset(0); }}>Clear filter</button>}
+    </> : <table className="data-table">
+      <thead><tr><th>Event</th><th>Series</th><th>Detail</th><th>Source</th><th>Date</th></tr></thead>
+      <tbody>{items.map((ev) => <tr key={ev.id}>
+        <td><span className={`pill ${statusPill[ev.event] ?? "gray"}`}>{ev.event}</span></td>
+        <td>{ev.series_id ? <Link to={`/series/${ev.series_id}`}>{ev.series_title}</Link> : ev.series_title}</td>
+        <td style={{ color: "var(--text-dim)", overflowWrap: "anywhere" }}>{ev.detail}</td>
+        <td>{ev.source_name}</td><td>{new Date(ev.created_at).toLocaleString()}</td>
+      </tr>)}</tbody>
+    </table>}
+    <PageControls offset={offset} next={(data?.length ?? 0) > PAGE_SIZE} pending={isFetching} setOffset={setOffset} />
+  </>;
 }
 
 function FailedDownloads() {
   const queryClient = useQueryClient();
+  const [offset, setOffset] = useState(0);
   const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ["queue", "failed"],
-    queryFn: () => api.get<QueueItem[]>("/queue/failed"),
+    queryKey: ["queue", "failed", offset],
+    queryFn: () => api.get<QueueItem[]>(`/queue/failed?limit=${PAGE_SIZE + 1}&offset=${offset}`),
     refetchInterval: 10000,
   });
   const retry = useMutation({
@@ -192,11 +217,11 @@ function FailedDownloads() {
   });
   if (isLoading) return <Spinner />;
   if (isError) return <QueryError error={error} retry={() => refetch()} />;
-  if (!data?.length) return <EmptyState icon="✔" title="No failed downloads" />;
+  if (!data?.length) return <><EmptyState icon="✔" title={offset ? "No more failed downloads" : "No failed downloads"} /><PageControls offset={offset} next={false} pending={false} setOffset={setOffset} /></>;
   return (
     <>{(retry.isError || block.isError) && <div className="error-banner">{String((retry.error || block.error) as Error)}</div>}<table className="data-table">
       <thead><tr><th>Release</th><th>Failure</th><th>Attempts</th><th>Date</th><th></th></tr></thead>
-      <tbody>{data.map((item) => (
+      <tbody>{data.slice(0, PAGE_SIZE).map((item) => (
         <tr key={item.id}>
           <td>{item.title || item.series_title}<div className="filepath">{item.source_name}</div></td>
           <td><span className="pill red">{item.error_code || "failed"}</span> {item.error}</td>
@@ -204,11 +229,11 @@ function FailedDownloads() {
           <td>{new Date(item.created_at).toLocaleString()}</td>
           <td style={{ whiteSpace: "nowrap" }}>
             <button className="btn sm" disabled={retry.isPending} title="Retry download" aria-label={`Retry ${item.title || item.series_title}`} onClick={() => retry.mutate(item.id)}>Retry</button>{" "}
-            <button className="btn sm" disabled={item.blocked || block.isPending} onClick={() => block.mutate(item.id)}>{item.blocked ? "Blocked" : "Block"}</button>
+            <button className="btn sm" disabled={item.blocked || block.isPending} onClick={() => block.mutate(item.id)} title="Exclude this release only; other releases remain eligible">{item.blocked ? "Release blocked" : "Block release"}</button>
           </td>
         </tr>
       ))}</tbody>
-    </table></>
+    </table><PageControls offset={offset} next={data.length > PAGE_SIZE} pending={retry.isPending || block.isPending} setOffset={setOffset} /></>
   );
 }
 
