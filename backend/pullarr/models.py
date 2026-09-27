@@ -95,6 +95,9 @@ class Series(Base):
     genres: Mapped[str] = mapped_column(String, default="")  # comma-separated
     total_issues: Mapped[int | None] = mapped_column(Integer, nullable=True)
     monitored: Mapped[bool] = mapped_column(Boolean, default=True)
+    monitor_mode: Mapped[str] = mapped_column(String, default="all")
+    monitor_from: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_monitored_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     root_folder_id: Mapped[int | None] = mapped_column(ForeignKey("root_folders.id"), nullable=True)
     folder_name: Mapped[str] = mapped_column(String, default="")
     added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
@@ -191,6 +194,8 @@ class Issue(Base):
     monitored: Mapped[bool] = mapped_column(Boolean, default=True)
     downloaded: Mapped[bool] = mapped_column(Boolean, default=False)
     file_path: Mapped[str] = mapped_column(String, default="")
+    file_source: Mapped[str] = mapped_column(String, default="")
+    file_download_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     released_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     series: Mapped[Series] = relationship(back_populates="issues")

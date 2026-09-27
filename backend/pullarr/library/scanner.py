@@ -122,6 +122,9 @@ def scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sca
         ):
             if not issue.downloaded:
                 result.matched_issues += 1
+            if issue.file_path != path_str:
+                issue.file_source = ""
+                issue.file_download_id = None
             issue.downloaded = True
             issue.file_path = path_str
         owned_now.add(issue.id)
@@ -139,6 +142,8 @@ def scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sca
             if not issue.downloaded or not issue.file_path:
                 issue.downloaded = True
                 issue.file_path = path_str
+                issue.file_source = ""
+                issue.file_download_id = None
                 result.matched_issues += 1
             owned_now.add(issue.id)
 
@@ -168,5 +173,7 @@ def _reconcile(issues: list[Issue], keep: set[int]) -> int:
         if not issue.file_path or not Path(issue.file_path).exists():
             issue.downloaded = False
             issue.file_path = ""
+            issue.file_source = ""
+            issue.file_download_id = None
             cleared += 1
     return cleared

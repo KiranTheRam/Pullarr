@@ -37,6 +37,7 @@ DEFAULTS: dict[str, str] = {
     "source_getcomics_enabled": "true",
     # Jobs
     "monitor_interval_minutes": "60",
+    "finished_series_check_days": "7",
     "download_retry_attempts": "4",
     # Library
     "library_scan_on_add": "true",  # adopt existing on-disk files on add/refresh
@@ -85,6 +86,14 @@ def validate_updates(values: dict[str, str]) -> dict[str, str]:
         value = "" if value is None else str(value)
         if key == "monitor_interval_minutes":
             value = str(parse_monitor_interval(value))
+        elif key == "finished_series_check_days":
+            try:
+                days = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Finished series check days must be a whole number") from exc
+            if not 1 <= days <= 365:
+                raise ValueError("Finished series check days must be between 1 and 365")
+            value = str(days)
         elif key == "naming_template":
             try:
                 issue_filename(value, "Series", 1.0, "Issue Title", 2024)

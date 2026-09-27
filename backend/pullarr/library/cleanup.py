@@ -185,6 +185,8 @@ def apply_cleanup(
                 continue
             for i in referencing:
                 i.file_path = survivors[0]
+                i.file_source = ""
+                i.file_download_id = None
             result.repointed += len(referencing)
         size = _size(path)
         try:

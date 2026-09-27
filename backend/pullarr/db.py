@@ -60,6 +60,9 @@ async def _migrate_sqlite(conn) -> None:
     await _ensure_columns(conn, "series", {
         "metron_id": "INTEGER",
         "metadata_refreshed_at": "DATETIME",
+        "monitor_mode": "VARCHAR NOT NULL DEFAULT 'all'",
+        "monitor_from": "FLOAT",
+        "last_monitored_at": "DATETIME",
     })
     await _ensure_columns(conn, "issues", {
         "metron_id": "INTEGER",
@@ -83,6 +86,8 @@ async def _migrate_sqlite(conn) -> None:
         "language": "VARCHAR NOT NULL DEFAULT ''",
         "page_count": "INTEGER",
         "metadata_refreshed_at": "DATETIME",
+        "file_source": "VARCHAR NOT NULL DEFAULT ''",
+        "file_download_id": "INTEGER",
     })
     await _ensure_columns(conn, "downloads", {
         "error_code": "VARCHAR NOT NULL DEFAULT ''",

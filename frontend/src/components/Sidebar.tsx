@@ -6,12 +6,13 @@ import type { QueueItem } from "../api/types";
 const items = [
   { to: "/", label: "Library", icon: "▦" },
   { to: "/add", label: "Add New", icon: "+" },
+  { to: "/calendar", label: "Calendar", icon: "▦" },
   { to: "/activity", label: "Activity", icon: "⇅" },
   { to: "/wanted", label: "Wanted", icon: "!" },
   { to: "/settings", label: "Settings", icon: "⚙" },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ onGoTo }: { onGoTo: () => void }) {
   const { data: queue } = useQuery({
     queryKey: ["queue"],
     queryFn: () => api.get<QueueItem[]>("/queue"),
@@ -24,6 +25,7 @@ export default function Sidebar() {
         <img className="logo-mark" src="/pullarr-icon.svg" alt="" /> pullarr
       </div>
       <nav>
+        <button className="nav-item go-to" onClick={onGoTo}><span className="icon">⌕</span> Go to… <span className="shortcut">⌘K</span></button>
         {items.map((item) => (
           <NavLink
             key={item.to}

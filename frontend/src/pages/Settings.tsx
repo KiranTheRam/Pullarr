@@ -506,6 +506,11 @@ export default function Settings() {
             {text("monitor_interval_minutes")}
           </div>
           <div className="form-row">
+            <label>Finished, complete series (days)</label>
+            {text("finished_series_check_days")}
+            <span style={{ color: "var(--text-faint)", fontSize: 13 }}>Check less often; monitoring stays on.</span>
+          </div>
+          <div className="form-row">
             <label>Download retries</label>
             {text("download_retry_attempts")}
             <span style={{ color: "var(--text-faint)", fontSize: 13 }}>Retries transient failures with exponential backoff.</span>

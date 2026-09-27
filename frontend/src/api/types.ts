@@ -3,6 +3,8 @@ export interface RootFolder {
   path: string;
 }
 
+export type MonitorMode = "all" | "future" | "from_issue";
+
 export interface KavitaLibrary {
   id: number;
   name: string;
@@ -52,6 +54,8 @@ export interface Issue {
   monitored: boolean;
   downloaded: boolean;
   file_path: string;
+  file_source: string;
+  file_download_id: number | null;
   released_at: string | null;
 }
 
@@ -60,6 +64,7 @@ export interface Series {
   comicvine_id: number | null;
   metron_id: number | null;
   title: string;
+  alt_titles: string;
   description: string;
   status: string;
   publisher: string;
@@ -67,6 +72,8 @@ export interface Series {
   cover_url: string;
   genres: string;
   monitored: boolean;
+  monitor_mode: MonitorMode;
+  monitor_from: number | null;
   root_folder_id: number | null;
   folder_name: string;
   total_issues: number | null;
@@ -78,6 +85,31 @@ export interface Series {
 export interface SeriesDetail extends Series {
   issues: Issue[];
   source_links: SourceLink[];
+}
+
+export interface ImportFolder {
+  folder_name: string;
+  path: string;
+  file_count: number;
+  query: string;
+}
+
+export interface ImportResult {
+  folder_name: string;
+  status: "added" | "exists" | "failed";
+  series_id: number | null;
+  detail: string;
+}
+
+export interface CalendarIssue {
+  series_id: number;
+  series_title: string;
+  cover_url: string;
+  issue_id: number;
+  issue_number: string;
+  issue_title: string;
+  released_at: string;
+  downloaded: boolean;
 }
 
 export interface MetadataResult {

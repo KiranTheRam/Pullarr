@@ -27,6 +27,7 @@ import {
   RenameModal,
   SourcesModal,
 } from "../components/LibraryTools";
+import SeriesMonitoring from "../components/SeriesMonitoring";
 
 type SeriesLocationState = {
   addedSeries?: boolean;
@@ -510,6 +511,11 @@ export default function SeriesDetail() {
               {revealed[`c${ch.id}`] && ch.file_path && (
                 <div className="filepath">{ch.file_path}</div>
               )}
+              {ch.downloaded && ch.file_source && (
+                <div className="muted" title={ch.file_download_id ? `Download #${ch.file_download_id}` : undefined}>
+                  From {ch.file_source}
+                </div>
+              )}
             </td>
             <td style={{ color: ch.title ? "inherit" : "var(--text-faint)" }}>
               {ch.title || "—"}
@@ -708,6 +714,7 @@ export default function SeriesDetail() {
               </button>
             </div>
             <FoldersPanel seriesId={seriesId} onChanged={invalidate} />
+            <SeriesMonitoring series={series} onChanged={invalidate} />
           </div>
         </div>
 
