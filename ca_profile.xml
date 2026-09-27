@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CommunityApplications>
+  <Profile>Pullarr automates western comic library management, issue downloads, and CBZ/CBR organization for readers such as Komga and Kavita. For installation help and bug reports, use the project's GitHub issues.</Profile>
+  <Icon>https://raw.githubusercontent.com/KiranTheRam/Pullarr/main/frontend/public/pullarr-icon.png</Icon>
+  <WebPage>https://github.com/KiranTheRam/Pullarr</WebPage>
+</CommunityApplications>

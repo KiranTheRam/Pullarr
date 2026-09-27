@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container version="2">
+  <Name>Pullarr</Name>
+  <Repository>kirantheram/pullarr:latest</Repository>
+  <Registry>https://hub.docker.com/r/kirantheram/pullarr</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/KiranTheRam/Pullarr/issues</Support>
+  <Project>https://github.com/KiranTheRam/Pullarr</Project>
+  <ReadMe>https://raw.githubusercontent.com/KiranTheRam/Pullarr/main/README.md</ReadMe>
+  <Overview>Monitor western comic series, download missing issues, and organize CBZ/CBR files for Komga or Kavita.</Overview>
+  <Description>Pullarr uses ComicVine metadata to monitor comic issues and can download missing issues from GetComics. It organizes CBZ/CBR files with ComicInfo.xml metadata and can connect to an optional qBittorrent client. Add a comics root folder and a ComicVine API key in Pullarr after installation.</Description>
+  <Category>MediaApp:Books Downloaders:</Category>
+  <WebUI>http://[IP]:[PORT:6997]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/KiranTheRam/Pullarr/main/templates/pullarr.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/KiranTheRam/Pullarr/main/frontend/public/pullarr-icon.png</Icon>
+  <License>GPLv3</License>
+  <Config Name="WebUI Port" Target="6997" Default="6997" Mode="tcp" Description="Pullarr web interface port." Type="Port" Display="always" Required="true" Mask="false"/>
+  <Config Name="Appdata" Target="/config" Default="/mnt/user/appdata/pullarr" Mode="rw" Description="Persistent database, API key, and settings." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Comics" Target="/comics" Default="/mnt/user/media/comics" Mode="rw" Description="Comic library folder. Add /comics as a root folder in Pullarr after installation." Type="Path" Display="always" Required="true" Mask="false"/>
+</Container>
