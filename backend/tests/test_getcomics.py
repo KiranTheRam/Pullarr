@@ -123,3 +123,135 @@ async def test_mediafire_page_resolves_direct_download():
         "https://www.mediafire.com/file/abc/book.cbz/file"
     ) == "https://download123.mediafire.com/token/book.cbz"
     await client.aclose()
+
+
+COLLECTION_URL = "https://getcomics.org/dc/nightwatch-collection/"
+
+
+def collection_parent():
+    return SourceRelease(
+        "getcomics", COLLECTION_URL,
+        "Nightwatch (Year 1 – 5 + Nightwatch 2) (Complete Collection) (2013-2018)",
+        url=COLLECTION_URL, size_text="10.0 GB",
+    )
+
+
+def collection_releases():
+    from pullarr.sources.getcomics import bundle_release, parse_collection_bundles
+    return [bundle_release(b, collection_parent())
+            for b in parse_collection_bundles(load("getcomics_collection.html"))]
+
+
+def test_collection_bundles_have_independent_identity_coverage_and_size():
+    first, second, volume, sequel = collection_releases()
+    assert (first.issue_number, first.issue_end, first.year, first.size_text) == (1, 36, 2013, "912 MB")
+    assert "(Year One)" in first.title
+    assert (second.issue_number, second.issue_end, second.year) == (1, 24, 2014)
+    assert volume.issue_number is None and volume.volume_number == 1
+    assert len({r.external_id for r in [first, second, volume, sequel]}) == 4
+    assert first.url == COLLECTION_URL
+    assert GetComicsSource._belongs_to_series(first, "nightwatch")
+    assert not GetComicsSource._belongs_to_series(second, "nightwatch")
+    assert not GetComicsSource._belongs_to_series(sequel, "nightwatch")
+
+
+@pytest.fixture
+async def collection_source(monkeypatch):
+    from pullarr.sources import getcomics
+    from pullarr.util import RateLimiter
+    monkeypatch.setattr(getcomics, "_limiter", RateLimiter(100000))
+    async with httpx.AsyncClient() as client:
+        yield GetComicsSource(client)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collection_search_expands_and_filters_bundles(collection_source, monkeypatch):
+    async def search(*args, **kwargs):
+        return [collection_parent()]
+    monkeypatch.setattr(collection_source, "_search_pages", search)
+    respx.get(COLLECTION_URL).respond(200, text=load("getcomics_collection.html"))
+    releases = await collection_source.list_releases("Nightwatch")
+    assert len(releases) == 2  # original numbered series and its TPB
+    assert releases[0].issue_end == 36
+    assert all(r.size_text != "10.0 GB" for r in releases)
+    assert len(await collection_source.search_releases("Nightwatch 1")) == 4
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_selected_bundle_resolves_only_its_mirrors(collection_source):
+    respx.get(COLLECTION_URL).respond(200, text=load("getcomics_collection.html"))
+    respx.get("https://getcomics.org/dls/year-one-pixel").respond(
+        302, headers={"location": "https://pixeldrain.com/u/fixture1"},
+    )
+    options = await collection_source.resolve_downloads(collection_releases()[0].external_id)
+    assert options == [
+        ["https://getcomics.org/dls/year-one-main"],
+        ["https://getcomics.org/dls/year-one-backup"],
+        ["https://pixeldrain.com/api/file/fixture1?download"],
+    ]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collection_respects_mirror_preference(collection_source):
+    collection_source._service_preference = ["pixeldrain", "main"]
+    respx.get(COLLECTION_URL).respond(200, text=load("getcomics_collection.html"))
+    respx.get("https://getcomics.org/dls/year-one-pixel").respond(
+        302, headers={"location": "https://pixeldrain.com/u/fixture1"},
+    )
+    options = await collection_source.resolve_downloads(collection_releases()[0].external_id)
+    assert options[0] == ["https://pixeldrain.com/api/file/fixture1?download"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("fragment", ["", "#pullarr-bundle=missing"])
+async def test_collection_cannot_download_all_groups_or_guess_missing_group(collection_source, fragment):
+    respx.get(COLLECTION_URL).respond(200, text=load("getcomics_collection.html"))
+    with pytest.raises(RuntimeError, match="search releases again"):
+        await collection_source.resolve_downloads(COLLECTION_URL + fragment)
+
+
+def test_bundle_ids_survive_reordered_rows():
+    from bs4 import BeautifulSoup
+    from pullarr.sources.getcomics import parse_collection_bundles
+    html = load("getcomics_collection.html")
+    original = parse_collection_bundles(html)
+    soup = BeautifulSoup(html, "lxml")
+    soup.ul.append(soup.li.extract())
+    reordered = parse_collection_bundles(str(soup))
+    assert [b.key for b in original] != [b.key for b in reordered]
+    assert {b.title: b.key for b in original} == {b.title: b.key for b in reordered}
+
+
+@pytest.mark.asyncio
+async def test_collection_bundle_automatically_queues_once_for_original_series(monkeypatch):
+    from pullarr.jobs import tasks
+    from pullarr.models import Issue, Series
+    from pullarr.util import normalize_title
+    calls = []
+    async def enqueue(*args):
+        calls.append(args)
+    monkeypatch.setattr(tasks, "enqueue_direct", enqueue)
+    series = Series(id=1, title="Nightwatch", alt_titles="")
+    remaining = {float(n): Issue(id=n, series_id=1, number=n) for n in range(1, 37)}
+    assert await tasks._grab_matches(
+        object(), series, "getcomics", collection_releases(), remaining,
+        {normalize_title(series.title)}, set(),
+    ) == 1
+    assert not remaining and len(calls) == 1
+    assert calls[0][4] == collection_releases()[0].external_id
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_modern_multipart_buttons_remain_one_option(collection_source):
+    respx.get(COLLECTION_URL).respond(200, text='''
+        <div class="aio-button-center"><a title="DOWNLOAD NOW" href="https://files.test/part1">Part 1</a></div>
+        <div class="aio-button-center"><a title="DOWNLOAD NOW" href="https://files.test/part2">Part 2</a></div>
+    ''')
+    assert await collection_source.resolve_downloads(COLLECTION_URL) == [
+        ["https://files.test/part1", "https://files.test/part2"]
+    ]
