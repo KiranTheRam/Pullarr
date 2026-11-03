@@ -177,7 +177,42 @@ def parse_issue_label(text: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
-def release_covers_issue(release, issue) -> bool:
+def standalone_issue_for_release(series, title: str):
+    """Resolve an unnumbered book only against a complete, single-book series.
+
+    A newly announced series may also have one issue, so require standalone
+    metadata or finished status, an exact title, and a compatible known year.
+    Never infer coverage for volumes, collections, or numbered releases.
+    """
+    if series.total_issues != 1 or len(series.issues) != 1:
+        return None
+    issue = series.issues[0]
+    if issue.number != 1 or (issue.display_number or "1").strip() not in {"1", "1.0", "001"}:
+        return None
+    book_format = (issue.format or "").lower()
+    book_label = (issue.title or "").strip().lower()
+    if not (
+        series.status == "finished"
+        or book_format in {"graphic novel", "trade paperback", "hardcover"}
+        or book_label in {"gn", "tpb", "hc", "graphic novel"}
+    ):
+        return None
+    if parse_issue_number(title) is not None or parse_volume_number(title) is not None:
+        return None
+    if re.search(r"\b(collection|omnibus|compendium|box\s+set)\b", title, re.I):
+        return None
+    wanted = {normalize_title(series.title)}
+    wanted.update(normalize_title(t) for t in (series.alt_titles or "").split("\n") if t)
+    if normalize_title(strip_issue_suffix(title)) not in wanted:
+        return None
+    year = parse_year(title)
+    expected_year = issue.released_at.year if issue.released_at else series.year
+    if year is None or expected_year is None or abs(year - expected_year) > 1:
+        return None
+    return issue
+
+
+def release_covers_issue(release, issue, series=None) -> bool:
     """Whether a source release provides this specific issue.
 
     Beyond the numeric span check, two guards keep lookalikes apart:
@@ -200,7 +235,10 @@ def release_covers_issue(release, issue) -> bool:
     if issue_is_variant or release_is_variant:
         return label == display
     if release.issue_number is None:
-        return False
+        if series is None:
+            return False
+        standalone = standalone_issue_for_release(series, release.title)
+        return standalone is not None and (standalone is issue or standalone.id == issue.id)
     hi = release.issue_end if release.issue_end is not None else release.issue_number
     return release.issue_number <= issue.number <= hi
 

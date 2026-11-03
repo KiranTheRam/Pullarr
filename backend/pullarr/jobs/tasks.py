@@ -46,6 +46,7 @@ from ..util import (
     parse_issue_range,
     release_covers_issue,
     strip_issue_suffix,
+    standalone_issue_for_release,
 )
 
 log = logging.getLogger(__name__)
@@ -456,7 +457,7 @@ async def find_release_for_issue(
             log.warning("list_releases failed on %s: %s", src.name, exc)
             continue
         for r in releases:
-            if release_covers_issue(r, issue) and _release_matches_series(r, wanted_titles):
+            if release_covers_issue(r, issue, series) and _release_matches_series(r, wanted_titles):
                 return src.name, r
     return None
 
@@ -465,6 +466,8 @@ async def enqueue_direct(
     session: AsyncSession, series: Series, issue: Issue | None,
     source_name: str, external_id: str, title: str = "",
 ) -> Download:
+    if issue is None and title:
+        issue = standalone_issue_for_release(series, title)
     dl = Download(
         series_id=series.id,
         issue_id=issue.id if issue else None,
@@ -1112,7 +1115,7 @@ async def _grab_matches(
         # or a variant point issue matched by display number
         covered = [
             i for i in remaining.values()
-            if release_covers_issue(r, i)
+            if release_covers_issue(r, i, series)
         ]
         if not covered:
             continue

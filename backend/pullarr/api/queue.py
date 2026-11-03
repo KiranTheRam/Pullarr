@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..db import get_session
 from ..download.qbittorrent import QbtClient
@@ -204,6 +205,12 @@ async def remove_many_from_queue(
     return QueueRemoveOut(removed=await _remove_downloads(session, body.ids))
 
 
+async def _series_for_grab(session: AsyncSession, series_id: int) -> Series | None:
+    return (await session.execute(
+        select(Series).options(selectinload(Series.issues)).where(Series.id == series_id)
+    )).scalar_one_or_none()
+
+
 @router.post("/queue/grab", response_model=QueueItemOut, status_code=201)
 async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
     values = await registry.apply_settings(session)
@@ -214,9 +221,9 @@ async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
             issue = await session.get(Issue, body.issue_id)
             if issue is None:
                 raise HTTPException(404, "Issue not found")
-            series = await session.get(Series, issue.series_id)
+            series = await _series_for_grab(session, issue.series_id)
         elif body.series_id is not None:
-            series = await session.get(Series, body.series_id)
+            series = await _series_for_grab(session, body.series_id)
         else:
             raise HTTPException(422, "issue_id or series_id required for a DDL grab")
         if series is None:
