@@ -84,6 +84,8 @@ class Series(Base):
     title: Mapped[str] = mapped_column(String)
     sort_title: Mapped[str] = mapped_column(String, default="")
     alt_titles: Mapped[str] = mapped_column(Text, default="")  # newline-separated
+    search_title: Mapped[str] = mapped_column(String, default="")
+    search_templates: Mapped[str] = mapped_column(Text, default="")
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[SeriesStatus] = mapped_column(
         Enum(SeriesStatus, values_callable=lambda e: [m.value for m in e]),

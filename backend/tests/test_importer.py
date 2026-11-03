@@ -226,3 +226,11 @@ class TestImportPayload:
         second = run_import(payload, series, issues, lib)
 
         assert second[0].dest.stat().st_mtime_ns == mtime
+
+
+def test_import_pads_numeric_display_number(tmp_path, series, issues):
+    issues[0].display_number = '1'
+    src = tmp_path / 'Absolute Batman 1.cbz'
+    make_cbz(src)
+    result = import_payload(src, series, issues, tmp_path / 'lib', '{series} {issue:03d} ({year})')
+    assert result[0].dest.name == 'Absolute Batman 001 (2024).cbz'

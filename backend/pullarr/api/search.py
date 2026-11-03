@@ -50,6 +50,7 @@ async def search_releases(
     issue_id: int | None = None,
     session: AsyncSession = Depends(get_session),
     include_source_status: bool = False,
+    q: str | None = None,
 ):
     """Interactive search. With issue_id: releases for that issue. With
     series_id only: everything the sources have for the series (single
@@ -90,14 +91,14 @@ async def search_releases(
         try:
             if issue is not None:
                 issue_term = issue.display_number or f"{issue.number:g}"
-                found = await src.search_releases(f"{term} {issue_term}")
+                found = await src.search_releases(q.strip() if q and q.strip() else f"{term} {issue_term}")
                 found = [
                     r for r in found
                     if release_covers_issue(r, issue)
                     and normalize_title(strip_issue_suffix(r.title)) in wanted
                 ]
             else:
-                found = await src.list_releases(term)
+                found = await src.search_releases(q.strip()) if q and q.strip() else await src.list_releases(term)
                 # keep TPBs/packs (no parsed issue number) for manual grabs,
                 # but drop numbered releases that can't belong to any issue
                 # of this series — a same-titled relaunch ("#27 (2026)" when
@@ -131,7 +132,9 @@ async def search_releases(
         for indexer in registry.enabled_torrent_indexers(values):
             attempted += 1
             try:
-                torrents = await indexer.search(series.title)
+                from ..sources.queries import search_queries, search_variants
+                queries = [q.strip()] if q and q.strip() else search_queries(series, issue, values)
+                torrents = await search_variants(indexer, queries)
             except Exception as exc:
                 warnings.append(_source_error(indexer.name, exc))
                 continue
@@ -139,7 +142,7 @@ async def search_releases(
             for t in torrents[:25]:
                 releases.append(ReleaseOut(
                     kind="torrent",
-                    source_name=indexer.name,
+                    source_name=t.source_name,
                     title=t.title,
                     magnet=t.magnet,
                     url=t.url,
@@ -160,4 +163,4 @@ def _source_error(name: str, error: Exception) -> str:
     # Exception messages may contain proxy credentials or signed download URLs.
     status = getattr(getattr(error, "response", None), "status_code", None)
     reason = f"HTTP {status}" if status else type(error).__name__
-    return f"{name}: {reason}. Check the source and its configured proxy, then retry."
+    return f"{name}: {reason}. Check the source URL, credentials, and proxy, then retry."

@@ -65,6 +65,8 @@ export interface Series {
   metron_id: number | null;
   title: string;
   alt_titles: string;
+  search_title?: string;
+  search_templates?: string;
   description: string;
   status: string;
   publisher: string;

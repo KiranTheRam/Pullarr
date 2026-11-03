@@ -58,6 +58,8 @@ async def _migrate_sqlite(conn) -> None:
         await _rebuild_issues_table(conn, has_display_number)
 
     await _ensure_columns(conn, "series", {
+        "search_title": "VARCHAR NOT NULL DEFAULT ''",
+        "search_templates": "TEXT NOT NULL DEFAULT ''",
         "metron_id": "INTEGER",
         "metadata_refreshed_at": "DATETIME",
         "monitor_mode": "VARCHAR NOT NULL DEFAULT 'all'",

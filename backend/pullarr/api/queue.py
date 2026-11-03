@@ -78,7 +78,7 @@ async def retry_download(download_id: int, session: AsyncSession = Depends(get_s
         try:
             dl.torrent_hash = await submit_torrent(dl.payload, values, keep_existing=True)
         except Exception as exc:
-            raise HTTPException(502, f"qBittorrent error: {exc}") from exc
+            raise HTTPException(502, "Torrent submission failed; check the indexer and qBittorrent settings") from exc
         dl.status = DownloadStatus.DOWNLOADING
     else:
         dl.status = DownloadStatus.QUEUED
@@ -228,15 +228,21 @@ async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
     elif body.magnet:
         if values["qbittorrent_enabled"] != "true":
             raise HTTPException(400, "qBittorrent is not enabled in settings")
-        if not magnet_btih_hex(body.magnet):
+        if not magnet_btih_hex(body.magnet) and not body.magnet.startswith(("http://", "https://")):
             raise HTTPException(422, "Magnet link must include a valid btih info hash")
         series = await session.get(Series, body.series_id) if body.series_id else None
+        if body.series_id and series is None:
+            raise HTTPException(404, "Series not found")
+        issue = await session.get(Issue, body.issue_id) if body.issue_id else None
+        if body.issue_id and (issue is None or series is None or issue.series_id != series.id):
+            raise HTTPException(422, "Issue must belong to the selected series")
         try:
             dl = await enqueue_torrent(
-                session, series, body.magnet, body.title or "manual torrent", values
+                session, series, body.magnet, body.title or "manual torrent", values,
+                source_name=body.source_name or "manual", issue=issue
             )
         except Exception as exc:
-            raise HTTPException(502, f"qBittorrent error: {exc}") from exc
+            raise HTTPException(502, "Torrent submission failed; check the indexer and qBittorrent settings") from exc
     else:
         raise HTTPException(422, "Provide source_name+external_id or magnet")
 

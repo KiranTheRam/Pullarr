@@ -38,7 +38,7 @@ class SourceRelease:
 class TorrentRelease:
     source_name: str
     title: str
-    magnet: str
+    magnet: str  # magnet URI or HTTP(S) torrent-file URL
     url: str = ""
     size_bytes: int = 0
     seeders: int = 0
