@@ -91,10 +91,16 @@ async def search_releases(
         try:
             if issue is not None:
                 issue_term = issue.display_number or f"{issue.number:g}"
-                found = await src.search_releases(q.strip() if q and q.strip() else f"{term} {issue_term}")
+                if q and q.strip():
+                    found = await src.search_releases(q.strip())
+                elif series.total_issues == 1 and len(series.issues) == 1:
+                    # Standalone books are often posted without a #1 marker.
+                    found = await src.list_releases(term)
+                else:
+                    found = await src.search_releases(f"{term} {issue_term}")
                 found = [
                     r for r in found
-                    if release_covers_issue(r, issue)
+                    if release_covers_issue(r, issue, series)
                     and normalize_title(strip_issue_suffix(r.title)) in wanted
                 ]
             else:
@@ -107,7 +113,7 @@ async def search_releases(
                     found = [
                         r for r in found
                         if r.issue_number is None
-                        or any(release_covers_issue(r, i) for i in series.issues)
+                        or any(release_covers_issue(r, i, series) for i in series.issues)
                     ]
         except Exception as exc:
             warnings.append(_source_error(src.name, exc))

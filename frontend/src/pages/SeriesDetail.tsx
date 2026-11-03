@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type {
   Issue,
@@ -91,11 +91,13 @@ export function InteractiveSearch({
   issueId,
   title,
   onClose,
+  onGrabbed,
 }: {
   seriesId: number;
   issueId?: number;
   title: string;
   onClose: () => void;
+  onGrabbed?: (count: number) => void;
 }) {
   const queryClient = useQueryClient();
   const [query, setQuery] = useState("");
@@ -143,6 +145,8 @@ export function InteractiveSearch({
     mutationFn: grabRelease,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["queue"] });
+      queryClient.invalidateQueries({ queryKey: ["history"] });
+      onGrabbed?.(1);
       onClose();
     },
   });
@@ -153,8 +157,10 @@ export function InteractiveSearch({
         await grabRelease(release);
       }
     },
-    onSuccess: () => {
+    onSuccess: (_, releases) => {
       queryClient.invalidateQueries({ queryKey: ["queue"] });
+      queryClient.invalidateQueries({ queryKey: ["history"] });
+      onGrabbed?.(releases.length);
       onClose();
     },
   });
@@ -198,9 +204,9 @@ export function InteractiveSearch({
         </p>
       ) : (
         <>
-          {grab.isError && <div className="error-banner">{(grab.error as Error).message}</div>}
+          {grab.isError && <div className="error-banner" role="alert">{(grab.error as Error).message}</div>}
           {grabSelected.isError && (
-            <div className="error-banner">{(grabSelected.error as Error).message}</div>
+            <div className="error-banner" role="alert">{(grabSelected.error as Error).message}</div>
           )}
           <div className="source-tabs">
             <button className={`source-tab${currentSource === "all" ? " active" : ""}`} onClick={() => setActiveSource("all")}>All sources</button>
@@ -251,6 +257,7 @@ export function InteractiveSearch({
                       {r.kind === "ddl" && (
                         <input
                           type="checkbox"
+                          aria-label={`Select ${r.title}`}
                           checked={selectedDdl.has(releaseKey(r))}
                           onChange={() => toggleDdl(r)}
                         />
@@ -285,7 +292,7 @@ export function InteractiveSearch({
                       disabled={grab.isPending || grabSelected.isPending}
                       onClick={() => grab.mutate(r)}
                     >
-                      ⇓
+                      {grab.isPending && grab.variables === r ? "Queuing…" : "⇓"}
                     </button>
                   </td>
                 </tr>
@@ -347,6 +354,7 @@ export default function SeriesDetail() {
   const [showCleanup, setShowCleanup] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [workNotice, setWorkNotice] = useState<string | null>(null);
+  const [grabNotice, setGrabNotice] = useState<{ seriesId: number; count: number } | null>(null);
   const [showAddSyncNotice, setShowAddSyncNotice] = useState(false);
   const [issueFilter, setIssueFilter] = useState<"all" | "missing" | "downloaded" | "monitored">("all");
 
@@ -483,7 +491,7 @@ export default function SeriesDetail() {
   // only a fallback while the newly-created job has not appeared in polling yet.
   const fallbackWorkNotice = jobs?.length ? null : workNotice || addSyncNotice;
   const hasTopBanners =
-    Boolean(fallbackWorkNotice || scanResult) || activeDownloads.length > 0 || Boolean(jobs?.length);
+    Boolean(fallbackWorkNotice || scanResult || grabNotice?.seriesId === seriesId) || activeDownloads.length > 0 || Boolean(jobs?.length);
 
   const issueRows = (issues: Issue[]) => {
     const filtered = issues.filter((issue) =>
@@ -650,6 +658,13 @@ export default function SeriesDetail() {
         </button>
       </Toolbar>
       <div className="content">
+        {grabNotice?.seriesId === seriesId && (
+          <div className="activity-banner" role="status">
+            <strong>Queued {grabNotice.count} {grabNotice.count === 1 ? "download" : "downloads"}.</strong>
+            <Link to="/activity">View progress in Activity</Link>
+            <button className="btn sm" onClick={() => setGrabNotice(null)}>Dismiss</button>
+          </div>
+        )}
         {(refresh.isError || searchMissing.isError || scan.isError || toggleMonitor.isError || toggleIssue.isError || deleteSeries.isError) && (
           <div className="error-banner" role="alert">{String((refresh.error || searchMissing.error || scan.error || toggleMonitor.error || toggleIssue.error || deleteSeries.error) as Error)}</div>
         )}
@@ -825,6 +840,7 @@ export default function SeriesDetail() {
           issueId={search.issueId}
           title={search.title}
           onClose={() => setSearch(null)}
+          onGrabbed={(count) => setGrabNotice({ seriesId, count })}
         />
       )}
       {showRename && (

@@ -160,3 +160,38 @@ test("release search accepts a manual query and grabs torrent files with the iss
   await waitFor(() => expect(api.post).toHaveBeenCalledWith("/queue/grab", { series_id: 1, issue_id: 3, source_name: release.source_name, magnet: release.magnet, title: release.title }));
   expect(close).toHaveBeenCalled();
 });
+
+test("the DDL download arrow queues an unnumbered book and reports acceptance", async () => {
+  const { InteractiveSearch } = await import("../src/pages/SeriesDetail");
+  const release = { kind: "ddl", source_name: "getcomics", title: "Teen Titans – Beast Boy (2020)", external_id: "https://getcomics.org/dc/teen-titans-beast-boy-2020/", size_text: "123 MB", year: 2020 };
+  vi.mocked(api.get).mockResolvedValue({ releases: [release], warnings: [] });
+  let accept: (value: unknown) => void = () => {};
+  vi.mocked(api.post).mockImplementation(() => new Promise((resolve) => { accept = resolve; }));
+  const close = vi.fn();
+  const queued = vi.fn();
+  mount(<InteractiveSearch seriesId={25} title="Beast Boy" onClose={close} onGrabbed={queued} />);
+  await screen.findByText(release.title);
+  const user = userEvent.setup();
+  const arrow = screen.getByRole("button", { name: "Grab", exact: true });
+  await user.click(arrow);
+  expect(arrow.hasAttribute("disabled")).toBe(true);
+  expect(arrow.textContent).toBe("Queuing…");
+  expect(close).not.toHaveBeenCalled();
+  expect(api.post).toHaveBeenCalledWith("/queue/grab", { series_id: 25, issue_id: undefined, source_name: release.source_name, external_id: release.external_id, title: release.title });
+  accept({ id: 35, status: "queued", issue_id: 314 });
+  await waitFor(() => expect(queued).toHaveBeenCalledWith(1));
+  expect(close).toHaveBeenCalled();
+});
+
+test("a rejected DDL grab shows its error and keeps the search dialog open", async () => {
+  const { InteractiveSearch } = await import("../src/pages/SeriesDetail");
+  const release = { kind: "ddl", source_name: "getcomics", title: "Teen Titans – Raven (TPB) (2019)", external_id: "post" };
+  vi.mocked(api.get).mockResolvedValue({ releases: [release], warnings: [] });
+  vi.mocked(api.post).mockRejectedValue(new Error("The download could not be queued"));
+  const close = vi.fn();
+  mount(<InteractiveSearch seriesId={24} title="Raven" onClose={close} />);
+  await screen.findByText(release.title);
+  await userEvent.setup().click(screen.getByRole("button", { name: "Grab", exact: true }));
+  expect((await screen.findByRole("alert")).textContent).toContain("The download could not be queued");
+  expect(close).not.toHaveBeenCalled();
+});
