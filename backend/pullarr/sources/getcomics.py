@@ -11,11 +11,12 @@ All traffic (searches and the file downloads made by the DDL worker using
 `client`) honors the optional proxy setting so it can be routed through a
 VPN."""
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import urldefrag, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -50,6 +51,65 @@ SIZE_RE = re.compile(r"Size\s*:\s*([\d.,]+\s*[KMGT]?B)", re.I)
 class DownloadButton:
     label: str
     url: str
+
+
+@dataclass
+class CollectionBundle:
+    title: str
+    key: str
+    buttons: list[DownloadButton]
+
+
+def parse_collection_bundles(html: str) -> list[CollectionBundle]:
+    """Older collection posts put independent bundles in list items.
+
+    Never combine these links: different rows are different books, and
+    Link 1/Link 2 within a row are alternative mirrors, not file parts.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    content = soup.select_one(".post-contents, .entry-content, .post-content") or soup
+    bundles = []
+    for item in content.find_all("li"):
+        heading = item.find(["strong", "b"])
+        if heading is None or heading.find("a") or item.find("li"):
+            continue
+        title = re.sub(r"\s+", " ", heading.get_text(" ", strip=True)).rstrip(" :")
+        buttons = [
+            DownloadButton(a.get_text(" ", strip=True).upper(), a["href"])
+            for a in item.find_all("a", href=True)
+            if a.get_text(" ", strip=True).upper() in
+            {"LINK 1", "LINK 2", "DOWNLOAD NOW", "PIXELDRAIN", "MEDIAFIRE"}
+        ]
+        if title and buttons:
+            key = hashlib.sha256(title.encode()).hexdigest()[:20]
+            bundles.append(CollectionBundle(title, key, buttons))
+    return bundles
+
+
+def bundle_release(bundle: CollectionBundle, parent: SourceRelease) -> SourceRelease:
+    title = bundle.title
+    # Sources sometimes explicitly label the original series as Year One.
+    # Keep that label visible without confusing it with a separate series.
+    base = strip_issue_suffix(parent.title)
+    name = strip_issue_suffix(title)
+    if normalize_title(name) in {
+        normalize_title(base) + " year one", normalize_title(base) + " year 1",
+    }:
+        title = re.sub(
+            r"\s*[-–—]?\s*Year\s+(One|1)\s*(?=#)", r" (Year \1) ", title, flags=re.I,
+        )
+    span = parse_issue_range(title)
+    volume = parse_volume_number(title)
+    number = parse_issue_number(title) if has_issue_marker(title) else None
+    size = re.search(r"\(([\d.,]+\s*[KMGT]B)\)", title, re.I)
+    year = re.search(r"\(((?:19|20)\d{2})(?:\s*[-–—]\s*\d{4})?\)", title)
+    return SourceRelease(
+        source_name="getcomics", external_id=f"{parent.url}#pullarr-bundle={bundle.key}",
+        url=parent.url, title=title, issue_number=span[0] if span else number,
+        issue_end=span[1] if span else None, volume_number=volume,
+        year=int(year[1]) if year else None, size_text=size[1] if size else "",
+        posted_at=parent.posted_at,
+    )
 
 
 def parse_search_page(html: str, base_url: str) -> list[SourceRelease]:
@@ -227,10 +287,25 @@ class GetComicsSource(DDLSource):
         """Releases whose parsed series name matches the linked search term."""
         wanted = normalize_title(external_id)
         releases = await self._search_pages(external_id, pages=SEARCH_PAGES)
-        return [
+        candidates = [
             r for r in releases
             if self._belongs_to_series(r, wanted)
         ]
+        expanded = await self._expand_collections(candidates)
+        return [r for r in expanded if self._belongs_to_series(r, wanted)]
+
+    async def _expand_collections(self, releases: list[SourceRelease]) -> list[SourceRelease]:
+        expanded = []
+        for release in releases:
+            if release.issue_number is None and "collection" in release.title.lower():
+                resp = await rl_request(self._client, "GET", release.url, limiter=_limiter)
+                resp.raise_for_status()
+                bundles = parse_collection_bundles(resp.text)
+                if bundles:
+                    expanded.extend(bundle_release(bundle, release) for bundle in bundles)
+                    continue
+            expanded.append(release)
+        return expanded
 
     @staticmethod
     def _belongs_to_series(release: SourceRelease, wanted: str) -> bool:
@@ -243,19 +318,36 @@ class GetComicsSource(DDLSource):
         # volume/format/subtitle. Keep the prefix boundary strict so similarly
         # named series do not bleed into one another.
         return any(
-            parsed.startswith(f"{wanted} {marker}")
-            for marker in ("vol ", "volume ", "tpb", "hc", "hardcover", "omnibus")
+            parsed == f"{wanted} {marker}" or parsed.startswith(f"{wanted} {marker} ")
+            for marker in ("vol", "volume", "tpb", "hc", "hardcover", "omnibus")
         )
 
     async def search_releases(self, query: str) -> list[SourceRelease]:
-        return await self._search_pages(query, pages=1)
+        return await self._expand_collections(await self._search_pages(query, pages=1))
 
     async def resolve_downloads(self, release_external_id: str) -> list[list[str]]:
+        post_url, fragment = urldefrag(release_external_id)
         resp = await rl_request(
-            self._client, "GET", release_external_id, limiter=_limiter
+            self._client, "GET", post_url, limiter=_limiter
         )
         resp.raise_for_status()
-        buttons = parse_download_buttons(resp.text)
+        bundles = parse_collection_bundles(resp.text)
+        legacy_main = []
+        if fragment.startswith("pullarr-bundle="):
+            matches = [b for b in bundles if b.key == fragment.removeprefix("pullarr-bundle=")]
+            if len(matches) != 1:
+                raise RuntimeError(
+                    "post has no usable download link for the selected bundle; search releases again"
+                )
+            buttons = matches[0].buttons
+            legacy_main = [[b.url] for b in buttons if b.label in {"LINK 1", "LINK 2"}]
+        elif bundles:
+            raise RuntimeError(
+                "post has no usable download link for the whole collection; "
+                "search releases again and select a bundle"
+            )
+        else:
+            buttons = parse_download_buttons(resp.text)
         by_service: dict[str, list[str]] = {}
 
         # primary: the main server (may be multi-part)
@@ -279,7 +371,15 @@ class GetComicsSource(DDLSource):
             if direct:
                 by_service["mediafire"] = [direct]
 
-        options = [by_service[name] for name in self._service_preference if name in by_service]
+        options = []
+        for name in self._service_preference:
+            if name == "main":
+                options.extend(legacy_main)
+            if name in by_service:
+                options.append(by_service[name])
+        for links in legacy_main:
+            if links not in options:
+                options.append(links)
         for name, links in by_service.items():
             if links not in options:
                 options.append(links)
