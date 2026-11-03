@@ -509,9 +509,14 @@ async def submit_torrent(
     ``keep_existing``, a torrent qBittorrent still has (e.g. one whose import
     failed) is tracked again instead of re-added, which qBittorrent rejects.
     """
-    torrent_hash = magnet_btih_hex(magnet)
+    torrent_data = None
+    if magnet.startswith(("http://", "https://")):
+        from ..download.torrent import fetch_torrent
+        magnet, torrent_hash, torrent_data = await fetch_torrent(magnet)
+    else:
+        torrent_hash = magnet_btih_hex(magnet)
     if not torrent_hash:
-        raise ValueError("magnet link must include a valid btih info hash")
+        raise ValueError("Torrent must include a valid btih info hash")
     client = QbtClient(
         values["qbittorrent_url"], values["qbittorrent_username"], values["qbittorrent_password"]
     )
@@ -524,7 +529,10 @@ async def submit_torrent(
         base = await client.default_save_path()
         save_path = f"{base.rstrip('/')}/{category}" if base else None
         await client.ensure_category(category, save_path)
-        await client.add_magnet(magnet, category=category, save_path=save_path)
+        if torrent_data is not None:
+            await client.add_torrent(torrent_data, category=category, save_path=save_path)
+        else:
+            await client.add_magnet(magnet, category=category, save_path=save_path)
     finally:
         await client.close()
     return torrent_hash
@@ -532,21 +540,23 @@ async def submit_torrent(
 
 async def enqueue_torrent(
     session: AsyncSession, series: Series | None, magnet: str, title: str, values: dict[str, str],
+    source_name: str = "manual", issue: Issue | None = None,
 ) -> Download:
     torrent_hash = await submit_torrent(magnet, values)
     dl = Download(
         series_id=series.id if series else None,
+        issue_id=issue.id if issue else None,
         kind=DownloadKind.TORRENT,
         status=DownloadStatus.DOWNLOADING,
         title=title,
-        source_name="manual",
+        source_name=source_name,
         payload=magnet,
         torrent_hash=torrent_hash,
     )
     session.add(dl)
     session.add(HistoryEvent(
         series_id=series.id if series else None, event="grabbed",
-        source_name="manual", detail=title,
+        source_name=source_name, detail=title,
     ))
     await session.commit()
     return dl
@@ -865,6 +875,7 @@ async def _import_torrent(
         imported = await _import_download_payload(dl.id,
             content_path, series, list(series.issues), Path(series.root_folder.path),
             values["naming_template"],
+            force_issue=next((i for i in series.issues if i.id == dl.issue_id), None),
         )
     except Exception as exc:
         log.exception("torrent import %d failed", dl.id)
@@ -1005,6 +1016,31 @@ async def grab_missing_issues(
                 continue
             queued += await _grab_matches(session, series, src.name, results,
                                           remaining, wanted_titles, failed_releases)
+    if values.get("qbittorrent_enabled") == "true":
+        from ..sources.queries import search_queries, search_variants
+        for indexer in registry.enabled_torrent_indexers(values):
+            for issue in list(remaining.values())[:straggler_cap]:
+                queries = search_queries(series, issue, values)
+                try:
+                    torrents = await search_variants(indexer, queries)
+                    for release in sorted(torrents, key=lambda r: r.seeders, reverse=True):
+                        if release.seeders < 1 or (release.source_name, release.magnet) in failed_releases:
+                            continue
+                        # Search feeds may ignore q. Require the complete rendered
+                        # title/number query with word boundaries before auto-grabbing.
+                        templates = series.search_templates or values.get("torrent_query_templates", "{series} {issue}")
+                        if not all("{series}" in t and "{issue" in t for t in templates.splitlines() if t.strip()):
+                            continue
+                        title = " " + normalize_title(release.title) + " "
+                        if not any(" " + normalize_title(q) + " " in title for q in queries):
+                            continue
+                        await enqueue_torrent(session, series, release.magnet, release.title, values,
+                                              source_name=release.source_name, issue=issue)
+                        remaining.pop(issue.number, None)
+                        queued += 1
+                        break
+                except Exception as exc:
+                    log.warning("Torznab search/grab failed for series %d: %s", series.id, type(exc).__name__)
     if queued:
         log.info("Queued %d missing issue(s) for %r", queued, series.title)
     return queued

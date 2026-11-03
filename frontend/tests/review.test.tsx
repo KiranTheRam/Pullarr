@@ -120,3 +120,43 @@ test("modal traps keyboard focus and restores the opener", async () => {
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(document.activeElement).toBe(opener);
 });
+
+test("Torznab settings support multiple indexers and preserve masked API keys", async () => {
+  const config = { id: "existing", name: "Prowlarr", url: "http://prowlarr:9696/all/api", api_key: "••••••••", categories: "7030", search_type: "search", enabled: true };
+  const saved = { torznab_indexers: JSON.stringify([config]), torrent_query_templates: "{series} {issue}" };
+  vi.mocked(api.get).mockImplementation(async (path) => path === "/settings" ? saved : []);
+  vi.mocked(api.put).mockImplementation(async (_, body) => body);
+  mount(<Settings />);
+  const user = userEvent.setup();
+  await screen.findByDisplayValue("Prowlarr");
+  await user.click(screen.getByRole("button", { name: "Add Torznab indexer" }));
+  const names = screen.getAllByLabelText("Name", { exact: true });
+  await user.type(names[1], "French comics");
+  await user.type(screen.getAllByLabelText("Torznab API URL")[1], "http://prowlarr:9696/2/api");
+  await user.type(screen.getAllByLabelText("API key", { exact: true })[1], "new-key");
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  await waitFor(() => expect(api.put).toHaveBeenCalled());
+  const body = vi.mocked(api.put).mock.calls[0][1] as Record<string, string>;
+  const indexers = JSON.parse(body.torznab_indexers);
+  expect(indexers).toHaveLength(2);
+  expect(indexers[0].api_key).toBe("••••••••");
+  expect(indexers[1].name).toBe("French comics");
+});
+
+test("release search accepts a manual query and grabs torrent files with the issue context", async () => {
+  const { InteractiveSearch } = await import("../src/pages/SeriesDetail");
+  const release = { kind: "torrent", source_name: "Prowlarr / French tracker", title: "Batman T03", magnet: "http://prowlarr/download/1", size_bytes: 123, seeders: 8, leechers: 2 };
+  vi.mocked(api.get).mockResolvedValue({ releases: [release], warnings: [] });
+  vi.mocked(api.post).mockResolvedValue({});
+  const close = vi.fn();
+  mount(<InteractiveSearch seriesId={1} issueId={3} title="Batman #3" onClose={close} />);
+  const user = userEvent.setup();
+  await screen.findByText("Batman T03");
+  expect(screen.getByText("8/2")).toBeTruthy();
+  await user.type(screen.getByRole("textbox", { name: "Search query" }), "Batman T03");
+  await user.click(screen.getByRole("button", { name: "Search", exact: true }));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith("/search/releases?issue_id=3&q=Batman%20T03&include_source_status=true"));
+  await user.click(screen.getByRole("button", { name: "Grab", exact: true }));
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith("/queue/grab", { series_id: 1, issue_id: 3, source_name: release.source_name, magnet: release.magnet, title: release.title }));
+  expect(close).toHaveBeenCalled();
+});

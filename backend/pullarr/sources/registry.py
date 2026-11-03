@@ -45,7 +45,8 @@ def enabled_ddl_sources(values: dict[str, str]) -> list[DDLSource]:
 
 
 def enabled_torrent_indexers(values: dict[str, str]) -> list[TorrentIndexer]:
-    return [
+    from .torznab import configured_indexers
+    return configured_indexers(values.get("torznab_indexers", "[]")) + [
         idx
         for name, idx in TORRENT_INDEXERS.items()
         if values.get(f"source_{name}_enabled") == "true"

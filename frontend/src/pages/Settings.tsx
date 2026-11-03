@@ -10,6 +10,36 @@ import type {
 import { FolderBrowser } from "../components/FolderBrowser";
 import { QueryError, Spinner, Toggle, Toolbar } from "../components/common";
 
+interface TorznabConfig {
+  id: string; name: string; url: string; api_key: string;
+  categories: string; search_type: string; enabled: boolean;
+}
+
+function TorznabSettings({ form, setForm }: { form: SettingsType; setForm: (value: SettingsType) => void }) {
+  const entries: TorznabConfig[] = JSON.parse(form.torznab_indexers || "[]");
+  const update = (next: TorznabConfig[]) => setForm({ ...form, torznab_indexers: JSON.stringify(next) });
+  return <div className="settings-section">
+    <h3>Torznab indexers</h3>
+    <p className="section-hint">Add a Torznab API URL from Prowlarr or another torrent indexer. Enable qBittorrent below to search and download releases.</p>
+    {entries.map((entry, index) => {
+      const set = (patch: Partial<TorznabConfig>) => update(entries.map((item, i) => i === index ? { ...item, ...patch } : item));
+      return <fieldset key={entry.id} style={{ marginBottom: 16 }}>
+        <legend>{entry.name || "New indexer"}</legend>
+        <Toggle label="Enable indexer" on={entry.enabled} onChange={(enabled) => set({ enabled })} />
+        {([ ["name", "Name"], ["url", "Torznab API URL"], ["api_key", "API key"], ["categories", "Categories"] ] as const).map(([key, label]) => <div className="form-row" key={key}>
+          <label htmlFor={`${entry.id}-${key}`}>{label}</label>
+          <input id={`${entry.id}-${key}`} type={key === "api_key" ? "password" : "text"} placeholder={key === "url" ? "http://prowlarr:9696/all/api" : ""} value={entry[key]} onChange={(e) => set({ [key]: e.target.value })} />
+        </div>)}
+        <div className="form-row"><label htmlFor={`${entry.id}-type`}>Search type</label><select id={`${entry.id}-type`} value={entry.search_type} onChange={(e) => set({ search_type: e.target.value })}><option value="search">Search</option><option value="book">Book</option></select></div>
+        <button className="btn sm" onClick={() => update(entries.filter((_, i) => i !== index))}>Remove indexer</button>
+      </fieldset>;
+    })}
+    <button className="btn" onClick={() => update([...entries, { id: Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join(""), name: "", url: "", api_key: "", categories: "7030", search_type: "search", enabled: true }])}>Add Torznab indexer</button>
+    <div className="form-row"><label htmlFor="torrent-templates">Default query templates</label><textarea id="torrent-templates" value={form.torrent_query_templates ?? "{series} {issue}"} onChange={(e) => setForm({ ...form, torrent_query_templates: e.target.value })} /></div>
+    <p className="section-hint">One variant per line. Tokens: {"{series}, {issue}, {year}"}; padding: {"{issue:03d}"}. Example: {"{series} Tome {issue}"} or {"{series} T{issue:02d}"}. Override these on a series page. Automatic grabs require the rendered title and issue query to match the release title.</p>
+  </div>;
+}
+
 function RootFolders() {
   const queryClient = useQueryClient();
   const [path, setPath] = useState("");
@@ -589,10 +619,12 @@ export default function Settings() {
           </div>
         </div>
 
+        <TorznabSettings form={form} setForm={setForm} />
+
         <div className="settings-section">
           <h3>Download Client — qBittorrent (optional)</h3>
           <p className="section-hint">
-            Manual magnet grabs are sent to qBittorrent and imported when complete. Not needed
+            Torrent releases are sent to qBittorrent and imported when complete. Not needed
             for GetComics direct downloads.
           </p>
           <div className="form-row">

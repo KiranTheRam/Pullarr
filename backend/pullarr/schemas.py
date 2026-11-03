@@ -68,6 +68,8 @@ class SeriesOut(BaseModel):
     metron_id: int | None
     title: str
     alt_titles: str
+    search_title: str = ""
+    search_templates: str = ""
     description: str
     status: str
     publisher: str
@@ -162,6 +164,8 @@ class FolderPreviewOut(BaseModel):
 
 
 class SeriesUpdateIn(BaseModel):
+    search_title: str | None = None
+    search_templates: str | None = None
     monitored: bool | None = None
     monitor_mode: MonitorMode | None = None
     monitor_from: float | None = None
@@ -199,7 +203,7 @@ class ReleaseOut(BaseModel):
     volume_number: int | None = None
     external_id: str = ""  # ddl: post URL
     url: str = ""
-    magnet: str = ""
+    magnet: str = ""  # magnet URI or HTTP(S) torrent-file URL
     size_text: str = ""
     year: int | None = None
     posted_at: datetime | None = None
@@ -213,7 +217,7 @@ class GrabIn(BaseModel):
     issue_id: int | None = None
     source_name: str | None = None
     external_id: str | None = None
-    # torrent grab
+    # torrent grab (magnet URI or HTTP(S) torrent-file URL)
     series_id: int | None = None
     magnet: str | None = None
     title: str | None = None

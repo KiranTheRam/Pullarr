@@ -3,6 +3,7 @@
 Templates use Python format-spec style with {series}, {year}, {issue}, {title}."""
 
 import re
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from ..util import sanitize_filename
@@ -17,12 +18,17 @@ def _format_issue(template: str, issue: float | str) -> str:
     12 → 012, 12.5 → 012.5"""
 
     def repl(m: re.Match) -> str:
-        if isinstance(issue, str):
-            return issue
+        try:
+            numeric = Decimal(str(issue).strip())
+        except InvalidOperation:
+            return str(issue)  # annuals and variant labels remain readable
+        if not numeric.is_finite():
+            return str(issue)
         width = int(m.group(1))
-        if float(issue).is_integer():
-            return f"{int(issue):0{width}d}"
-        return f"{issue:0{width + 2}.1f}"
+        if numeric == numeric.to_integral_value():
+            return f"{int(numeric):0{width}d}"
+        whole, fraction = format(numeric.normalize(), "f").split(".")
+        return f"{whole.zfill(width)}.{fraction}"
 
     return _ISSUE_FMT.sub(repl, template)
 

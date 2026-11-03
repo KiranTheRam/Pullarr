@@ -59,3 +59,17 @@ class TestIssuePath:
         p = issue_path(Path("/library"), DEFAULT_TEMPLATE, "Absolute Batman",
                        "AbsBat", 15, year=2024)
         assert p == Path("/library/AbsBat/Absolute Batman #015.cbz")
+
+
+class TestStringIssueNumbers:
+    def test_numeric_display_number_padded(self):
+        assert issue_filename('{series} {issue:03d} ({year})', 'Absolute Batman', '1', year=2026) == 'Absolute Batman 001 (2026).cbz'
+
+    def test_fractional_display_number_padded_without_rounding(self):
+        assert name('12.25') == 'Absolute Batman #012.25.cbz'
+
+    def test_variant_label_preserved(self):
+        assert name('1AU') == 'Absolute Batman #1AU.cbz'
+
+    def test_plain_placeholder_preserved(self):
+        assert issue_filename('{series} {issue}', 'Batman', '001') == 'Batman 001.cbz'

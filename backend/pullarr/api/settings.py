@@ -24,6 +24,8 @@ MASK = "••••••••"
 @router.get("")
 async def get_settings(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
     values = await settings_service.get_all(session)
+    from ..sources.torznab import mask_indexers
+    values["torznab_indexers"] = mask_indexers(values["torznab_indexers"])
     for key in settings_service.SECRET_KEYS:
         if values.get(key):
             values[key] = MASK
@@ -37,6 +39,11 @@ async def update_settings(
     # ignore masked secrets that the user did not change
     to_save = {k: v for k, v in body.items() if v != MASK}
     try:
+        if "torznab_indexers" in to_save:
+            from ..sources.torznab import restore_keys
+            to_save["torznab_indexers"] = restore_keys(
+                to_save["torznab_indexers"], await settings_service.get(session, "torznab_indexers")
+            )
         await settings_service.set_many(session, to_save)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc

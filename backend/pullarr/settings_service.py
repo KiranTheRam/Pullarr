@@ -17,6 +17,8 @@ DEFAULTS: dict[str, str] = {
     "metron_username": "",
     "metron_password": "",
     "metron_issue_enrichment_limit": "5",
+    "torznab_indexers": "[]",
+    "torrent_query_templates": "{series} {issue}",
     # GetComics
     "getcomics_base_url": "https://getcomics.org",
     # Optional HTTP(S) proxy for all GetComics traffic (searches + file
@@ -84,7 +86,13 @@ def validate_updates(values: dict[str, str]) -> dict[str, str]:
         if key not in DEFAULTS:
             continue
         value = "" if value is None else str(value)
-        if key == "monitor_interval_minutes":
+        if key == "torznab_indexers":
+            from .sources.torznab import validate_indexers
+            value = validate_indexers(value)
+        elif key == "torrent_query_templates":
+            from .sources.queries import validate_templates
+            validate_templates(value, required=True)
+        elif key == "monitor_interval_minutes":
             value = str(parse_monitor_interval(value))
         elif key == "finished_series_check_days":
             try:

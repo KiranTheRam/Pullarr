@@ -122,3 +122,12 @@ class TestApplyRenames:
 
         outcomes = apply_renames(items, {1: i})
         assert outcomes[0].status == "skipped-missing"
+
+
+def test_rename_pads_numeric_display_number(tmp_path):
+    src = tmp_path / 'Absolute Batman 1.cbz'
+    src.write_bytes(b'x')
+    row = issue(1, 1, src)
+    row.display_number = '1'
+    result = plan_renames(series(), [row], '{series} {issue:03d} ({year})')
+    assert result[0].new_name == 'Absolute Batman 001 (2024).cbz'

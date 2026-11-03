@@ -237,3 +237,35 @@ requests/resource/hour.
   monitored series.
 - Mirror fallback (Pixeldrain API) when the main server is down.
 - Notifications (Discord/webhooks) on grab/import.
+
+### Torznab / Prowlarr
+
+In Settings, add one or more **Torznab indexers** with a name, API URL, and API key.
+For Prowlarr, use the Torznab URL copied from the indexer, or an aggregate endpoint
+such as `http://prowlarr:9696/all/api`. The default category is comics (`7030`);
+you can enter other category IDs separated by commas. Use `search`, or `book` if
+supported by your indexer. API keys are masked after saving.
+
+Enable and configure qBittorrent to search and grab torrents. Search Releases
+combines GetComics and torrent results, with source labels, size, and seeder/leecher
+counts. Both magnets and torrent-file links are supported. Completed downloads use
+the existing library importer; qBittorrent's completed paths must be accessible to
+Pullarr. Torrent data is copied on import so qBittorrent can keep seeding.
+
+Default torrent query templates live in Settings. Under **Torrent search options**
+on a series page, override the search title (for example, a French title) and/or
+provide templates, one per line:
+
+```text
+{series} T{issue:02d}
+{series} Tome {issue}
+{series} #{issue:03d} {year}
+```
+
+Variants are tried in order until an indexer returns results. `{year}` uses the
+issue's release year, falling back to the series year. A series-wide search uses
+the search title alone. The release-search dialog also accepts a manual query;
+leave it blank to return to automatic queries. Scheduled and Search Missing jobs
+try Torznab after GetComics, require seeders and a matching rendered title/issue
+query, and skip active or blocked downloads. Broad templates without both
+`{series}` and `{issue}` are available for interactive searches only.

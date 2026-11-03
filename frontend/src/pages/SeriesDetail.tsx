@@ -86,7 +86,7 @@ function SeriesDescription({ description }: { description: string }) {
   );
 }
 
-function InteractiveSearch({
+export function InteractiveSearch({
   seriesId,
   issueId,
   title,
@@ -98,7 +98,10 @@ function InteractiveSearch({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const params = issueId != null ? `issue_id=${issueId}` : `series_id=${seriesId}`;
+  const [query, setQuery] = useState("");
+  const [submittedQuery, setSubmittedQuery] = useState("");
+  const params = (issueId != null ? `issue_id=${issueId}` : `series_id=${seriesId}`)
+    + (submittedQuery ? `&q=${encodeURIComponent(submittedQuery)}` : "");
   const { data: result, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["releases", params],
     queryFn: () => api.get<ReleaseSearch>(`/search/releases?${params}&include_source_status=true`),
@@ -111,9 +114,9 @@ function InteractiveSearch({
     () => [...new Set((data ?? []).map((release) => release.source_name))],
     [data],
   );
-  const currentSource = activeSource || sourceNames[0] || "";
+  const currentSource = sourceNames.includes(activeSource) ? activeSource : "all";
   const visibleReleases = useMemo(
-    () => (data ?? []).filter((release) => release.source_name === currentSource),
+    () => (data ?? []).filter((release) => currentSource === "all" || release.source_name === currentSource),
     [data, currentSource],
   );
   const ddlSelectable = visibleReleases.filter((release) => release.kind === "ddl");
@@ -125,14 +128,6 @@ function InteractiveSearch({
   const allVisibleDdlSelected =
     ddlSelectable.length > 0 && selectedVisibleDdl.length === ddlSelectable.length;
 
-  useEffect(() => {
-    if (!activeSource && sourceNames.length > 0) {
-      setActiveSource(sourceNames[0]);
-    } else if (activeSource && sourceNames.length > 0 && !sourceNames.includes(activeSource)) {
-      setActiveSource(sourceNames[0]);
-    }
-  }, [activeSource, sourceNames]);
-
   const grabRelease = (release: Release) =>
     api.post("/queue/grab", release.kind === "ddl"
       ? {
@@ -142,7 +137,7 @@ function InteractiveSearch({
           external_id: release.external_id,
           title: release.title,
         }
-      : { series_id: seriesId, magnet: release.magnet, title: release.title });
+      : { series_id: seriesId, issue_id: issueId, source_name: release.source_name, magnet: release.magnet, title: release.title });
 
   const grab = useMutation({
     mutationFn: grabRelease,
@@ -188,6 +183,10 @@ function InteractiveSearch({
 
   return (
     <Modal title={`Search — ${title}`} onClose={onClose}>
+      <form className="form-row" onSubmit={(event) => { event.preventDefault(); if (query.trim() === submittedQuery) refetch(); else setSubmittedQuery(query.trim()); }}>
+        <input type="text" aria-label="Search query" placeholder="Automatic query (or enter your own)" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <button className="btn" type="submit">Search</button>
+      </form>
       {result?.warnings.map((warning) => <div className="error-banner" role="status" key={warning}>{warning} <button className="btn sm" onClick={() => refetch()}>Retry search</button></div>)}
       {isLoading ? (
         <Spinner />
@@ -204,6 +203,7 @@ function InteractiveSearch({
             <div className="error-banner">{(grabSelected.error as Error).message}</div>
           )}
           <div className="source-tabs">
+            <button className={`source-tab${currentSource === "all" ? " active" : ""}`} onClick={() => setActiveSource("all")}>All sources</button>
             {sourceNames.map((source) => {
               const sourceCount = (data ?? []).filter((release) => release.source_name === source).length;
               return (
@@ -265,6 +265,7 @@ function InteractiveSearch({
                     ) : (
                       r.title
                     )}
+                    <span className="tag">{r.source_name}</span>
                     {r.issue_end != null && r.issue_number != null && (
                       <span className="tag" title="One file covering multiple issues">
                         covers #{r.issue_number}–{r.issue_end}
@@ -280,6 +281,7 @@ function InteractiveSearch({
                     <button
                       className="btn icon-btn"
                       title="Grab"
+                      aria-label="Grab"
                       disabled={grab.isPending || grabSelected.isPending}
                       onClick={() => grab.mutate(r)}
                     >
@@ -294,6 +296,24 @@ function InteractiveSearch({
       )}
     </Modal>
   );
+}
+
+function TorrentSearchOptions({ series, onChanged }: { series: SeriesDetailType; onChanged: () => void }) {
+  const [title, setTitle] = useState(series.search_title ?? "");
+  const [templates, setTemplates] = useState(series.search_templates ?? "");
+  const save = useMutation({
+    mutationFn: () => api.put(`/series/${series.id}`, { search_title: title, search_templates: templates }),
+    onSuccess: onChanged,
+  });
+  return <details style={{ marginTop: 12 }}>
+    <summary>Torrent search options</summary>
+    <div className="form-row"><label htmlFor="search-title">Search title</label><input type="text" id="search-title" placeholder={series.title} value={title} onChange={(e) => setTitle(e.target.value)} /></div>
+    <div className="form-row"><label htmlFor="search-templates">Query templates</label><textarea id="search-templates" placeholder="Use the templates from Settings" value={templates} onChange={(e) => setTemplates(e.target.value)} /></div>
+    <p className="section-hint">One variant per line, tried until results are found. Tokens: {"{series}, {issue}, {year}"}. Example: {"{series} T{issue:02d}"}. Leave blank to use Settings.</p>
+    {save.isError && <div className="error-banner">{(save.error as Error).message}</div>}
+    {save.isSuccess && <span role="status">Saved </span>}
+    <button className="btn sm" disabled={save.isPending} onClick={() => save.mutate()}>Save search options</button>
+  </details>;
 }
 
 function groupByVolume(issues: Issue[]): { volume: number | null; issues: Issue[] }[] {
@@ -600,7 +620,7 @@ export default function SeriesDetail() {
         </button>
         <button
           className="btn"
-          title="Search GetComics for every release of this series (issues, TPBs, packs)"
+          title="Search enabled sources for releases of this series"
           onClick={() => setSearch({ title: `${series.title} (all releases)` })}
         >
           🔍 Search Releases
@@ -715,6 +735,7 @@ export default function SeriesDetail() {
             </div>
             <FoldersPanel seriesId={seriesId} onChanged={invalidate} />
             <SeriesMonitoring series={series} onChanged={invalidate} />
+            <TorrentSearchOptions key={series.id} series={series} onChanged={invalidate} />
           </div>
         </div>
 
