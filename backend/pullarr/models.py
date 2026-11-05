@@ -237,6 +237,7 @@ class Download(Base):
     progress: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1
     error: Mapped[str] = mapped_column(Text, default="")
     error_code: Mapped[str] = mapped_column(String, default="")
+    transient_error: Mapped[bool] = mapped_column(Boolean, default=False)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     next_retry_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     blocked: Mapped[bool] = mapped_column(Boolean, default=False)

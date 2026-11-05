@@ -334,5 +334,5 @@ async def test_source_failure_retains_its_cooldown(session, tmp_path, monkeypatc
     monkeypatch.setattr(tasks, "download_release", fail)
     await tasks._run_direct_download(session, dl)
     assert dl.status == DownloadStatus.FAILED
-    assert dl.error_code == "download_error"
+    assert dl.error_code == "network_error"
     assert await tasks.grab_missing_issues(session, series, values) == 0

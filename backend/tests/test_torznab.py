@@ -165,8 +165,11 @@ async def test_grab_preserves_issue_and_source(session, monkeypatch):
     assert (row.issue_id, row.source_name, row.torrent_hash) == (issue.id, 'Prowlarr', HASH)
 
 
-async def test_automatic_search_requires_matching_query_and_avoids_duplicates(session, monkeypatch):
+async def test_automatic_search_requires_matching_query_and_avoids_duplicates(session, monkeypatch, tmp_path):
     series, issue = await library(session)
+    from pullarr.models import RootFolder
+    series.root_folder = RootFolder(path=str(tmp_path))
+    await session.commit()
     indexer = SimpleNamespace(name='Prowlarr', search=AsyncMock(return_value=[
         SimpleNamespace(title='Batman français T030', magnet=MAGNET, source_name='Prowlarr', seeders=10),
         SimpleNamespace(title='Batman français T03 CBZ', magnet=MAGNET, source_name='Prowlarr', seeders=5),

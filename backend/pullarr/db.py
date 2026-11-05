@@ -94,6 +94,7 @@ async def _migrate_sqlite(conn) -> None:
     await _ensure_columns(conn, "downloads", {
         "error_code": "VARCHAR NOT NULL DEFAULT ''",
         "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "transient_error": "BOOLEAN NOT NULL DEFAULT 0",
         "next_retry_at": "DATETIME",
         "blocked": "BOOLEAN NOT NULL DEFAULT 0",
     })

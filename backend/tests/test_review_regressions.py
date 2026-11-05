@@ -120,8 +120,10 @@ async def series_fixture(session):
 
 
 @pytest.mark.parametrize("issue_linked", [True, False])
-async def test_blocked_release_does_not_hide_alternative(session, monkeypatch, issue_linked):
+async def test_blocked_release_does_not_hide_alternative(session, monkeypatch, tmp_path, issue_linked):
     series = await series_fixture(session)
+    from pullarr.models import RootFolder
+    series.root_folder = RootFolder(path=str(tmp_path))
     blocked = await download(session, DownloadStatus.FAILED)
     blocked.series_id = series.id
     blocked.issue_id = series.issues[0].id if issue_linked else None

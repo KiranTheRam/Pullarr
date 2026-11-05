@@ -13,6 +13,32 @@ from .filename import parse_filename
 log = logging.getLogger(__name__)
 
 
+def error_chain(exc: BaseException):
+    """Follow wrapped failures without looping on malformed exception chains."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """Network interruptions and retryable HTTP responses, including wrappers.
+
+    Parser, authentication and filesystem errors need repair rather than an
+    automatic source retry. Do not infer network failure from arbitrary text.
+    """
+    for cause in error_chain(exc):
+        if isinstance(cause, (httpx.InvalidURL, httpx.UnsupportedProtocol, httpx.LocalProtocolError)):
+            return False
+        if isinstance(cause, (httpx.TransportError, ConnectionError, TimeoutError)):
+            return True
+        if isinstance(cause, httpx.HTTPStatusError):
+            status = cause.response.status_code
+            return status in {408, 425, 429} or 500 <= status < 600
+    return False
+
+
 class RateLimiter:
     """Simple async token-bucket limiter shared per source."""
 

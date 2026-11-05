@@ -85,6 +85,7 @@ async def retry_download(download_id: int, session: AsyncSession = Depends(get_s
         dl.status = DownloadStatus.QUEUED
     dl.progress = 0.0
     dl.attempt_count = 0
+    dl.transient_error = False
     dl.next_retry_at = None
     dl.error = ""
     dl.error_code = ""
