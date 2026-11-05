@@ -39,6 +39,10 @@ TIMEOUT = 30.0
 # own scan. Collect a burst and scan once when it goes quiet.
 DEBOUNCE_SECONDS = 15.0
 
+# Imports can finish further apart than the debounce window. Coalesce those
+# into a later scan instead of asking Kavita to scan after every issue.
+RESCAN_SECONDS = 300.0
+
 
 class KavitaError(RuntimeError):
     pass
@@ -236,6 +240,7 @@ def match_library(
     if not root:
         return None
     best: tuple[int, KavitaLibrary] | None = None
+    tied = False
     for library in libraries:
         for folder in library.folders:
             parts = _path_parts(folder)
@@ -250,7 +255,11 @@ def match_library(
                 continue
             if best is None or shared > best[0]:
                 best = (shared, library)
-    return best[1] if best else None
+                tied = False
+            elif shared == best[0] and library.id != best[1].id:
+                tied = True
+    # Identical folder tails in separate libraries require an explicit map.
+    return best[1] if best and not tied else None
 
 
 def parse_library_map(raw: str) -> dict[int, int]:
@@ -315,7 +324,10 @@ class ScanRequest:
     titles: tuple[str, ...]  # most specific first (year-qualified, then bare)
 
 
-_pending: set[ScanRequest] = set()
+# Monotonic due times and last attempts, keyed by the series' own names/root.
+_pending: dict[ScanRequest, float] = {}
+_last_scanned: dict[ScanRequest, float] = {}
+_wake: asyncio.Event | None = None
 _flush_task: asyncio.Task | None = None
 _flush_values: dict[str, str] = {}
 
@@ -369,21 +381,43 @@ async def run_scans(values: dict[str, str], requests: set[ScanRequest]) -> None:
 
 async def _flush() -> None:
     global _flush_task
+    loop = asyncio.get_running_loop()
     try:
-        # imports that land while a scan is in flight are picked up by the next
-        # pass rather than waiting for some later import to restart the timer
-        while True:
-            await asyncio.sleep(DEBOUNCE_SECONDS)
-            requests, values = set(_pending), dict(_flush_values)
-            _pending.clear()
+        # One worker serializes delivery. Imports during an HTTP request remain
+        # pending, including another import for the target currently scanning.
+        while _pending:
+            now = loop.time()
+            requests = {request for request, due in _pending.items() if due <= now}
             if not requests:
-                return
+                assert _wake is not None
+                _wake.clear()
+                try:
+                    await asyncio.wait_for(_wake.wait(), min(_pending.values()) - now)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            for request in requests:
+                del _pending[request]
+                _last_scanned[request] = now
+            values = dict(_flush_values)
             try:
                 await run_scans(values, requests)
             except KavitaError as exc:
                 log.warning("Kavita scan request failed: %s", exc)
             except Exception:  # a broken notify must not kill the import path
                 log.exception("Kavita scan request failed unexpectedly")
+            finally:
+                if values == _flush_values:
+                    # A slow delivery may outlast the floor. Imports arriving
+                    # in flight still need a trailing scan, but not immediately
+                    # after Kavita finally accepted the previous request.
+                    completed = loop.time()
+                    for request in requests:
+                        _last_scanned[request] = completed
+                        if request in _pending:
+                            _pending[request] = max(
+                                _pending[request], completed + RESCAN_SECONDS
+                            )
     finally:
         _flush_task = None
 
@@ -392,20 +426,39 @@ def notify_import(
     values: dict[str, str], root_folder_id: int | None, root_path: str,
     titles: list[str],
 ) -> None:
-    """Schedule a debounced Kavita scan for freshly imported files."""
-    global _flush_task, _flush_values
-    if not is_configured(values):
+    """Schedule a debounced scan, with a per-series floor between attempts."""
+    global _flush_task, _flush_values, _wake
+    # Pending work belongs to one connection/mapping snapshot. Never deliver an
+    # old target to a newly configured server, or keep its cooldown there.
+    scan_values = {key: value for key, value in values.items() if key.startswith("kavita_")}
+    if scan_values != _flush_values:
+        _pending.clear()
+        _last_scanned.clear()
+        _flush_values = scan_values
+        if _wake is not None:
+            _wake.set()
+    if not is_configured(values) or not root_path.strip():
         return
-    if not root_path.strip():
-        return
-    _pending.add(ScanRequest(
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    for old_request, scanned in list(_last_scanned.items()):
+        if now - scanned >= RESCAN_SECONDS:
+            del _last_scanned[old_request]
+    request = ScanRequest(
         root_folder_id=root_folder_id,
         root_path=root_path,
-        titles=tuple(t for t in titles if t and t.strip()),
-    ))
-    _flush_values = dict(values)
+        titles=tuple(dict.fromkeys(t.strip() for t in titles if t and t.strip())),
+    )
+    _pending[request] = max(
+        now + DEBOUNCE_SECONDS,
+        _last_scanned.get(request, now - RESCAN_SECONDS) + RESCAN_SECONDS,
+    )
     if _flush_task is None or _flush_task.done():
-        _flush_task = asyncio.get_running_loop().create_task(_flush())
+        _wake = asyncio.Event()
+        _flush_task = loop.create_task(_flush())
+    else:
+        assert _wake is not None
+        _wake.set()
 
 
 def validate_settings(values: dict[str, str]) -> None:

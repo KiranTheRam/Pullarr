@@ -91,17 +91,22 @@ the reader immediately:
 3. Check the **Library mapping** rows. Pullarr matches a root folder to a
    Kavita library by folder name, so `/comics/DC` finds a library at
    `/data/comics/DC` even when the containers mount it differently. Pick a
-   library explicitly if the two paths have nothing in common — useful when DC,
-   Marvel and other publishers live in separate Kavita libraries.
+   library explicitly if the two paths have nothing in common or multiple
+   libraries share the same matching folder name. Ambiguous paths scan nothing
+   until mapped, which protects separate publisher libraries.
 
 **Scan scope** decides how much Kavita re-reads. *Series* scans only the
 affected series folder, which is much cheaper on a large library. Pullarr tries
 the year-qualified name first (`Batman (2016)`), because a bare title Kavita
 holds more than once is ambiguous — rather than guess between reboots it falls
 back to a library scan, as it also does for a series Kavita has never indexed.
-*Whole library every time* skips the lookup. Bursts of imports are batched into
-a single scan, and a Kavita that is down or misconfigured never fails a
-download.
+Alternate titles are excluded because they can name an unrelated existing
+series. *Whole library every time* skips the lookup. Each import restarts a
+15-second quiet period for its series; later imports within five minutes of
+its last scan wait for one trailing scan. Other series can scan independently,
+and a library scan covers all series targets in the same batch. Pending scans
+are held in memory and are lost on restart. A Kavita that is down or
+misconfigured never fails a download.
 
 ### Optional Gluetun proxy
 

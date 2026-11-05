@@ -501,7 +501,8 @@ def _notify_kavita(values: dict[str, str], series: Series) -> None:
     Kavita names a series from what its parser reads on disk, usually the
     folder name. Comic titles repeat across reboots, so the year-qualified
     names go first — matching "Batman (2016)" avoids having to choose between
-    every Batman in the library.
+    every Batman in the library. Alternate titles may belong to an unrelated
+    existing series, so leave them out and discover new folders by library scan.
     """
     if series.root_folder is None:
         return
@@ -511,7 +512,6 @@ def _notify_kavita(values: dict[str, str], series: Series) -> None:
         series.folder_name,
         series_folder(series.title, series.year),
         series.title,
-        *(t.strip() for t in (series.alt_titles or "").split("\n")),
     ]
     seen: set[str] = set()
     ordered = [t for t in titles if t and not (t in seen or seen.add(t))]
