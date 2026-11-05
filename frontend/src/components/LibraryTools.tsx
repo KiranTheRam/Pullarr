@@ -26,6 +26,7 @@ export function FoldersPanel({
 }) {
   const queryClient = useQueryClient();
   const [picking, setPicking] = useState<null | "add" | "primary">(null);
+  const [folderMessage, setFolderMessage] = useState("");
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["folders", seriesId] });
     onChanged();
@@ -37,7 +38,7 @@ export function FoldersPanel({
 
   const addExtra = useMutation({
     mutationFn: (path: string) => api.post(`/series/${seriesId}/folders`, { path }),
-    onSuccess: invalidate,
+    onSuccess: () => { invalidate(); setFolderMessage("Folder added."); },
   });
   const removeExtra = useMutation({
     mutationFn: (id: number) => api.del(`/series/${seriesId}/folders/${id}`),
@@ -45,18 +46,20 @@ export function FoldersPanel({
   });
   const setPrimary = useMutation({
     mutationFn: (path: string) => api.put(`/series/${seriesId}`, { folder_name: path }),
-    onSuccess: invalidate,
+    onSuccess: () => { invalidate(); setFolderMessage("Series folder updated."); },
   });
 
   return (
     <div className="folders-panel">
+      {(addExtra.error || setPrimary.error) && <div className="error-banner" role="alert">{(addExtra.error || setPrimary.error as Error)?.message}</div>}
+      {folderMessage && <div role="status">{folderMessage}</div>}
       {data?.map((f) => (
         <div className="folder-line" key={f.id ?? "primary"}>
           📁 <code>{f.path || "(unset)"}</code>
           {f.primary && <span className="tag">primary</span>}
           {!f.exists && <span className="tag" style={{ color: "var(--danger)" }}>missing</span>}
           {f.primary ? (
-            <button className="btn sm" onClick={() => setPicking("primary")}>
+            <button className="btn sm" onClick={() => { setFolderMessage(""); setPicking("primary"); }}>
               Change
             </button>
           ) : (
@@ -66,7 +69,7 @@ export function FoldersPanel({
           )}
         </div>
       ))}
-      <button className="btn sm" onClick={() => setPicking("add")}>
+      <button className="btn sm" onClick={() => { setFolderMessage(""); setPicking("add"); }}>
         + Add folder
       </button>
       {picking && (

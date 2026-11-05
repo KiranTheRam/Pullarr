@@ -156,7 +156,7 @@ async def get_series(series_id: int, session: AsyncSession = Depends(get_session
 async def update_series(
     series_id: int, body: SeriesUpdateIn, session: AsyncSession = Depends(get_session)
 ):
-    result = await session.execute(select(Series).options(selectinload(Series.issues)).where(Series.id == series_id))
+    result = await session.execute(select(Series).options(selectinload(Series.issues), selectinload(Series.extra_folders)).where(Series.id == series_id))
     series = result.scalar_one_or_none()
     if series is None:
         raise HTTPException(404, "Series not found")
@@ -189,6 +189,21 @@ async def update_series(
         if body.root_folder_id != series.root_folder_id:
             raise HTTPException(400, "Use the library editor to change root folders safely")
     if body.folder_name is not None:
+        if body.folder_name.startswith("/"):
+            from pathlib import Path
+
+            selected = Path(body.folder_name.strip())
+            roots = (await session.execute(select(RootFolder))).scalars().all()
+            matching = [root for root in roots if selected.is_relative_to(Path(root.path))]
+            if matching:
+                new_root = max(matching, key=lambda root: len(Path(root.path).parts))
+                if new_root.id != series.root_folder_id:
+                    old_root = await session.get(RootFolder, series.root_folder_id)
+                    if old_root is not None:
+                        for extra in series.extra_folders:
+                            if not Path(extra.path).is_absolute():
+                                extra.path = str(Path(old_root.path) / extra.path)
+                    series.root_folder_id = new_root.id
         series.folder_name = await _normalize_folder_name(session, series, body.folder_name)
     await session.commit()
     return await get_series(series_id, session)

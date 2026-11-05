@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullarr.api import library_import as import_api
 from pullarr.api.library_editor import _change_root, _load
+from pullarr.api.series import update_series
 from pullarr.api.library_import import _candidate_dirs, _conflicts, _identity
 from pullarr.jobs import tasks
 from pullarr.jobs.tasks import _mark_imported
@@ -18,7 +19,30 @@ from pullarr.library.move import MoveError
 from pullarr.library.scanner import scan_series
 from pullarr.models import Base, Download, DownloadKind, Issue, RootFolder, Series
 from pullarr.monitoring import apply_mode, issue_wanted, resolve_initial_future
-from pullarr.schemas import ImportItemIn, LibraryImportIn
+from pullarr.schemas import ImportItemIn, LibraryImportIn, SeriesUpdateIn
+
+
+@pytest.mark.asyncio
+async def test_choosing_folder_under_nested_root_updates_series_root(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    comics = tmp_path / "comics"
+    marvel = comics / "Marvel"
+    (marvel / "Scream").mkdir(parents=True)
+    async with Session() as session:
+        parent = RootFolder(path=str(comics))
+        nested = RootFolder(path=str(marvel))
+        series = Series(title="Absolute Carnage: Scream", folder_name="Marvel/Scream",
+                        root_folder=parent)
+        session.add_all([series, nested])
+        await session.commit()
+        await update_series(series.id, SeriesUpdateIn(folder_name=str(marvel / "Scream")), session)
+        await session.refresh(series)
+        assert series.root_folder_id == nested.id
+        assert series.folder_name == "Scream"
+    await engine.dispose()
 
 
 def test_future_mode_resolves_once_and_keeps_manual_issue_choices():
