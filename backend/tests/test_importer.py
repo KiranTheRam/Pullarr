@@ -10,6 +10,11 @@ from pullarr.models import Issue, Series
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
+@pytest.fixture(autouse=True)
+def mounted_library(tmp_path):
+    (tmp_path / "lib").mkdir()
+
+
 @pytest.fixture
 def series():
     return Series(id=1, title="Absolute Batman", year=2024, publisher="DC Comics",

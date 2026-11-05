@@ -10,9 +10,9 @@ import shutil
 import time
 from threading import Event
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -20,8 +20,9 @@ from .. import kavita, notifications
 from ..config import config
 from ..db import session_scope
 from ..download.ddl import DownloadCancelled, download_release
-from ..download.qbittorrent import QbtClient
+from ..download.qbittorrent import QbtClient, QbtError
 from ..library.importer import import_payload
+from ..library.scanner import LibraryUnavailableError, require_root_available, root_unavailable
 from ..library.work import run_library_work
 from ..metadata.comicvine import derive_status, provider as comicvine
 from ..metadata.metron import provider as metron
@@ -235,18 +236,49 @@ async def link_sources(session: AsyncSession, series: Series, values: dict[str, 
 
 # --------------------------------------------------------------- refreshes
 
+async def root_expects_content(session: AsyncSession, series: Series) -> bool:
+    """A new series shares the mount assumptions of all its root's neighbours."""
+    if any(issue.downloaded for issue in series.issues):
+        return True
+    if series.root_folder is None:
+        return False
+    owned = await session.execute(
+        select(Issue.id).join(Series, Issue.series_id == Series.id).where(
+            Series.root_folder_id == series.root_folder.id,
+            Issue.downloaded == True,  # noqa: E712
+        ).limit(1)
+    )
+    return owned.first() is not None
+
+
+async def library_root_unavailable(session: AsyncSession, series: Series) -> str:
+    if series.root_folder is None:
+        return ""
+    return await run_in_threadpool(
+        root_unavailable, Path(series.root_folder.path),
+        await root_expects_content(session, series),
+    )
+
+
 async def reconcile_downloaded_files(session: AsyncSession, series: Series) -> int:
     """Clear downloaded state for issues whose recorded media file is gone."""
+    reason = await library_root_unavailable(session, series)
+    if reason:
+        log.warning("Not checking files of %r: %s", series.title, reason)
+        return 0
+    # Defer mutation until the final root check, so losing a share during the
+    # file checks cannot clear only part of the series.
+    missing_issues = [issue for issue in series.issues if issue.downloaded and
+                      (not issue.file_path or not Path(issue.file_path).is_file())]
+    if await library_root_unavailable(session, series):
+        return 0
     missing = 0
-    for issue in series.issues:
-        if not issue.downloaded:
-            continue
-        if not issue.file_path or not Path(issue.file_path).is_file():
-            issue.downloaded = False
-            issue.file_path = ""
-            issue.file_source = ""
-            issue.file_download_id = None
-            missing += 1
+    for issue in missing_issues:
+        issue.downloaded = False
+        issue.file_path = ""
+        issue.file_source = ""
+        issue.file_download_id = None
+        missing += 1
     if missing:
         await session.commit()
         log.info("Marked %d missing file(s) for %r", missing, series.title)
@@ -268,7 +300,12 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
         if found:
             series.folder_name = found
             folders = resolve_folders(root, series, extras)
-    await scan_series_async(series, list(series.issues), folders)
+    result = await scan_series_async(
+        series, list(series.issues), folders, root=root,
+        expect_content=await root_expects_content(session, series),
+    )
+    if result.root_unavailable:
+        raise LibraryUnavailableError(result.root_unavailable)
     await session.commit()
 
 
@@ -583,6 +620,8 @@ def _quarantine_payload(payload_dir: Path, values: dict[str, str], download_id: 
 
 
 def _download_error_code(exc: Exception) -> str:
+    if isinstance(exc, LibraryUnavailableError):
+        return "library_unavailable"
     if isinstance(exc, DownloadCancelled):
         return "cancelled"
     if isinstance(exc, TimeoutError):
@@ -705,6 +744,17 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
         await session.commit()
         return
 
+    unavailable = await library_root_unavailable(session, series)
+    if unavailable:
+        await _record_direct_failure(
+            session, dl, series, issue, LibraryUnavailableError(unavailable), values,
+        )
+        return
+    expect_content = await root_expects_content(session, series)
+
+    def check_library() -> None:
+        require_root_available(Path(root), expect_content)
+
     dl.status = DownloadStatus.DOWNLOADING
     dl.attempt_count += 1
     dl.progress = 0.0
@@ -727,6 +777,7 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
             await session.commit()
 
     def should_cancel() -> bool:
+        check_library()
         return _is_cancelled(dl.id)
 
     payload_dir: Path | None = None
@@ -741,6 +792,7 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
             dl.error = dl.error or "removed by user"
             await session.commit()
             return
+        check_library()
         dl.status = DownloadStatus.IMPORTING
         await session.commit()
         if issue is not None and values.get("metron_enabled") == "true" and metron.enabled:
@@ -754,12 +806,17 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
         imported = await _import_download_payload(dl.id,
             payload_dir, series, list(series.issues), Path(root),
             values["naming_template"], force_issue=issue, move=True,
+            check_library=check_library,
         )
     except DownloadCancelled as exc:
         await _record_direct_failure(session, dl, series, issue, exc, values)
         return
     except Exception as exc:
         log.exception("DDL download %d failed", dl.id)
+        if isinstance(exc, OSError):
+            reason = root_unavailable(Path(root), expect_content)
+            if reason:
+                exc = LibraryUnavailableError(reason)
         code = _download_error_code(exc)
         if payload_dir is not None and code in {"import_collision", "invalid_archive"}:
             try:
@@ -818,6 +875,52 @@ def _mark_imported(series: Series, imported: list, download: Download | None = N
 
 # --------------------------------------------------------------- qbt sync
 
+SYNCED_TORRENT_STATUSES = (
+    DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING, DownloadStatus.IMPORTING,
+)
+
+
+async def _update_if_still_synced(session: AsyncSession, dl: Download, **values) -> bool:
+    """Commit a status transition only if the torrent is still in the queue.
+
+    qBittorrent calls yield while the API can remove this download in another
+    session. Check and write in one UPDATE so the stale ORM row cannot undo a
+    removal that committed first.
+    """
+    result = await session.execute(
+        update(Download)
+        .where(Download.id == dl.id, Download.status.in_(SYNCED_TORRENT_STATUSES))
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    if result.rowcount != 1:
+        return False
+    # Keep subsequent ORM writes diffed against the committed transition.
+    await session.refresh(dl, list(values))
+    return True
+
+
+def _torrent_files(save_path: str, names: list[str]) -> list[Path]:
+    """Resolve qBittorrent's relative file names without escaping its save path."""
+    if not names:
+        raise ValueError("torrent has no files selected for import")
+    if not save_path or not Path(save_path).is_absolute():
+        raise ValueError("torrent has no absolute save path; cannot scope its files safely")
+    root = Path(save_path).resolve()
+    files = []
+    for name in names:
+        relative = PurePosixPath(name)
+        if (not name or relative.is_absolute() or ".." in relative.parts
+                or "\\" in name or PureWindowsPath(name).drive):
+            raise ValueError("torrent file list contains an unsafe path")
+        path = root.joinpath(*relative.parts).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError("torrent file list escapes its save path")
+        files.append(path)
+    return files
+
+
 async def sync_qbittorrent() -> None:
     async with session_scope() as session:
         values = await registry.apply_settings(session)
@@ -826,8 +929,7 @@ async def sync_qbittorrent() -> None:
         result = await session.execute(
             select(Download).where(
                 Download.kind == DownloadKind.TORRENT,
-                Download.status.in_([DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING,
-                                     DownloadStatus.IMPORTING]),
+                Download.status.in_(SYNCED_TORRENT_STATUSES),
             )
         )
         downloads = result.scalars().all()
@@ -851,9 +953,31 @@ async def sync_qbittorrent() -> None:
                     continue
                 dl.progress = torrent.progress
                 if torrent.is_complete and torrent.content_path:
-                    dl.status = DownloadStatus.IMPORTING
-                    await session.commit()
-                    await _import_torrent(session, dl, Path(torrent.content_path), values)
+                    try:
+                        files = _torrent_files(
+                            torrent.save_path, await client.torrent_files(dl.torrent_hash),
+                        )
+                    except QbtError as exc:
+                        await _update_if_still_synced(
+                            session, dl, status=DownloadStatus.DOWNLOADING,
+                            error=f"waiting for torrent file list: {exc}",
+                        )
+                        continue
+                    except ValueError as exc:
+                        await _update_if_still_synced(
+                            session, dl, status=DownloadStatus.FAILED,
+                            error=str(exc)[:500], error_code="invalid_payload",
+                        )
+                        continue
+                    if not await _update_if_still_synced(
+                        session, dl, status=DownloadStatus.IMPORTING,
+                    ):
+                        log.info("torrent download %d left the queue during sync; "
+                                 "not importing it", dl.id)
+                        continue
+                    await _import_torrent(
+                        session, dl, Path(torrent.content_path), values, files=files,
+                    )
                 else:
                     await session.commit()
         finally:
@@ -861,7 +985,8 @@ async def sync_qbittorrent() -> None:
 
 
 async def _import_torrent(
-    session: AsyncSession, dl: Download, content_path: Path, values: dict[str, str]
+    session: AsyncSession, dl: Download, content_path: Path, values: dict[str, str],
+    *, files: list[Path] | None = None,
 ) -> None:
     series = await _load_series(session, dl.series_id) if dl.series_id else None
     if series is None or not series.root_folder:
@@ -869,6 +994,14 @@ async def _import_torrent(
         dl.error = "torrent has no linked series/root folder; import manually"
         await session.commit()
         return
+    unavailable = await library_root_unavailable(session, series)
+    if unavailable:
+        dl.status = DownloadStatus.DOWNLOADING
+        dl.error = f"waiting for the library: {unavailable}"[:500]
+        dl.error_code = "library_unavailable"
+        await session.commit()
+        return
+    expect_content = await root_expects_content(session, series)
     if not content_path.exists():
         # path as seen by qBittorrent may not be mounted here yet
         dl.error = f"content path not found: {content_path}"
@@ -879,15 +1012,42 @@ async def _import_torrent(
             content_path, series, list(series.issues), Path(series.root_folder.path),
             values["naming_template"],
             force_issue=next((i for i in series.issues if i.id == dl.issue_id), None),
+            files=files,
+            check_library=lambda: require_root_available(
+                Path(series.root_folder.path), expect_content,
+            ),
         )
+    except LibraryUnavailableError as exc:
+        dl.status = DownloadStatus.DOWNLOADING
+        dl.error = f"waiting for the library: {exc}"[:500]
+        dl.error_code = "library_unavailable"
+        await session.commit()
+        return
     except Exception as exc:
+        reason = (root_unavailable(Path(series.root_folder.path), expect_content)
+                  if isinstance(exc, OSError) else "")
+        if reason:
+            dl.status = DownloadStatus.DOWNLOADING
+            dl.error = f"waiting for the library: {reason}"[:500]
+            dl.error_code = "library_unavailable"
+            await session.commit()
+            return
+        if isinstance(exc, FileNotFoundError):
+            dl.status = DownloadStatus.DOWNLOADING
+            dl.error = f"torrent content moved during import; retrying: {exc}"[:500]
+            dl.error_code = "content_unavailable"
+            await session.commit()
+            return
         log.exception("torrent import %d failed", dl.id)
         dl.status = DownloadStatus.FAILED
         dl.error = str(exc)[:500]
+        dl.error_code = _download_error_code(exc)
         await session.commit()
         return
     covered_count = _mark_imported(series, imported, dl)
     dl.status = DownloadStatus.DONE if covered_count else DownloadStatus.NEEDS_ATTENTION
+    dl.error = ""
+    dl.error_code = ""
     dl.progress = 1.0
     session.add(HistoryEvent(
         series_id=series.id,
@@ -941,6 +1101,10 @@ async def grab_missing_issues(
     recurring monitor keeps the default so its hourly footprint stays small,
     while explicit one-time searches pass None to hunt every missing issue
     (still paced by the source's rate limiter)."""
+    reason = await library_root_unavailable(session, series)
+    if reason:
+        log.warning("Not grabbing for %r: %s", series.title, reason)
+        return 0
     if only_monitored and not series.monitored:
         return 0
     # active downloads for this series → don't double-grab
@@ -983,7 +1147,8 @@ async def grab_missing_issues(
     cooldown = datetime.now(timezone.utc) - timedelta(hours=24)
     suppressed = [
         dl for dl in failed_downloads
-        if dl.blocked or (dl.updated_at is not None and dl.updated_at >= cooldown)
+        if dl.blocked or (dl.error_code != "library_unavailable" and
+                          dl.updated_at is not None and dl.updated_at >= cooldown)
     ]
     failed_releases = {(dl.source_name, dl.payload) for dl in suppressed if dl.payload}
 

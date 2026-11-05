@@ -5,9 +5,14 @@ CBR (rar) can't be rewritten without rar tooling and is left untouched."""
 
 import shutil
 import zipfile
+import zlib
 from pathlib import Path
 from xml.dom import minidom
 from xml.etree.ElementTree import Element, ParseError, SubElement, fromstring, tostring
+
+
+# Plenty for ordinary metadata, independent of the archive's compressed size.
+MAX_COMICINFO_BYTES = 1024 * 1024
 
 
 def build_comicinfo(
@@ -115,15 +120,31 @@ def inject_comicinfo(archive: Path, comicinfo_xml: str) -> bool:
         raise
 
 
-def read_comicinfo(archive: Path) -> str | None:
+def read_comicinfo_bytes(archive: Path) -> bytes | None:
+    """ComicInfo.xml's raw bytes, or None when missing or unsafe to read.
+    Archives are untrusted, and this runs on every file of every scan."""
     try:
         with zipfile.ZipFile(archive) as zf:
-            name = next((n for n in zf.namelist() if n.lower() == "comicinfo.xml"), None)
-            if name is None:
+            member = next((i for i in zf.infolist() if i.filename.lower() == "comicinfo.xml"), None)
+            # zipfile's BZIP2/LZMA readers can allocate unbounded decompressed
+            # output before applying read(n), unlike STORED/DEFLATED. Ignore
+            # metadata using those methods, even if the declared size is small.
+            if (member is None or member.file_size > MAX_COMICINFO_BYTES
+                    or member.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}):
                 return None
-            return zf.read(name).decode("utf-8-sig", errors="replace")
-    except (zipfile.BadZipFile, OSError, KeyError):
+            # Pass the actual ZipInfo (duplicate names must not change which
+            # entry was checked), and bound decompression even for bad headers.
+            with zf.open(member) as stream:
+                data = stream.read(MAX_COMICINFO_BYTES + 1)
+    except (OSError, KeyError, ValueError, RuntimeError, EOFError,
+            zipfile.BadZipFile, zlib.error):
         return None
+    return None if len(data) > MAX_COMICINFO_BYTES else data
+
+
+def read_comicinfo(archive: Path) -> str | None:
+    data = read_comicinfo_bytes(archive)
+    return None if data is None else data.decode("utf-8-sig", errors="replace")
 
 
 def merge_comicinfo(existing_xml: str | None, pullarr_xml: str) -> str:

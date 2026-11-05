@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from .. import USER_AGENT
-from ..util import RateLimiter, rl_request
+from ..util import RateLimiter, raise_for_status_redacted, rl_request
 from .base import IssueMetadata, MetadataProvider, SeriesMetadata
 
 log = logging.getLogger(__name__)
@@ -117,11 +117,14 @@ class ComicVineProvider(MetadataProvider):
             raise ComicVineError(
                 "ComicVine API key not configured (Settings → Metadata)"
             )
-        resp = await rl_request(
-            self._client, "GET", f"{API_URL}/{path}/", limiter=_limiter,
-            params={"api_key": self._api_key, "format": "json", **params},
-        )
-        resp.raise_for_status()
+        try:
+            resp = await rl_request(
+                self._client, "GET", f"{API_URL}/{path}/", limiter=_limiter,
+                params={"api_key": self._api_key, "format": "json", **params},
+            )
+        except httpx.TransportError:
+            raise ComicVineError("Cannot reach ComicVine") from None
+        raise_for_status_redacted(resp, "ComicVine")
         data = resp.json()
         if data.get("status_code") != 1:
             raise ComicVineError(f"ComicVine error: {data.get('error', 'unknown')}")

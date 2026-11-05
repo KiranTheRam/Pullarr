@@ -29,6 +29,7 @@ class ScanResult:
     volume_files: int = 0  # whole-volume archives found
     cleared: int = 0  # issues whose recorded file vanished
     unmatched: list[MediaFile] = field(default_factory=list)
+    root_unavailable: str = ""
 
     @property
     def unmatched_count(self) -> int:
@@ -37,6 +38,35 @@ class ScanResult:
 
 def series_dir(root: Path, series: Series) -> Path:
     return root / (series.folder_name or series_folder(series.title, series.year))
+
+
+class LibraryUnavailableError(RuntimeError):
+    """The configured library cannot currently be trusted for reads or writes."""
+
+
+def root_unavailable(root: Path, expect_content: bool = True) -> str:
+    """Missing/unreadable roots and unexpectedly empty mount points are unsafe.
+
+    Empty roots are valid for a new library. Once any series owns files in the
+    root, an empty directory is more likely an unmounted share than deletion.
+    """
+    root = Path(root)
+    try:
+        if not root.is_dir():
+            return f"library root folder {root} is missing — is it mounted?"
+        # List even brand-new roots to detect unreadable shares.
+        first = next(root.iterdir(), None)
+        if expect_content and first is None:
+            return f"library root folder {root} is empty — is it mounted?"
+    except OSError as exc:
+        return f"library root folder {root} can't be read: {exc}"
+    return ""
+
+
+def require_root_available(root: Path, expect_content: bool = True) -> None:
+    reason = root_unavailable(root, expect_content)
+    if reason:
+        raise LibraryUnavailableError(reason)
 
 
 def resolve_folders(root: Path, series: Series, extra_paths: list[str]) -> list[Path]:
@@ -95,7 +125,28 @@ def find_existing_folder(root: Path, series: Series, max_depth: int = 3) -> str 
     return best
 
 
-def scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> ScanResult:
+def scan_series(
+    series: Series, issues: list[Issue], folders: list[Path],
+    root: Path | None = None, expect_content: bool | None = None,
+) -> ScanResult:
+    """Apply a scan only while its root remains available, including at the end."""
+    if root is None:
+        return _scan_series(series, issues, folders)
+    if expect_content is None:
+        expect_content = any(issue.downloaded for issue in issues)
+    reason = root_unavailable(root, expect_content)
+    if reason:
+        return ScanResult(root_unavailable=reason)
+    copies = copy_issues(issues)
+    result = _scan_series(series, copies, folders)
+    reason = root_unavailable(root, expect_content)
+    if reason:
+        return ScanResult(root_unavailable=reason)
+    apply_file_state(issues, copies)
+    return result
+
+
+def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> ScanResult:
     """Mark issues present across `folders` as downloaded (in place)."""
     folders = [Path(f) for f in folders]
     result = ScanResult()
@@ -129,8 +180,10 @@ def scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sca
             issue.file_path = path_str
         owned_now.add(issue.id)
 
-    # whole-volume archives fill in any issues not already covered exactly
-    for mf in match.matched:
+    # Explicit issue spans take precedence over edition-dependent volume maps.
+    # When the previous file vanished, adopt the surviving bundle immediately.
+    bundles = sorted(match.matched, key=lambda m: m.media.issue_range is None)
+    for mf in bundles:
         if mf.issue is not None:
             continue
         if mf.volume is not None:
@@ -139,12 +192,13 @@ def scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sca
         for issue in mf.covered_issues:
             if issue.id in owned_now:
                 continue
-            if not issue.downloaded or not issue.file_path:
+            if not issue.downloaded or issue.file_path != path_str:
+                newly_owned = not issue.downloaded
                 issue.downloaded = True
                 issue.file_path = path_str
                 issue.file_source = ""
                 issue.file_download_id = None
-                result.matched_issues += 1
+                result.matched_issues += int(newly_owned)
             owned_now.add(issue.id)
 
     result.unmatched = match.unmatched
@@ -156,10 +210,13 @@ def scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sca
     return result
 
 
-async def scan_series_async(series: Series, issues: list[Issue], folders: list[Path]) -> ScanResult:
+async def scan_series_async(
+    series: Series, issues: list[Issue], folders: list[Path],
+    root: Path | None = None, expect_content: bool | None = None,
+) -> ScanResult:
     """Scan detached values in a worker; update session-owned rows on its loop."""
     copies = copy_issues(issues)
-    result = await run_library_work(scan_series, Series(title=series.title), copies, folders)
+    result = await run_library_work(scan_series, Series(title=series.title), copies, folders, root, expect_content)
     apply_file_state(issues, copies)
     return result
 

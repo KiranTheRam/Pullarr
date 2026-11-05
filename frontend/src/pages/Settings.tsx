@@ -20,7 +20,7 @@ function TorznabSettings({ form, setForm }: { form: SettingsType; setForm: (valu
   const update = (next: TorznabConfig[]) => setForm({ ...form, torznab_indexers: JSON.stringify(next) });
   return <div className="settings-section">
     <h3>Torznab indexers</h3>
-    <p className="section-hint">Add a Torznab API URL from Prowlarr or another torrent indexer. Enable qBittorrent below to search and download releases.</p>
+    <p className="section-hint">Add a Torznab API URL from Prowlarr or another torrent indexer. Enable qBittorrent below to search and download releases. Re-enter an indexer's API key after changing its URL.</p>
     {entries.map((entry, index) => {
       const set = (patch: Partial<TorznabConfig>) => update(entries.map((item, i) => i === index ? { ...item, ...patch } : item));
       return <fieldset key={entry.id} style={{ marginBottom: 16 }}>
@@ -332,6 +332,7 @@ function KavitaSettings({
       <p className="section-hint">
         Trigger a Kavita scan after issues are imported so new downloads appear in the reader
         right away. Create an API key in Kavita under Settings → Account → API Key.
+        Re-enter the API key after changing the URL, before testing or saving.
       </p>
       <div className="form-row">
         <label>Enabled</label>
@@ -625,7 +626,8 @@ export default function Settings() {
           <h3>Download Client — qBittorrent (optional)</h3>
           <p className="section-hint">
             Torrent releases are sent to qBittorrent and imported when complete. Not needed
-            for GetComics direct downloads.
+            for GetComics direct downloads. Re-enter the password after changing the URL or
+            username, before testing or saving.
           </p>
           <div className="form-row">
             <label>Enabled</label>
@@ -674,6 +676,7 @@ export default function Settings() {
             Notify a request manager (e.g. NextPanel) whenever issues are imported, so requests
             flip to Available instantly. Point the URL at NextPanel's
             /api/v1/webhooks/pullarr endpoint and paste the same webhook secret configured there.
+            Re-enter the secret after changing the URL, before testing or saving.
           </p>
           <div className="form-row">
             <label>Enabled</label>

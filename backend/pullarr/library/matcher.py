@@ -7,16 +7,14 @@ never opens or writes files."""
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
-import zipfile
 from xml.etree.ElementTree import ParseError, fromstring
 
+from ..download.cbz import read_comicinfo_bytes
+from ..filename import FilenameCoverage, parse_filename
 from ..models import Issue
 from ..util import (
-    has_issue_marker,
     normalize_title,
     parse_issue_number,
-    parse_issue_range,
-    parse_volume_number,
 )
 
 ARCHIVE_EXTS = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z"}
@@ -34,6 +32,8 @@ class MediaFile:
     metadata_series: str = ""
     metadata_number: str = ""
     metadata_volume: int | None = None
+    coverage: FilenameCoverage | None = None
+    volume_range: tuple[int, int] | None = None
 
     @property
     def label(self) -> str:
@@ -59,22 +59,25 @@ def _name_source(path: Path, is_dir: bool) -> str:
     return path.name if is_dir else path.stem
 
 
-def find_media_files(content_path: Path) -> list[MediaFile]:
+def find_media_files(content_path: Path, files: list[Path] | None = None) -> list[MediaFile]:
     """Archives anywhere under content_path, plus directories that directly
-    hold loose images. Non-media files (json sidecars, etc.) are ignored."""
+    hold loose images. When files is supplied, inspect only those paths rather
+    than walking the containing folder. Non-media sidecars are ignored."""
     content_path = Path(content_path)
     media: list[MediaFile] = []
 
-    if content_path.is_file():
+    if files is None and content_path.is_file():
         if content_path.suffix.lower() in ARCHIVE_EXTS:
             media.append(_media_of(content_path, is_dir=False))
         return media
 
-    if not content_path.is_dir():
+    if files is None and not content_path.is_dir():
         return media
 
     image_dirs: set[Path] = set()
-    for p in sorted(content_path.rglob("*")):
+    for p in sorted(set(files) if files is not None else content_path.rglob("*")):
+        if files is not None and p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS and not p.is_file():
+            raise FileNotFoundError(f"torrent media file not found: {p}")
         if not p.is_file():
             continue
         suffix = p.suffix.lower()
@@ -91,47 +94,42 @@ def find_media_files(content_path: Path) -> list[MediaFile]:
 def _media_of(path: Path, is_dir: bool) -> MediaFile:
     text = _name_source(path, is_dir)
     metadata_series, metadata_number, metadata_volume = _comicinfo_identity(path, is_dir)
-    volume = parse_volume_number(text)
-    issue = parse_issue_number(text)
-    if metadata_volume is not None:
-        volume = metadata_volume
-    if metadata_number:
-        try:
-            issue = float(metadata_number)
-        except ValueError:
-            parsed_metadata = parse_issue_number(f"#{metadata_number}")
-            if parsed_metadata is not None:
-                issue = parsed_metadata
-    # a multi-issue bundle ("#1-3" / "001-003") covers a span of issues, not a
-    # single one — detect it first so the trailing number isn't read as one issue
-    issue_range = parse_issue_range(text)
-    if metadata_number:
-        issue_range = None
-    if issue_range is not None:
-        issue = None
-    # a bare volume name ("Volume 01", "v40 (2019)") has no explicit issue
-    # token, so its trailing number is the volume, not a issue
-    elif (not metadata_number and volume is not None and issue is not None
-          and not has_issue_marker(text)):
-        issue = None
+    coverage = parse_filename(text)
+    volume = coverage.volume_number
+    issue = coverage.issue_number
+    issue_range = (coverage.issue if coverage.issue and coverage.issue[0] != coverage.issue[1]
+                   and not coverage.ambiguous else None)
+    volume_range = (coverage.volume if coverage.volume and coverage.volume[0] != coverage.volume[1]
+                    and not coverage.ambiguous else None)
+    # A single ComicInfo Number often describes only the first issue of a
+    # collection. It cannot narrow an explicit span or collected-volume name.
+    if not coverage.ambiguous and not coverage.is_range and not (coverage.volume and not coverage.issue):
+        if metadata_volume is not None:
+            volume = metadata_volume
+        if metadata_number:
+            try:
+                issue = float(metadata_number)
+            except ValueError:
+                parsed_metadata = parse_issue_number(f"#{metadata_number}")
+                if parsed_metadata is not None:
+                    issue = parsed_metadata
     return MediaFile(
         path=path, is_dir=is_dir, issue_number=issue,
         volume_number=volume, issue_range=issue_range,
         metadata_series=metadata_series, metadata_number=metadata_number,
-        metadata_volume=metadata_volume,
+        metadata_volume=metadata_volume, coverage=coverage, volume_range=volume_range,
     )
 
 
 def _comicinfo_identity(path: Path, is_dir: bool) -> tuple[str, str, int | None]:
     if is_dir or path.suffix.lower() not in {".cbz", ".zip"}:
         return "", "", None
+    data = read_comicinfo_bytes(path)
+    if data is None:
+        return "", "", None
     try:
-        with zipfile.ZipFile(path) as zf:
-            name = next((n for n in zf.namelist() if n.lower() == "comicinfo.xml"), None)
-            if name is None:
-                return "", "", None
-            root = fromstring(zf.read(name))
-    except (OSError, zipfile.BadZipFile, KeyError, ParseError):
+        root = fromstring(data)
+    except ParseError:
         return "", "", None
     series = (root.findtext("Series") or "").strip()
     number = (root.findtext("Number") or "").strip()
@@ -184,6 +182,9 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
     matched: list[MatchedFile] = []
     unmatched: list[MediaFile] = []
     for mf in media:
+        if mf.coverage and mf.coverage.ambiguous:
+            unmatched.append(mf)
+            continue
         issue = (
             _pick_issue(mf, by_number.get(mf.issue_number, []))
             if mf.issue_number is not None
@@ -196,6 +197,14 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
             # a multi-issue bundle covers every tracked issue in its span
             lo, hi = mf.issue_range
             covered = [c for c in issues if lo <= c.number <= hi and _plain_display_number(c)]
+            matched.append(MatchedFile(media=mf, issue=None, volume=None,
+                                       covered_issues=covered))
+        elif mf.issue_number is not None:
+            # An explicit issue that is not tracked is not a whole volume.
+            unmatched.append(mf)
+        elif mf.volume_range is not None:
+            lo, hi = mf.volume_range
+            covered = [c for c in issues if c.volume is not None and lo <= c.volume <= hi]
             matched.append(MatchedFile(media=mf, issue=None, volume=None,
                                        covered_issues=covered))
         elif mf.volume_number is not None and mf.volume_number in issues_in_volume:

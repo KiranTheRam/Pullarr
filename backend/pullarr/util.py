@@ -7,6 +7,8 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from .filename import parse_filename
+
 log = logging.getLogger(__name__)
 
 
@@ -97,6 +99,17 @@ async def rl_request(
     return resp  # type: ignore[return-value]
 
 
+def raise_for_status_redacted(resp: httpx.Response, service: str) -> None:
+    """raise_for_status without the request URL in the message: ComicVine,
+    Torznab and indexer download URLs carry API keys in their query strings,
+    and these exceptions end up in logs, job details, and API errors."""
+    if not resp.is_success:
+        raise httpx.HTTPStatusError(
+            f"{service} returned HTTP {resp.status_code}",
+            request=resp.request, response=resp,
+        )
+
+
 ILLEGAL_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -128,38 +141,18 @@ _MAX_RANGE_SPAN = 60  # sanity cap so garbage can't claim a huge span
 
 
 def has_issue_marker(text: str) -> bool:
-    """True when text has an explicit issue token (#/no./issue + number),
-    as opposed to a bare trailing number that might actually be a volume."""
-    return ISSUE_PREFIX_PATTERN.search(text) is not None
+    return parse_filename(text).explicit_issue
 
 
 def parse_issue_range(text: str) -> tuple[float, float] | None:
-    """A multi-issue span like "#1-3" / "001-003" → (1.0, 3.0). Returns None
-    for single issues, TPBs, and volume ranges ("Vol. 1-3")."""
-    stripped = BRACKET_GROUPS.sub(" ", text)
-    for m in ISSUE_RANGE_PATTERN.finditer(stripped):
-        pre = stripped[max(0, m.start() - 7):m.start()].lower().rstrip()
-        if pre.endswith(("v", "vol", "vol.", "volume")):
-            continue  # a collected-volume range, not an issue range
-        start, end = int(m.group(1)), int(m.group(2))
-        if end > start and end - start <= _MAX_RANGE_SPAN:
-            return float(start), float(end)
+    coverage = parse_filename(text)
+    if not coverage.ambiguous and coverage.issue and coverage.issue[0] != coverage.issue[1]:
+        return coverage.issue
     return None
 
 
 def parse_issue_number(text: str) -> float | None:
-    m = ISSUE_PREFIX_PATTERN.search(text)
-    if m:
-        return float(m.group(1))
-    # scene-style names bury the issue number before tag groups:
-    # "Absolute_Batman_015_(2026)_(Webrip)_(DCP)" → strip (…)/[…] and
-    # underscores, then the issue is the trailing number
-    stripped = BRACKET_GROUPS.sub(" ", text)
-    stripped = re.sub(r"[_\s]+", " ", stripped).strip()
-    m = TRAILING_NUMBER_PATTERN.search(stripped)
-    if m:
-        return float(m.group(1))
-    return None
+    return parse_filename(text).issue_number
 
 
 # Same marker forms as ISSUE_PREFIX_PATTERN but keeping a variant suffix
@@ -244,13 +237,7 @@ def release_covers_issue(release, issue, series=None) -> bool:
 
 
 def parse_volume_number(text: str) -> int | None:
-    m = VOLUME_PATTERN.search(text)
-    if m:
-        try:
-            return int(m.group(1))
-        except ValueError:
-            return None
-    return None
+    return parse_filename(text).volume_number
 
 
 def parse_year(text: str) -> int | None:

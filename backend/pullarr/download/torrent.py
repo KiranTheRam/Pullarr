@@ -3,6 +3,8 @@ import hashlib
 
 import httpx
 
+from ..util import raise_for_status_redacted
+
 MAX_TORRENT_SIZE = 10_000_000
 
 
@@ -66,7 +68,7 @@ async def fetch_torrent(url: str) -> tuple[str, str, bytes | None]:
                 if response.is_redirect:
                     url = str(response.url.join(response.headers["location"]))
                     continue
-                response.raise_for_status()
+                raise_for_status_redacted(response, "Torrent indexer")
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     data.extend(chunk)

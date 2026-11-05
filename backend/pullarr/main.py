@@ -12,16 +12,26 @@ from .config import config
 from .db import init_db
 from .frontend import install_frontend
 from .jobs import scheduler
+from .security import access_boundary
 
 logging.basicConfig(
     level=config.log_level,
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 )
+# HTTP client request URLs can carry integration credentials: ComicVine, Torznab
+# and Kavita all take their API key as a query parameter.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("pullarr")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not config.auth_username:
+        log.warning(
+            "Browser login is disabled; reachable clients can obtain API access. "
+            "Set PULLARR_AUTH_USERNAME and PULLARR_AUTH_PASSWORD to enable login."
+        )
     await init_db()
     await scheduler.start()
     log.info("Pullarr %s ready on %s:%d", __version__, config.host, config.port)
@@ -30,6 +40,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Pullarr", version=__version__, lifespan=lifespan)
+app.middleware("http")(access_boundary)
 
 api = FastAPI(dependencies=[Depends(require_api_key)])
 api.include_router(library_editor.router)
@@ -48,8 +59,7 @@ app.mount("/api/v1", api)
 
 @app.get("/initialize.json")
 async def initialize():
-    """Bootstrap info for the web UI (same-origin only), mirroring how the
-    *arr apps hand their UI the API key."""
+    """Browser bootstrap, protected by the optional browser login and Host check."""
     return JSONResponse(
         {"apiKey": get_api_key(), "version": __version__, "urlBase": ""},
         headers={"Cache-Control": "no-store"},

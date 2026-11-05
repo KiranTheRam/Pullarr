@@ -30,7 +30,7 @@ initClient()
     const wrap = document.createElement("div");
     wrap.style.cssText = "padding:40px;font-family:sans-serif;color:#e1e2e6";
     const title = document.createElement("h2");
-    title.textContent = "Pullarr backend unreachable";
+    title.textContent = "Pullarr could not start";
     const message = document.createElement("p");
     message.textContent = err.message;
     wrap.append(title, message);

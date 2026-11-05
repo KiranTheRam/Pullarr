@@ -76,6 +76,14 @@ def _root_of(series: Series) -> Path:
     return Path(series.root_folder.path)
 
 
+async def _require_root_available(session: AsyncSession, series: Series) -> None:
+    from ..jobs.tasks import library_root_unavailable
+
+    reason = await library_root_unavailable(session, series)
+    if reason:
+        raise HTTPException(409, reason)
+
+
 def _folders_of(series: Series) -> list[Path]:
     """Primary folder plus any extra folders configured for the series."""
     return resolve_folders(_root_of(series), series, [f.path for f in series.extra_folders])
@@ -86,6 +94,7 @@ def _folders_of(series: Series) -> list[Path]:
 @router.post("/series/{series_id}/scan", response_model=ScanResultOut)
 async def scan(series_id: int, session: AsyncSession = Depends(get_session)):
     series = await _load(session, series_id)
+    await _require_root_available(session, series)
     root = _root_of(series)
     folders = _folders_of(series)
     # adopt a matching folder if the primary one doesn't exist yet
@@ -94,7 +103,14 @@ async def scan(series_id: int, session: AsyncSession = Depends(get_session)):
         if found:
             series.folder_name = found
             folders = _folders_of(series)
-    result = await scan_series_async(series, list(series.issues), folders)
+    from ..jobs.tasks import root_expects_content
+
+    result = await scan_series_async(
+        series, list(series.issues), folders, root=root,
+        expect_content=await root_expects_content(session, series),
+    )
+    if result.root_unavailable:
+        raise HTTPException(409, result.root_unavailable)
     await session.commit()
     return ScanResultOut(
         folder=", ".join(str(f) for f in folders),
@@ -349,7 +365,9 @@ async def source_search(
     try:
         candidates = await src.search_series(query)
     except Exception as exc:
-        raise HTTPException(502, f"{source_name} search failed: {exc}") from exc
+        from .search import _source_error
+
+        raise HTTPException(502, _source_error(source_name, exc)) from None
     return [
         SourceCandidateOut(source_name=source_name, external_id=c.external_id,
                            title=c.title, url=c.url, alt_titles=c.alt_titles)
@@ -396,6 +414,7 @@ async def resync_issues(series_id: int, session: AsyncSession = Depends(get_sess
     from ..models import Download, HistoryEvent
 
     series = await _load(session, series_id)
+    await _require_root_available(session, series)
     await registry.apply_settings(session)
     await session.execute(sa_delete(Download).where(Download.series_id == series_id))
     await session.execute(sa_delete(HistoryEvent).where(HistoryEvent.series_id == series_id))
@@ -410,7 +429,14 @@ async def resync_issues(series_id: int, session: AsyncSession = Depends(get_sess
 
 
 async def _scan_now(session: AsyncSession, series: Series) -> int:
-    result = await scan_series_async(series, list(series.issues), _folders_of(series))
+    from ..jobs.tasks import root_expects_content
+
+    result = await scan_series_async(
+        series, list(series.issues), _folders_of(series), root=_root_of(series),
+        expect_content=await root_expects_content(session, series),
+    )
+    if result.root_unavailable:
+        raise HTTPException(409, result.root_unavailable)
     await session.commit()
     return result.matched_issues
 

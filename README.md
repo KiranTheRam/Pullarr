@@ -203,6 +203,9 @@ Environment variables (all optional):
 | ------------------- | ------- | ------------------------------------ |
 | `PULLARR_PORT`      | `6997`  | HTTP port                            |
 | `PULLARR_DATA_DIR`  | `data`  | SQLite DB, API key, DDL staging      |
+| `PULLARR_AUTH_USERNAME` | *(empty)* | Optional browser HTTP Basic login username |
+| `PULLARR_AUTH_PASSWORD` | *(empty)* | Browser login password; set together with the username |
+| `PULLARR_ALLOWED_HOSTS` | `[]` | Additional exact DNS names as a JSON array (no scheme, port or wildcard) |
 
 Everything else (ComicVine key, GetComics base URL/proxy, naming template,
 qBittorrent, monitor interval) lives in the UI under Settings and is stored
@@ -216,11 +219,38 @@ revoked independently.
 
 ### Access and VPN boundaries
 
-Pullarr has no built-in user login. Anyone who can reach `/initialize.json` can
-obtain the UI's API key. Keep the entire application on a trusted network or behind
-an authenticated reverse proxy, including `/initialize.json`, `/api/v1`, and the
-frontend routes. Named API keys are integration credentials, not a replacement
-for that access boundary.
+Browser login is opt-in: set both `PULLARR_AUTH_USERNAME` and
+`PULLARR_AUTH_PASSWORD`, then restart. The browser then asks for credentials
+before serving the UI or `/initialize.json`. Setting only one of them stops the
+app at startup rather than silently leaving login off. To recover access, change
+or remove both values and restart. Use HTTPS on a trusted reverse proxy when
+credentials cross the network, because Basic authentication does not encrypt them.
+With login disabled, anyone who can reach the app using an allowed Host can obtain
+the UI's API key from `/initialize.json`, and startup logs warn about this. Keep
+such an install on a trusted network or behind an authenticated reverse proxy.
+
+Host validation is always on, including for API clients. IP addresses and
+`localhost` work by default. **Before upgrading**, add every DNS name used by
+browsers, reverse proxies and integrations (such as NextPanel reaching Pullarr by
+its container name) to `PULLARR_ALLOWED_HOSTS`, for example
+`'["pullarr", "comics.example.com"]'`. Names match exactly, ignoring case. An
+unknown Host gets HTTP 400 with instructions, and direct IP access stays available
+for recovery. Proxies must preserve an allowed Host or set one explicitly.
+Host validation limits DNS rebinding; it is not a login.
+
+`X-Api-Key` clients and named API keys keep working without browser credentials.
+Browser credentials alone do not authenticate API calls, and API keys alone do not
+unlock the UI when login is enabled. Named API keys are integration credentials,
+not a replacement for this access boundary.
+
+Saved integration secrets are bound to the exact saved URL, including scheme, port
+and path, and the qBittorrent password also to the username. After changing one of
+those, re-enter the secret before **Test** or **Save**. Torznab API keys are bound
+to their indexer's URL the same way. HTTP client request logs are suppressed, even
+at `DEBUG`, and integration errors omit URLs and response bodies so they cannot
+expose credentials. ComicInfo metadata larger than 1 MiB, or compressed with
+anything other than ZIP STORED or DEFLATE, is ignored during matching and replaced
+on import; the archive's filename matching still applies.
 
 When VPN routing is required, keep the GetComics proxy configured for both
 searches and downloads. Mirror fallback uses the same proxy-aware client; proxy

@@ -8,9 +8,9 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..filename import parse_filename
 from ..models import Issue, Series
-from ..util import has_issue_marker, parse_volume_number
-from .naming import issue_filename, range_filename, volume_filename
+from .naming import issue_filename, range_filename, volume_filename, volume_range_filename
 
 log = logging.getLogger(__name__)
 
@@ -59,8 +59,19 @@ def plan_renames(
         # explicit issue marker) — not by how many issues happen to map to
         # it, so a "Vol. 3" archive that covers a single issue still gets a
         # volume name rather than an issue name
-        vol = parse_volume_number(stem)
-        if vol is not None and not has_issue_marker(stem):
+        coverage = parse_filename(stem)
+        if coverage.ambiguous:
+            continue  # A rename must not erase conflicting coverage labels.
+        vol = coverage.volume_number
+        if coverage.issue and coverage.issue[0] != coverage.issue[1]:
+            lo, hi = coverage.issue
+            desired = range_filename(series.title, lo, hi, series.year, ext=ext)
+            key = (1, lo, hi)
+        elif coverage.volume and coverage.volume[0] != coverage.volume[1] and not coverage.issue:
+            lo, hi = coverage.volume
+            desired = volume_range_filename(series.title, lo, hi, ext)
+            key = (0, float(lo), float(hi))
+        elif vol is not None and not coverage.issue:
             desired = volume_filename(series.title, vol, ext)
             key = (0, float(vol))
         elif len(batch) == 1:

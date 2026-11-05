@@ -6,7 +6,7 @@ import respx
 from fastapi import HTTPException
 
 from pullarr.api import queue
-from pullarr.download.qbittorrent import QbtClient
+from pullarr.download.qbittorrent import QbtClient, QbtError
 from pullarr.jobs import tasks
 from pullarr.schemas import GrabIn
 
@@ -51,7 +51,7 @@ async def test_ensure_category_conflict_edits():
 @respx.mock
 async def test_ensure_category_raises_on_server_error():
     respx.post(f"{BASE}/api/v2/torrents/createCategory").respond(500)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(QbtError):
         await client().ensure_category("pullarr", "/downloads/pullarr")
 
 

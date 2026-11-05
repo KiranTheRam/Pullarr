@@ -20,6 +20,21 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 MASK = "••••••••"
 
+# Exact matching includes scheme, port and base path: a reverse proxy can
+# route two paths on one host to entirely different services.
+SECRET_DESTINATIONS = {
+    "webhook_secret": ("webhook_url",),
+    "kavita_api_key": ("kavita_url",),
+    "qbittorrent_password": ("qbittorrent_url", "qbittorrent_username"),
+}
+
+
+def retained_secret(current: dict[str, str], key: str, destination: dict[str, str]) -> str:
+    """A saved secret, only if it is going back where it was entered for."""
+    if any(destination[k] != current.get(k, "") for k in SECRET_DESTINATIONS[key]):
+        raise HTTPException(422, f"Destination changed: re-enter {key} before testing or saving")
+    return current.get(key, "")
+
 
 @router.get("")
 async def get_settings(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
@@ -38,6 +53,11 @@ async def update_settings(
 ) -> dict[str, str]:
     # ignore masked secrets that the user did not change
     to_save = {k: v for k, v in body.items() if v != MASK}
+    current = await settings_service.get_all(session)
+    merged = {**current, **to_save}
+    for key, fields in SECRET_DESTINATIONS.items():
+        if current.get(key) and key not in to_save:
+            retained_secret(current, key, {k: merged[k] for k in fields})
     try:
         if "torznab_indexers" in to_save:
             from ..sources.torznab import restore_keys
@@ -62,7 +82,9 @@ async def update_settings(
 async def webhook_test(body: WebhookTestIn, session: AsyncSession = Depends(get_session)):
     secret = body.secret
     if secret == MASK:
-        secret = await settings_service.get(session, "webhook_secret")
+        secret = retained_secret(
+            await settings_service.get_all(session), "webhook_secret", {"webhook_url": body.url},
+        )
     ok = await notifications.send_webhook(
         body.url, secret, {"app": notifications.APP_NAME, "event": "test", "series_id": 0}
     )
@@ -75,7 +97,10 @@ async def webhook_test(body: WebhookTestIn, session: AsyncSession = Depends(get_
 async def qbt_test(body: QbtTestIn, session: AsyncSession = Depends(get_session)):
     password = body.password
     if password == MASK:
-        password = await settings_service.get(session, "qbittorrent_password")
+        password = retained_secret(
+            await settings_service.get_all(session), "qbittorrent_password",
+            {"qbittorrent_url": body.url, "qbittorrent_username": body.username},
+        )
     try:
         version = await test_connection(body.url, body.username, password)
     except QbtError as exc:
@@ -89,7 +114,9 @@ async def kavita_test(body: KavitaTestIn, session: AsyncSession = Depends(get_se
     offer real libraries to map root folders onto."""
     api_key = body.api_key
     if api_key == MASK or not api_key:
-        api_key = await settings_service.get(session, "kavita_api_key")
+        api_key = retained_secret(
+            await settings_service.get_all(session), "kavita_api_key", {"kavita_url": body.url},
+        )
     try:
         version, libraries = await kavita.test_connection(body.url, api_key)
     except kavita.KavitaError as exc:

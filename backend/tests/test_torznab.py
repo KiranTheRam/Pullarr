@@ -208,6 +208,7 @@ async def test_completed_torrent_imports_linked_issue_and_keeps_seeding_data(ses
     from pullarr.models import DownloadKind, DownloadStatus, RootFolder
 
     series, issue = await library(session)
+    (tmp_path / "library").mkdir()
     root = RootFolder(path=str(tmp_path / 'library'))
     session.add(root)
     await session.flush()

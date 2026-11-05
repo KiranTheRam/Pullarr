@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 
 from ..download.cbz import build_comicinfo, upsert_comicinfo
@@ -19,7 +20,8 @@ from ..download.archive import ImportValidationError, validate_archive
 from ..models import Issue, Series
 from ..util import normalize_title, strip_issue_suffix
 from .matcher import ARCHIVE_EXTS, IMAGE_EXTS, MediaFile, find_media_files, match_files
-from .naming import issue_filename, range_filename, series_folder, volume_filename
+from .naming import issue_filename, range_filename, series_folder, volume_filename, volume_range_filename
+from .scanner import require_root_available
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +131,52 @@ def _dest_ext(media: MediaFile) -> str:
     )
 
 
+def _preflight_destinations(
+    planned: list[tuple[MediaFile, Issue | None, int | None, list[Issue], Path]],
+    issues: list[Issue],
+    files: list[Path] | None,
+) -> None:
+    """Refuse an ambiguous destination before placing any part of the payload."""
+    holders: dict[Path, list[Issue]] = {}
+    for issue in issues:
+        if issue.file_path:
+            holders.setdefault(Path(issue.file_path).resolve(), []).append(issue)
+    claimed: set[Path] = set()
+    for media, issue, volume, covered, dest in planned:
+        key = dest.resolve()
+        if key in claimed:
+            raise ImportValidationError(
+                f"import collision: multiple payload files would both be saved as {dest.name}; "
+                "use a naming template that keeps issue numbers distinct"
+            )
+        claimed.add(key)
+        owners = covered or ([issue] if issue is not None else [])
+        for holder in holders.get(key, []):
+            if holder not in owners:
+                number = holder.display_number or f"{holder.number:g}"
+                raise ImportValidationError(
+                    f"import collision: {dest.name} already holds issue {number}; "
+                    "use a naming template that keeps issue numbers distinct"
+                )
+        if not dest.exists():
+            continue
+        if not dest.is_file():
+            raise ImportValidationError(f"import collision: {dest.name} is not a file")
+        if media.is_dir:
+            # Compare only the selected torrent pages, including when another
+            # torrent has pages in the same directory.
+            with tempfile.TemporaryDirectory(prefix="pullarr-preflight-") as tmp:
+                packed = Path(tmp) / "pages.cbz"
+                _pack_images(media.path, packed, files)
+                same = _content_hash(packed) == _content_hash(dest)
+        else:
+            same = _content_hash(media.path) == _content_hash(dest)
+        if not same:
+            raise ImportValidationError(
+                f"import collision: {dest.name} already exists with different content"
+            )
+
+
 def import_payload(
     content_path: Path,
     series: Series,
@@ -138,6 +186,8 @@ def import_payload(
     force_issue: Issue | None = None,
     move: bool = False,
     _pack_depth: int = 0,
+    check_library: Callable[[], None] | None = None,
+    files: list[Path] | None = None,
 ) -> list[ImportedFile]:
     """Copies (or, with move=True, moves) payload files into the library,
     named by convention. Returns an ImportedFile per placed file, each with the
@@ -146,13 +196,30 @@ def import_payload(
 
     force_issue: when the payload is a single file that matches nothing by
     name (the release was grabbed for a specific issue), import it as that
-    issue anyway."""
+    issue anyway. files restricts a torrent import to its explicitly listed
+    payload; loose-image directories are packed from those files only."""
+    library_root = Path(library_root)
+    if check_library is None:
+        expect_content = any(issue.downloaded for issue in issues)
+        check_library = lambda: require_root_available(library_root, expect_content)
+    check_library()
     folder = library_root / (
         series.folder_name or series_folder(series.title, series.year)
     )
-    folder.mkdir(parents=True, exist_ok=True)
+    # Create only children, never the configured mount point or its parents.
+    # A disappearance after the check must fail instead of rebuilding the root.
+    if library_root not in folder.parents:
+        raise ImportValidationError("invalid series folder outside library root")
+    missing = []
+    current = folder
+    while current != library_root and not current.exists():
+        missing.append(current)
+        current = current.parent
+    for child in reversed(missing):
+        check_library()
+        child.mkdir(exist_ok=True)
     imported: list[ImportedFile] = []
-    media_files = find_media_files(content_path)
+    media_files = find_media_files(content_path, files=files)
 
     # GetComics collection downloads are often an outer ZIP containing one
     # CBR/CBZ per issue. Expand that transport container before matching; it
@@ -170,12 +237,12 @@ def import_payload(
                 return import_payload(
                     expanded, series, issues, library_root, template,
                     force_issue=force_issue, move=move, _pack_depth=_pack_depth + 1,
+                    check_library=check_library,
                 )
 
     result = match_files(media_files, issues)
 
-    def place(media: MediaFile, issue: Issue | None, volume: int | None,
-              covered: list[Issue]) -> None:
+    def destination(media: MediaFile, issue: Issue | None, volume: int | None) -> Path:
         ext = _dest_ext(media)
         if issue is not None:
             dest_name = issue_filename(
@@ -185,22 +252,30 @@ def import_payload(
         elif media.issue_range is not None:
             lo, hi = media.issue_range
             dest_name = range_filename(series.title, lo, hi, series.year, ext=ext)
+        elif media.volume_range is not None:
+            lo, hi = media.volume_range
+            dest_name = volume_range_filename(series.title, lo, hi, ext)
         elif volume is not None:
             dest_name = volume_filename(series.title, volume, ext)
         else:
             dest_name = f"{series_folder(series.title, series.year)} - {media.path.stem}{ext}"
-        dest = folder / dest_name
+        return folder / dest_name
+
+    def place(media: MediaFile, issue: Issue | None, volume: int | None,
+              covered: list[Issue], dest: Path) -> None:
+        check_library()
         tmp = dest.with_suffix(dest.suffix + ".importing")
         tmp.unlink(missing_ok=True)
         moved = False
         try:
             if media.is_dir:
-                _pack_images(media.path, tmp)
+                _pack_images(media.path, tmp, files)
             elif move:
                 shutil.move(str(media.path), tmp)
                 moved = True
             else:
                 shutil.copy2(media.path, tmp)
+            check_library()
             validate_archive(tmp)
             status = "imported"
             if dest.exists():
@@ -212,6 +287,7 @@ def import_payload(
                         f"import collision: {dest.name} already exists with different content"
                     )
             else:
+                check_library()
                 tmp.replace(dest)
                 log.info("Imported %s -> %s", media.path.name, dest)
         except Exception:
@@ -220,6 +296,7 @@ def import_payload(
             else:
                 tmp.unlink(missing_ok=True)
             raise
+        check_library()
         _stamp_comicinfo(dest, series, issue, volume)
         imported.append(ImportedFile(dest=dest, issue=issue,
                                      volume=volume if issue is None else None,
@@ -244,9 +321,14 @@ def import_payload(
             claimed_issues.add(mf.issue.id)
         unique_matched.append(mf)
     matched = unique_matched
+    planned = []
     if (
         force_issue is not None
         and len(media_files) == 1
+        and not (media_files[0].coverage and (
+            media_files[0].coverage.ambiguous or media_files[0].coverage.is_range
+            or media_files[0].coverage.volume
+        ))
         # only when the single file matched nothing at all (no issue, no bundle
         # coverage) — a "#1-3" file that covers issues must NOT be forced to one
         and not any(mf.issue is not None or mf.covered_issues for mf in matched)
@@ -254,12 +336,16 @@ def import_payload(
         only = media_files[0]
         matched = [m for m in matched if m.media is not only]
         unmatched = [m for m in unmatched if m is not only]
-        place(only, force_issue, None, [force_issue])
+        planned.append((only, force_issue, None, [force_issue], destination(only, force_issue, None)))
 
     for mf in matched:
-        place(mf.media, mf.issue, mf.volume, mf.covered_issues)
+        planned.append((mf.media, mf.issue, mf.volume, mf.covered_issues,
+                        destination(mf.media, mf.issue, mf.volume)))
     for media in unmatched:
-        place(media, None, None, [])
+        planned.append((media, None, None, [], destination(media, None, None)))
+    _preflight_destinations(planned, issues, files)
+    for plan in planned:
+        place(*plan)
     return imported
 
 
@@ -304,9 +390,10 @@ def _stamp_comicinfo(dest: Path, series: Series, issue: Issue | None, volume: in
         log.warning("could not inject ComicInfo.xml into %s: %s", dest, exc)
 
 
-def _pack_images(img_dir: Path, dest: Path) -> None:
+def _pack_images(img_dir: Path, dest: Path, files: list[Path] | None = None) -> None:
     images = sorted(
-        p for p in img_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+        p for p in (files if files is not None else img_dir.iterdir())
+        if p.parent == img_dir and p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_STORED) as zf:
         for img in images:
