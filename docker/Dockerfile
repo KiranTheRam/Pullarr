@@ -17,13 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tool
 
 COPY backend/pyproject.toml backend/constraints.txt ./
 COPY backend/pullarr ./pullarr
-RUN pip install --no-cache-dir -c constraints.txt .
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -c constraints.txt .
 
 COPY --from=frontend /build/static ./static
 
 ENV PULLARR_DATA_DIR=/config \
     PULLARR_HOST=0.0.0.0 \
-    PULLARR_PORT=6997
+    PULLARR_PORT=6997 \
+    FORWARDED_ALLOW_IPS=""
 
 VOLUME ["/config", "/comics"]
 EXPOSE 6997

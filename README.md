@@ -203,31 +203,54 @@ Environment variables (all optional):
 | ------------------- | ------- | ------------------------------------ |
 | `PULLARR_PORT`      | `6997`  | HTTP port                            |
 | `PULLARR_DATA_DIR`  | `data`  | SQLite DB, API key, DDL staging      |
-| `PULLARR_AUTH_USERNAME` | *(empty)* | Optional browser HTTP Basic login username |
+| `PULLARR_AUTH_USERNAME` | *(empty)* | Optional environment-managed HTTP Basic login username |
 | `PULLARR_AUTH_PASSWORD` | *(empty)* | Browser login password; set together with the username |
+| `PULLARR_ALLOW_UNAUTHENTICATED_BROWSER` | `false` | Explicitly disable first-run login for an externally authenticated deployment |
 | `PULLARR_ALLOWED_HOSTS` | `[]` | Additional exact DNS names as a JSON array (no scheme, port or wildcard) |
 
 Everything else (ComicVine key, GetComics base URL/proxy, naming template,
 qBittorrent, monitor interval) lives in the UI under Settings and is stored
 in the DB.
 
-The web UI's API key is generated on first start at `<data dir>/api_key` and
-handed to the UI via `GET /initialize.json`. To give external clients (e.g.
-NextPanel or scripts) their own keys, create named keys under **Settings → API
-Keys**; any of them authenticates `/api/v1` calls via `X-Api-Key` and can be
-revoked independently.
+Existing bootstrap API keys at `<data dir>/api_key` keep working through
+`X-Api-Key`. Create independently revocable keys under **Settings → API Keys**
+for new integrations.
 
 ### Access and VPN boundaries
 
-Browser login is opt-in: set both `PULLARR_AUTH_USERNAME` and
-`PULLARR_AUTH_PASSWORD`, then restart. The browser then asks for credentials
-before serving the UI or `/initialize.json`. Setting only one of them stops the
-app at startup rather than silently leaving login off. To recover access, change
-or remove both values and restart. Use HTTPS on a trusted reverse proxy when
-credentials cross the network, because Basic authentication does not encrypt them.
-With login disabled, anyone who can reach the app using an allowed Host can obtain
-the UI's API key from `/initialize.json`, and startup logs warn about this. Keep
-such an install on a trusted network or behind an authenticated reverse proxy.
+On first use, including upgrades without configured credentials, open Pullarr on
+a trusted local network and create a username and password. The first visitor to
+submit setup creates the login. Passwords must contain 12–128 printable
+characters. Setup signs you in automatically; passwords are hashed with scrypt
+in a private `<data dir>/browser_login.json` file. Keep this file with the config
+volume across container upgrades. Existing library data, settings, and API keys
+are unchanged; no database migration is required.
+
+The browser uses a seven-day HttpOnly session cookie, without receiving the
+bootstrap API key. **Settings → Browser Security** provides password changes and
+sign-out. Changing or locally resetting the password invalidates every browser
+session while API keys keep working. Failed sign-ins are limited to five per
+client address per minute; concurrent password checks and tracked clients are
+bounded. Forwarded client addresses are ignored by default; configure
+`FORWARDED_ALLOW_IPS` only for a trusted reverse proxy. Clients behind that proxy
+share a limit unless trusted forwarding is configured.
+
+For forgotten credentials, the sign-in page shows local recovery instructions.
+Run `docker compose exec pullarr python -m pullarr.reset_password`, or in the
+Unraid container console run `python -m pullarr.reset_password`. For a direct
+Python installation, run the same module as the service user with the same data
+directory. The interactive command displays the retained username and prompts
+for a new password without echoing it. Do not delete the login file to reset a
+password: deletion reopens first-visitor setup.
+
+Existing environment-managed logins remain supported: set both
+`PULLARR_AUTH_USERNAME` and `PULLARR_AUTH_PASSWORD`, then restart. Setting only
+one stops startup. Recover those credentials by updating the environment and
+restarting. Use HTTPS on a trusted reverse proxy when credentials cross the
+network. An externally authenticated deployment can explicitly set
+`PULLARR_ALLOW_UNAUTHENTICATED_BROWSER=true` to skip setup when no login exists;
+anyone who reaches such an instance can obtain API access, and startup warns.
+This option does not override an existing app-managed or environment login.
 
 Host validation is always on, including for API clients. IP addresses and
 `localhost` work by default. **Before upgrading**, add every DNS name used by
@@ -239,13 +262,13 @@ for recovery. Proxies must preserve an allowed Host or set one explicitly.
 Host validation limits DNS rebinding; it is not a login.
 
 `X-Api-Key` clients and named API keys keep working without browser credentials.
-Browser credentials alone do not authenticate API calls, and API keys alone do not
-unlock the UI when login is enabled. Named API keys are integration credentials,
-not a replacement for this access boundary.
+App-managed browser sessions authenticate API requests with same-origin checks
+for writes. Environment-managed Basic credentials alone do not authenticate API
+calls. API keys do not unlock the browser UI.
 
 Saved integration secrets are bound to the exact saved URL, including scheme, port
-and path, and the qBittorrent password also to the username. After changing one of
-those, re-enter the secret before **Test** or **Save**. Torznab API keys are bound
+and path, and the qBittorrent password also to the username. The Metron password
+is bound to the saved Metron username. After changing one of those, re-enter the secret before **Test** or **Save**. Torznab API keys are bound
 to their indexer's URL the same way. HTTP client request logs are suppressed, even
 at `DEBUG`, and integration errors omit URLs and response bodies so they cannot
 expose credentials. ComicInfo metadata larger than 1 MiB, or compressed with

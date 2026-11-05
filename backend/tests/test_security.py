@@ -56,6 +56,7 @@ def client_for(app, host: str = "127.0.0.1:6997") -> httpx.AsyncClient:
 
 @pytest.fixture
 def no_login(monkeypatch):
+    monkeypatch.setattr(security.config, "allow_unauthenticated_browser", True)
     monkeypatch.setattr(security.config, "auth_username", "")
     monkeypatch.setattr(security.config, "auth_password", SecretStr(""))
     monkeypatch.setattr(security.config, "allowed_hosts", ["comics.example.com"])
@@ -389,3 +390,37 @@ def test_import_replaces_unsafe_comicinfo(tmp_path):
         assert [n for n in zf.namelist() if n.lower() == "comicinfo.xml"] == ["ComicInfo.xml"]
         assert zf.getinfo("ComicInfo.xml").compress_type == zipfile.ZIP_DEFLATED
     assert "New" in read_comicinfo(path)
+
+
+async def test_metron_saved_password_cannot_move_to_another_account(session, monkeypatch):
+    from pullarr.schemas import MetronTestIn
+    from pullarr.settings_service import set_many
+
+    await set_many(session, {"metron_username": "reader", "metron_password": "saved-password"})
+    def no_configure(*args):
+        raise AssertionError("Saved password left the app")
+    monkeypatch.setattr(settings_api.metron, "configure", no_configure)
+    with pytest.raises(HTTPException) as exc:
+        await settings_api.metron_test(MetronTestIn(username="different", password=MASK), session)
+    assert exc.value.status_code == 422
+    with pytest.raises(HTTPException) as exc:
+        await settings_api.update_settings({"metron_username": "different", "metron_password": MASK}, session)
+    assert exc.value.status_code == 422
+    assert (await get_all(session))["metron_username"] == "reader"
+
+
+async def test_metron_unchanged_account_reuses_saved_password(session, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from pullarr.schemas import MetronTestIn
+    from pullarr.settings_service import set_many
+
+    await set_many(session, {"metron_username": "reader", "metron_password": "saved-password"})
+    configure = Mock()
+    monkeypatch.setattr(settings_api.metron, "configure", configure)
+    monkeypatch.setattr(settings_api.metron, "test", AsyncMock(return_value={"ok": True}))
+    await settings_api.metron_test(MetronTestIn(username="reader", password=MASK), session)
+    configure.assert_called_once_with("reader", "saved-password")
+    await settings_api.update_settings({"metron_username": "reader", "metron_password": MASK}, session)
+    assert (await get_all(session))["metron_password"] == "saved-password"
+    await settings_api.update_settings({"metron_username": "different", "metron_password": "new-password"}, session)
+    assert (await get_all(session))["metron_username"] == "different"

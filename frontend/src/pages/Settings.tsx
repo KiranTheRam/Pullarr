@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api/client";
+import { api, browserAuthMode, updateBrowserLogin } from "../api/client";
 import type {
   ApiKey,
   KavitaTestResult,
@@ -38,6 +38,70 @@ function TorznabSettings({ form, setForm }: { form: SettingsType; setForm: (valu
     <div className="form-row"><label htmlFor="torrent-templates">Default query templates</label><textarea id="torrent-templates" value={form.torrent_query_templates ?? "{series} {issue}"} onChange={(e) => setForm({ ...form, torrent_query_templates: e.target.value })} /></div>
     <p className="section-hint">One variant per line. Tokens: {"{series}, {issue}, {year}"}; padding: {"{issue:03d}"}. Example: {"{series} Tome {issue}"} or {"{series} T{issue:02d}"}. Override these on a series page. Automatic grabs require the rendered title and issue query to match the release title.</p>
   </div>;
+}
+
+function BrowserSecurity({ dirty }: { dirty: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const mode = browserAuthMode();
+
+  async function submit(action: "password" | "logout", event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    const form = event?.currentTarget;
+    const fields = new URLSearchParams();
+    if (form) {
+      new FormData(form).forEach((value, name) => fields.set(name, String(value)));
+      if (fields.get("password") !== fields.get("confirmation")) {
+        setError("The new passwords do not match.");
+        return;
+      }
+    }
+    setError("");
+    setBusy(true);
+    try {
+      await updateBrowserLogin(action, form ? fields : undefined);
+      form?.reset();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not update the browser login.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="settings-section" aria-labelledby="browser-security-title">
+      <h3 id="browser-security-title">Browser Security</h3>
+      {mode === "managed" ? (
+        <>
+          <p className="section-hint">Changing your password signs out every browser session. API keys keep working.</p>
+          {dirty && <p className="section-hint">Save your other settings before changing your password or signing out.</p>}
+          {error && <p role="alert">{error}</p>}
+          <form onSubmit={(event) => void submit("password", event)}>
+            <div className="form-row">
+              <label htmlFor="browser-current-password">Current password</label>
+              <input id="browser-current-password" name="current" type="password" autoComplete="current-password" maxLength={256} required />
+            </div>
+            <div className="form-row">
+              <label htmlFor="browser-new-password">New password</label>
+              <input id="browser-new-password" name="password" type="password" autoComplete="new-password" minLength={12} maxLength={256} required />
+            </div>
+            <div className="form-row">
+              <label htmlFor="browser-confirm-password">Confirm new password</label>
+              <input id="browser-confirm-password" name="confirmation" type="password" autoComplete="new-password" minLength={12} maxLength={256} required />
+            </div>
+            <button className="btn primary" disabled={busy || dirty}>Change Password</button>{" "}
+            <button className="btn" type="button" disabled={busy || dirty} onClick={() => void submit("logout")}>Sign Out</button>
+          </form>
+        </>
+      ) : (
+        <p className="section-hint">
+          {mode === "environment"
+            ? "This login is managed by your deployment. Change the configured password and restart Pullarr."
+            : "Pullarr's browser login is disabled for this deployment."}
+        </p>
+      )}
+    </section>
+  );
 }
 
 function RootFolders() {
@@ -518,6 +582,7 @@ export default function Settings() {
         </button>
       </Toolbar>
       <div className="content">
+        <BrowserSecurity dirty={dirty} />
         <RootFolders />
         <ApiKeys />
         {save.isError && <div className="error-banner" role="alert">{(save.error as Error).message}</div>}

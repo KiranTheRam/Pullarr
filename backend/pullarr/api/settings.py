@@ -23,6 +23,7 @@ MASK = "••••••••"
 # Exact matching includes scheme, port and base path: a reverse proxy can
 # route two paths on one host to entirely different services.
 SECRET_DESTINATIONS = {
+    "metron_password": ("metron_username",),
     "webhook_secret": ("webhook_url",),
     "kavita_api_key": ("kavita_url",),
     "qbittorrent_password": ("qbittorrent_url", "qbittorrent_username"),
@@ -152,7 +153,9 @@ async def metron_test(body: MetronTestIn, session: AsyncSession = Depends(get_se
     username = body.username
     password = body.password
     if password == MASK:
-        password = await settings_service.get(session, "metron_password")
+        password = retained_secret(
+            await settings_service.get_all(session), "metron_password", {"metron_username": username},
+        )
     metron.configure(username, password)
     try:
         result = await metron.test()
