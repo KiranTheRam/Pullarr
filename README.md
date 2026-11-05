@@ -149,6 +149,27 @@ Install `bsdtar` (`libarchive-tools` on Debian/Ubuntu, `libarchive` on macOS)
 for RAR/7z validation. The Docker image includes it. Invalid, encrypted or
 unsupported archives fail validation instead of being marked downloaded.
 
+Archive validation, metadata refresh and duplicate comparison stream page data.
+ZIP directories are checked before loading them (16 MiB and 20,000 entries),
+with a 2 GiB limit per ZIP member and a 10 GiB cumulative expanded-data limit.
+Containers are limited to 12 GiB on disk, leaving space for compression overhead.
+An individual container must also stay below 100 times its compressed size,
+with a 512 MiB allowance for small, highly compressible comics. Nested transport
+packs allow 1,000 comic archives per level and at most two nesting levels;
+all levels share the expanded-data, entry-count and 120-second decoding budget.
+Loose-image imports use the same page-count and expanded-data limits. Unsafe ZIP
+paths, links, special files, encryption and unsupported codecs are rejected.
+ZIP STORED, DEFLATE, BZIP2 and LZMA pages remain supported; BZIP2/LZMA and RAR/7z
+codecs run in disposable subprocesses. Linux enforces a 1 GiB decoder address-space
+limit and a 120-second CPU limit; macOS monitors decoder resident memory instead
+because it does not support the Linux memory limit. Decoded output and wall time
+are bounded on both platforms. Validation failure leaves an existing archive
+intact; failed rewrites remove their partial output.
+
+ComicInfo reads and writes are limited to 1 MiB. Matching ignores metadata with
+DTDs, more than 10,000 XML elements, or nesting deeper than 64 elements; metadata
+refresh replaces such content while preserving ordinary external fields.
+
 ```bash
 cd backend
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'

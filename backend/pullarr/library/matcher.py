@@ -7,9 +7,9 @@ never opens or writes files."""
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
-from xml.etree.ElementTree import ParseError, fromstring
+from xml.etree.ElementTree import ParseError
 
-from ..download.cbz import read_comicinfo_bytes
+from ..download.cbz import parse_comicinfo, read_comicinfo_bytes
 from ..filename import FilenameCoverage, parse_filename
 from ..models import Issue
 from ..util import (
@@ -128,7 +128,7 @@ def _comicinfo_identity(path: Path, is_dir: bool) -> tuple[str, str, int | None]
     if data is None:
         return "", "", None
     try:
-        root = fromstring(data)
+        root = parse_comicinfo(data)
     except ParseError:
         return "", "", None
     series = (root.findtext("Series") or "").strip()

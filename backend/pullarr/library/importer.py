@@ -16,7 +16,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..download.cbz import build_comicinfo, upsert_comicinfo
-from ..download.archive import ImportValidationError, validate_archive
+from ..download.archive import (ArchiveBudget, ImportValidationError, MAX_ARCHIVE_ENTRIES,
+                                MAX_CONTAINER_BYTES, MAX_EXPANDED_BYTES, MAX_MEMBER_BYTES, MAX_PACK_ARCHIVES,
+                                check_container_size, checked_zip_infos, copy_zip_member, expansion_limit,
+                                open_zip, validate_archive, zip_member_blocks)
 from ..models import Issue, Series
 from ..util import normalize_title, strip_issue_suffix
 from .matcher import ARCHIVE_EXTS, IMAGE_EXTS, MediaFile, find_media_files, match_files
@@ -35,14 +38,16 @@ class ImportedFile:
     status: str = "imported"  # imported | duplicate | unmatched
 
 
-MAX_PACK_ARCHIVES = 1000
-MAX_PACK_EXPANDED_BYTES = 10 * 1024**3
+MAX_PACK_EXPANDED_BYTES = MAX_EXPANDED_BYTES
 
 
 def _sha256(path: Path) -> str:
+    check_container_size(path)
+    budget = ArchiveBudget(limit=MAX_CONTAINER_BYTES)
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
         for block in iter(lambda: fh.read(1024 * 1024), b""):
+            budget.check(len(block))
             digest.update(block)
     return digest.hexdigest()
 
@@ -52,10 +57,15 @@ def _content_hash(path: Path) -> str:
     if not zipfile.is_zipfile(path):
         return _sha256(path)
     digest = hashlib.sha256()
-    with zipfile.ZipFile(path) as zf:
-        for name in sorted(n for n in zf.namelist() if n.lower() != "comicinfo.xml"):
-            digest.update(name.encode("utf-8", errors="surrogateescape"))
-            digest.update(zf.read(name))
+    with open_zip(path) as zf:
+        entries = checked_zip_infos(zf, path, skip_metadata=True)
+        budget = ArchiveBudget(limit=expansion_limit(path))
+        for info in sorted(entries, key=lambda entry: entry.filename):
+            if info.filename.lower() == "comicinfo.xml":
+                continue
+            digest.update(info.filename.encode("utf-8", errors="surrogateescape"))
+            for block in zip_member_blocks(zf, info, path, budget):
+                digest.update(block)
     return digest.hexdigest()
 
 
@@ -63,11 +73,8 @@ def _nested_archive_members(path: Path) -> list[zipfile.ZipInfo]:
     """Return comic archives inside an outer ZIP pack with no page images."""
     if not zipfile.is_zipfile(path):
         return []
-    with zipfile.ZipFile(path) as zf:
-        corrupt = zf.testzip()
-        if corrupt:
-            raise ImportValidationError(f"corrupt ZIP member: {corrupt}")
-        infos = [info for info in zf.infolist() if not info.is_dir()]
+    with open_zip(path) as zf:
+        infos = [info for info in checked_zip_infos(zf, path) if not info.is_dir()]
         if any(Path(info.filename).suffix.lower() in IMAGE_EXTS for info in infos):
             return []
         nested = [
@@ -81,7 +88,7 @@ def _nested_archive_members(path: Path) -> list[zipfile.ZipInfo]:
             f"invalid archive pack: {path.name} contains too many nested archives"
         )
     expanded = sum(info.file_size for info in nested)
-    proportional_limit = max(path.stat().st_size * 4, 512 * 1024**2)
+    proportional_limit = expansion_limit(path)
     if expanded > min(proportional_limit, MAX_PACK_EXPANDED_BYTES):
         raise ImportValidationError(
             f"invalid archive pack: {path.name} expands beyond the safety limit"
@@ -90,13 +97,23 @@ def _nested_archive_members(path: Path) -> list[zipfile.ZipInfo]:
 
 
 def _extract_nested_archives(
-    pack: Path, members: list[zipfile.ZipInfo], destination: Path
+    pack: Path, members: list[zipfile.ZipInfo], destination: Path, budget: ArchiveBudget | None = None
 ) -> None:
     """Safely flatten nested comic archives without trusting ZIP paths."""
     destination.mkdir(parents=True, exist_ok=True)
     used: set[str] = set()
-    with zipfile.ZipFile(pack) as zf:
-        for index, info in enumerate(members, start=1):
+    budget = budget or ArchiveBudget(limit=expansion_limit(pack))
+    with open_zip(pack) as zf:
+        infos = checked_zip_infos(zf, pack)
+        budget.check(entries=len(infos))
+        # Check ignored sidecars too; a corrupt pack must fail before placing files.
+        offsets = {info.header_offset for info in members}
+        for info in infos:
+            if info.header_offset not in offsets and not info.is_dir():
+                for _ in zip_member_blocks(zf, info, pack, budget):
+                    pass
+        for index, original in enumerate(members, start=1):
+            info = next(info for info in infos if info.header_offset == original.header_offset)
             name = Path(info.filename).name
             if not name:
                 continue
@@ -105,8 +122,8 @@ def _extract_nested_archives(
                 candidate = f"{Path(name).stem}-{index}{Path(name).suffix}"
             used.add(candidate.casefold())
             target = destination / candidate
-            with zf.open(info) as source, open(target, "xb") as output:
-                shutil.copyfileobj(source, output, length=1024 * 1024)
+            with open(target, "xb") as output:
+                copy_zip_member(zf, info, pack, output, budget)
     log.info("Expanded %d nested comic archives from %s", len(members), pack.name)
 
 
@@ -188,6 +205,7 @@ def import_payload(
     _pack_depth: int = 0,
     check_library: Callable[[], None] | None = None,
     files: list[Path] | None = None,
+    _archive_budget: ArchiveBudget | None = None,
 ) -> list[ImportedFile]:
     """Copies (or, with move=True, moves) payload files into the library,
     named by convention. Returns an ImportedFile per placed file, each with the
@@ -198,6 +216,7 @@ def import_payload(
     name (the release was grabbed for a specific issue), import it as that
     issue anyway. files restricts a torrent import to its explicitly listed
     payload; loose-image directories are packed from those files only."""
+    archive_budget = _archive_budget or ArchiveBudget()
     library_root = Path(library_root)
     if check_library is None:
         expect_content = any(issue.downloaded for issue in issues)
@@ -233,11 +252,11 @@ def import_payload(
             temp_parent = content_path if content_path.is_dir() else content_path.parent
             with tempfile.TemporaryDirectory(prefix=".pullarr-pack-", dir=temp_parent) as tmp:
                 expanded = Path(tmp)
-                _extract_nested_archives(outer.path, members, expanded)
+                _extract_nested_archives(outer.path, members, expanded, archive_budget)
                 return import_payload(
                     expanded, series, issues, library_root, template,
                     force_issue=force_issue, move=move, _pack_depth=_pack_depth + 1,
-                    check_library=check_library,
+                    check_library=check_library, _archive_budget=archive_budget,
                 )
 
     result = match_files(media_files, issues)
@@ -267,6 +286,8 @@ def import_payload(
         tmp = dest.with_suffix(dest.suffix + ".importing")
         tmp.unlink(missing_ok=True)
         moved = False
+        if not media.is_dir:
+            check_container_size(media.path)
         try:
             if media.is_dir:
                 _pack_images(media.path, tmp, files)
@@ -276,7 +297,7 @@ def import_payload(
             else:
                 shutil.copy2(media.path, tmp)
             check_library()
-            validate_archive(tmp)
+            validate_archive(tmp, _budget=archive_budget)
             status = "imported"
             if dest.exists():
                 if _content_hash(tmp) == _content_hash(dest):
@@ -386,7 +407,7 @@ def _stamp_comicinfo(dest: Path, series: Series, issue: Issue | None, volume: in
         )
         if upsert_comicinfo(dest, xml):
             log.info("Updated ComicInfo.xml in %s", dest.name)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except (OSError, zipfile.BadZipFile, ImportValidationError) as exc:
         log.warning("could not inject ComicInfo.xml into %s: %s", dest, exc)
 
 
@@ -395,7 +416,23 @@ def _pack_images(img_dir: Path, dest: Path, files: list[Path] | None = None) -> 
         p for p in (files if files is not None else img_dir.iterdir())
         if p.parent == img_dir and p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
+    if len(images) >= MAX_ARCHIVE_ENTRIES:
+        raise ImportValidationError("too many loose comic pages")
+    total = 0
+    for img in images:
+        size = img.stat().st_size
+        total += size
+        if size > MAX_MEMBER_BYTES or total > MAX_EXPANDED_BYTES:
+            raise ImportValidationError("loose comic pages exceed archive safety limits")
+    budget = ArchiveBudget()
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_STORED) as zf:
         for img in images:
-            zf.write(img, img.name)
+            size = 0
+            with img.open("rb") as source, zf.open(img.name, "w", force_zip64=True) as output:
+                while block := source.read(1024 * 1024):
+                    size += len(block)
+                    budget.check(len(block))
+                    if size > MAX_MEMBER_BYTES:
+                        raise ImportValidationError("loose comic page exceeds archive safety limit")
+                    output.write(block)
     log.info("Packed %s (%d images) -> %s", img_dir, len(images), dest)
