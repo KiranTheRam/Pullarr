@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import re
 import time
@@ -113,9 +114,38 @@ def raise_for_status_redacted(resp: httpx.Response, service: str) -> None:
 ILLEGAL_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
-def sanitize_filename(name: str) -> str:
-    cleaned = ILLEGAL_PATH_CHARS.sub("", name).strip().rstrip(".")
-    return re.sub(r"\s+", " ", cleaned) or "Unknown"
+# Leave room for issue labels, archive extensions and atomic-write suffixes.
+NAME_MAX_BYTES = 255
+TITLE_MAX_BYTES = 200
+WINDOWS_RESERVED_NAME = re.compile(
+    r"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?= *\.|$)", re.I
+)
+_DIGEST_BYTES = 18  # ~ + 64-bit hexadecimal digest + ~
+
+
+def truncate_utf8(text: str, max_bytes: int) -> str:
+    """Cut on a Unicode character boundary, measured in filesystem bytes."""
+    return text.encode("utf-8")[:max(0, max_bytes)].decode("utf-8", errors="ignore")
+
+
+def shorten_utf8(text: str, max_bytes: int) -> str:
+    """Keep shortened names distinct and stable, including shared long prefixes.
+
+    Delimit both ends of the digest so the scanner cannot read a numeric
+    digest as a trailing issue number or join it onto an issue/volume marker.
+    """
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    tag = "~" + hashlib.blake2s(text.encode("utf-8"), digest_size=8).hexdigest() + "~"
+    if max_bytes < _DIGEST_BYTES:
+        return truncate_utf8(text, max_bytes).rstrip(" .")
+    return truncate_utf8(text, max_bytes - _DIGEST_BYTES).rstrip(" .") + tag
+
+
+def sanitize_filename(name: str, max_bytes: int = TITLE_MAX_BYTES) -> str:
+    cleaned = re.sub(r"\s+", " ", ILLEGAL_PATH_CHARS.sub("", name)).strip(" .")
+    cleaned = WINDOWS_RESERVED_NAME.sub(r"\1_", cleaned)
+    return shorten_utf8(cleaned or "Unknown", max_bytes)
 
 
 # Comic issue markers: "#12", "# 12.5", "No. 12", "Issue 12". The "#" form is

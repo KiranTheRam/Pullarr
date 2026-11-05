@@ -3,6 +3,7 @@ Kavita). GetComics files arrive as finished CBR/CBZ archives, so instead of
 packing pages we inject/refresh ComicInfo.xml into CBZ (zip) files on import;
 CBR (rar) can't be rewritten without rar tooling and is left untouched."""
 
+import re
 import shutil
 import zipfile
 import zlib
@@ -13,6 +14,9 @@ from xml.etree.ElementTree import Element, ParseError, SubElement, fromstring, t
 
 # Plenty for ordinary metadata, independent of the archive's compressed size.
 MAX_COMICINFO_BYTES = 1024 * 1024
+
+# XML 1.0 Char, including supplementary Unicode but excluding lone surrogates.
+_XML_ILLEGAL = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
 def build_comicinfo(
@@ -53,7 +57,7 @@ def build_comicinfo(
     def add(tag: str, value) -> None:
         if value is None or value == "":
             return
-        SubElement(root, tag).text = str(value)
+        SubElement(root, tag).text = _XML_ILLEGAL.sub("", str(value))
 
     add("Title", title)
     add("Series", series)
@@ -109,15 +113,14 @@ def inject_comicinfo(archive: Path, comicinfo_xml: str) -> bool:
     if has_comicinfo(archive):
         return False
     tmp = archive.with_suffix(archive.suffix + ".partial")
-    shutil.copy2(archive, tmp)
     try:
+        shutil.copy2(archive, tmp)
         with zipfile.ZipFile(tmp, "a", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("ComicInfo.xml", comicinfo_xml)
         tmp.replace(archive)
         return True
-    except OSError:
+    finally:
         tmp.unlink(missing_ok=True)
-        raise
 
 
 def read_comicinfo_bytes(archive: Path) -> bytes | None:
@@ -197,9 +200,8 @@ def upsert_comicinfo(archive: Path, comicinfo_xml: str) -> bool:
             target.writestr("ComicInfo.xml", merged, compress_type=zipfile.ZIP_DEFLATED)
         tmp.replace(archive)
         return True
-    except (OSError, zipfile.BadZipFile):
+    finally:
         tmp.unlink(missing_ok=True)
-        raise
 
 
 def write_cbz(dest: Path, pages: list[bytes], comicinfo_xml: str) -> Path:
@@ -208,12 +210,15 @@ def write_cbz(dest: Path, pages: list[bytes], comicinfo_xml: str) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".cbz.partial")
     width = max(3, len(str(len(pages))))
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
-        zf.writestr("ComicInfo.xml", comicinfo_xml)
-        for i, data in enumerate(pages, start=1):
-            zf.writestr(f"{i:0{width}d}{guess_extension(data)}", data)
-    tmp.rename(dest)
-    return dest
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("ComicInfo.xml", comicinfo_xml)
+            for i, data in enumerate(pages, start=1):
+                zf.writestr(f"{i:0{width}d}{guess_extension(data)}", data)
+        tmp.replace(dest)
+        return dest
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 EXT_BY_SIGNATURE = {

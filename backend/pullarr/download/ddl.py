@@ -35,9 +35,18 @@ def filename_from_response(resp: httpx.Response, fallback: str) -> str:
     if m:
         name = unquote(m.group(1)).strip()
         if name:
-            return sanitize_filename(name)
+            return _safe_download_filename(name)
     path_name = unquote(Path(urlparse(str(resp.url)).path).name)
-    return sanitize_filename(path_name or fallback)
+    return _safe_download_filename(path_name or fallback)
+
+
+def _safe_download_filename(name: str) -> str:
+    # The importer identifies containers by suffix; shortening a server's long
+    # filename must not discard its archive extension.
+    suffix = Path(name).suffix
+    if suffix.lower() in {".cbz", ".cbr", ".cb7", ".zip", ".rar", ".7z"}:
+        return sanitize_filename(name[:-len(suffix)]) + suffix
+    return sanitize_filename(name)
 
 
 async def download_release(
