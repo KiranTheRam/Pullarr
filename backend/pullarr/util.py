@@ -214,7 +214,7 @@ def parse_issue_number(text: str) -> float | None:
 # Same marker forms as ISSUE_PREFIX_PATTERN but keeping a variant suffix
 # ("#78.BEY", "#16.HU") that the numeric pattern stops before.
 ISSUE_LABEL_PATTERN = re.compile(
-    r"(?:#[ ]?|(?<![a-z])(?:no|issue)[ ._]{0,2})(\d+(?:\.[a-z0-9]+)?)", re.I
+    r"(?:#[ ]?|(?<![a-z])(?:no|issue)[ ._]{0,2})(\d+(?:\.[a-z0-9]+|[a-z]+)?)", re.I
 )
 _PLAIN_LABEL = re.compile(r"\d+(?:\.\d+)?$")
 

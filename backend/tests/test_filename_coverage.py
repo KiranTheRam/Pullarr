@@ -13,7 +13,7 @@ from pullarr.library.naming import DEFAULT_TEMPLATE
 from pullarr.library.rename import plan_renames
 from pullarr.library.scanner import scan_series
 from pullarr.models import Issue, Series
-from pullarr.util import parse_issue_number, parse_issue_range, parse_volume_number
+from pullarr.util import parse_issue_label, parse_issue_number, parse_issue_range, parse_volume_number
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
@@ -67,6 +67,7 @@ def test_helpers_never_collapse_spans_or_parse_partial_scene_tags():
     assert parse_volume_number("Saga v1-3") is None
     assert parse_filename("Saga #3-1").ambiguous
     assert parse_filename("Saga #1 (#3)").ambiguous
+    assert not parse_filename("Saga #1 (#001)").ambiguous
 
 
 @pytest.mark.parametrize("stem,expected", [
@@ -214,3 +215,75 @@ def test_explicit_single_issue_overrides_a_volume_span_when_renaming(tmp_path):
     tracked = rows()[:1]
     tracked[0].downloaded, tracked[0].file_path = True, str(source)
     assert plan_renames(series(), tracked, DEFAULT_TEMPLATE)[0].new_name == "Saga #001.cbz"
+
+
+@pytest.mark.parametrize("label", ["1A", "1.MU", "78.BEY"])
+@pytest.mark.parametrize("metadata", [False, True])
+def test_variant_labels_match_exactly_in_scan_and_pack_import(tmp_path, label, metadata):
+    # Numeric prefixes retain the base branch's semantics, but variant identity
+    # must survive even when the provider assigned it a different sort number.
+    number = float(label.split('.')[0].rstrip('A'))
+    assert parse_issue_number(f"Saga #{label}") == number
+    assert parse_issue_label(f"Saga #{label}") == label.casefold()
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    source = archive(payload / ("Unknown.cbz" if metadata else f"Saga #{label}.cbz"), label if metadata else None)
+    archive(payload / "Saga #002.cbz")  # exercise a pack, without force_issue
+    tracked = [
+        Issue(id=1, number=number, display_number=f"{number:g}", title="", downloaded=False),
+        Issue(id=2, number=number + .001, display_number=label, title="", downloaded=False),
+        Issue(id=3, number=2., display_number="2", title="", downloaded=False),
+    ]
+    scan_series(series(), tracked, [payload])
+    assert not tracked[0].downloaded
+    assert tracked[1].downloaded and tracked[1].file_path == str(source)
+    root = tmp_path / "library"
+    root.mkdir()
+    result = import_payload(payload, series(), tracked, root, DEFAULT_TEMPLATE)
+    variant = next(item for item in result if item.issue is tracked[1])
+    assert variant.dest.name == f"Saga #{label}.cbz"
+    assert variant.covered == [tracked[1]]
+
+
+@pytest.mark.parametrize("metadata", [False, True])
+def test_untracked_variant_cannot_match_plain_issue_or_prove_cleanup(tmp_path, metadata):
+    archive(tmp_path / "Saga #1A.cbz", "1A" if metadata else None)
+    tracked = rows()
+    assert not match_files(find_media_files(tmp_path), tracked).matched
+    real = archive(tmp_path / "Saga #001.cbz")
+    tracked[0].downloaded, tracked[0].file_path = True, str(real)
+    assert apply_cleanup(series(), tracked, [tmp_path], [str(real)]).deleted == 0
+
+
+@pytest.mark.parametrize("stem", ["Saga #1A-3", "Saga #1-3A", "Saga #1A #3", "Saga #1A 001"])
+def test_variant_endpoints_and_conflicts_do_not_collapse_to_single_issue(tmp_path, stem):
+    source = archive(tmp_path / f"{stem}.cbz", "1A")
+    tracked = rows() + [Issue(id=10, number=1.001, display_number="1A", title="", downloaded=False)]
+    assert parse_filename(stem).ambiguous
+    assert not match_files(find_media_files(source), tracked).matched
+    root = tmp_path / "library"
+    root.mkdir()
+    result = import_payload(source, series(), tracked, root, DEFAULT_TEMPLATE, force_issue=tracked[-1])
+    assert not result[0].covered
+
+
+@pytest.mark.parametrize("stem,expected", [("Saga #1-3", [1., 1.5, 2., 3.]), ("Saga Vol. 1-2", [1., 1.5, 2., 3., 4.])])
+def test_variant_comicinfo_cannot_narrow_numeric_collections(tmp_path, stem, expected):
+    source = archive(tmp_path / f"{stem}.cbz", "1A")
+    tracked = rows() + [Issue(id=10, number=1.001, display_number="1A", title="", downloaded=False)]
+    result = match_files(find_media_files(source), tracked)
+    assert sorted(issue.number for item in result.matched for issue in item.covered_issues) == expected
+
+
+@pytest.mark.parametrize("metadata", [False, True])
+def test_zero_padded_variant_label_matches_display_identity(tmp_path, metadata):
+    source = archive(tmp_path / "Saga #001A.cbz", "001a" if metadata else None)
+    tracked = [Issue(id=1, number=1.001, display_number="1A")]
+    assert match_files(find_media_files(source), tracked).matched[0].issue is tracked[0]
+
+
+def test_unknown_metadata_label_cannot_fall_back_to_a_volume(tmp_path):
+    source = archive(tmp_path / "Unknown.cbz")
+    with zipfile.ZipFile(source, "a") as zf:
+        zf.writestr("ComicInfo.xml", "<ComicInfo><Number>1A</Number><Volume>1</Volume></ComicInfo>")
+    assert not match_files(find_media_files(source), rows()).matched

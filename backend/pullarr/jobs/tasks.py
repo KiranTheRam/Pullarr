@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import httpx
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, inspect, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -25,8 +25,8 @@ from ..download.coordination import importing_download, _importing_downloads
 from ..download.ddl import DownloadCancelled, download_release
 from ..download.qbittorrent import QbtClient, QbtError
 from ..library.importer import import_payload
-from ..library.scanner import (LibraryUnavailableError, recorded_files_expect_content,
-                               require_root_available, root_unavailable)
+from ..library.scanner import (LibraryUnavailableError, library_unavailable, recorded_files_expect_content,
+                               require_root_available, resolve_folders, root_unavailable)
 from ..library.work import run_library_work
 from ..metadata.comicvine import derive_status, provider as comicvine
 from ..metadata.metron import provider as metron
@@ -313,8 +313,14 @@ async def root_expects_content(session: AsyncSession, series: Series) -> bool:
 async def library_root_unavailable(session: AsyncSession, series: Series) -> str:
     if series.root_folder is None:
         return ""
+    # Some callers hold a newly persisted Series rather than _load_series's
+    # eagerly loaded graph. Never trigger synchronous lazy I/O on this loop.
+    if "extra_folders" in inspect(series).unloaded:
+        await session.refresh(series, ["extra_folders"])
     return await run_in_threadpool(
-        root_unavailable, Path(series.root_folder.path),
+        library_unavailable, Path(series.root_folder.path),
+        resolve_folders(Path(series.root_folder.path), series, [f.path for f in series.extra_folders]),
+        [issue.file_path for issue in series.issues if issue.downloaded],
         await root_expects_content(session, series),
     )
 
@@ -351,6 +357,8 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
 
     if series.root_folder is None:
         return
+    if reason := await library_root_unavailable(session, series):
+        raise LibraryUnavailableError(reason)
     root = Path(series.root_folder.path)
     extras = [f.path for f in series.extra_folders]
     folders = resolve_folders(root, series, extras)

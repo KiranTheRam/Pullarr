@@ -85,6 +85,36 @@ def require_root_available(root: Path, expect_content: bool = True) -> None:
         raise LibraryUnavailableError(reason)
 
 
+def library_unavailable(
+    root: Path, folders: Iterable[Path], recorded_paths: Iterable[str],
+    expect_content: bool | None = None,
+) -> str:
+    """Check the root and each configured folder outside it as mount boundaries.
+
+    A relative series folder may legitimately be deleted beneath a populated
+    root. An external primary/extra folder is its own availability boundary;
+    never interpret an offline or unexpectedly empty share as deleted books.
+    Compare paths lexically, without resolving a potentially missing mount.
+    """
+    paths = list(recorded_paths)
+    if expect_content is None:
+        expect_content = recorded_files_expect_content(root, paths)
+    reason = root_unavailable(root, expect_content)
+    if reason:
+        return reason
+    absolute_root = Path(os.path.abspath(root))
+    checked = {absolute_root}
+    for folder in folders:
+        absolute = Path(os.path.abspath(folder))
+        if absolute in checked or absolute.is_relative_to(absolute_root):
+            continue
+        checked.add(absolute)
+        reason = root_unavailable(folder, recorded_files_expect_content(folder, paths))
+        if reason:
+            return reason
+    return ""
+
+
 def resolve_folders(root: Path, series: Series, extra_paths: list[str]) -> list[Path]:
     """All directories to scan for a series: the primary folder plus any extra
     folders. Extra paths may be relative to the root or absolute (pathlib joins
@@ -148,14 +178,13 @@ def scan_series(
     """Apply a scan only while its root remains available, including at the end."""
     if root is None:
         return _scan_series(series, issues, folders)
-    if expect_content is None:
-        expect_content = recorded_files_expect_content(root, (issue.file_path for issue in issues if issue.downloaded))
-    reason = root_unavailable(root, expect_content)
+    recorded_paths = [issue.file_path for issue in issues if issue.downloaded]
+    reason = library_unavailable(root, folders, recorded_paths, expect_content)
     if reason:
         return ScanResult(root_unavailable=reason)
     copies = copy_issues(issues)
     result = _scan_series(series, copies, folders)
-    reason = root_unavailable(root, expect_content)
+    reason = library_unavailable(root, folders, recorded_paths, expect_content)
     if reason:
         return ScanResult(root_unavailable=reason)
     apply_file_state(issues, copies)

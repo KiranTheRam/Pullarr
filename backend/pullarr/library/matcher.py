@@ -10,7 +10,7 @@ import re
 from xml.etree.ElementTree import ParseError
 
 from ..download.cbz import parse_comicinfo, read_comicinfo_bytes
-from ..filename import FilenameCoverage, parse_filename
+from ..filename import FilenameCoverage, normalize_issue_label, parse_filename
 from ..models import Issue
 from ..util import (
     normalize_title,
@@ -172,8 +172,10 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
     """Match each media file to a issue (by number) or, for whole-volume
     archives, to every issue assigned to that volume."""
     by_number: dict[float, list[Issue]] = {}
+    by_label: dict[str, list[Issue]] = {}
     for c in issues:
         by_number.setdefault(c.number, []).append(c)
+        by_label.setdefault(normalize_issue_label(c.display_number or f"{c.number:g}"), []).append(c)
     issues_in_volume: dict[int, list[Issue]] = {}
     for c in issues:
         if c.volume is not None:
@@ -185,11 +187,29 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
         if mf.coverage and mf.coverage.ambiguous:
             unmatched.append(mf)
             continue
-        issue = (
-            _pick_issue(mf, by_number.get(mf.issue_number, []))
-            if mf.issue_number is not None
-            else None
-        )
+        # Display labels are identities, not numeric sort keys. ComicVine can
+        # assign 1A a synthetic number when plain #1 also exists. Resolve the
+        # exact label across all rows before considering numeric candidates,
+        # while keeping a collection's first-page metadata out of span matching.
+        label = ""
+        if not mf.issue_range and not mf.volume_range and not (
+            mf.coverage and mf.coverage.volume and not mf.coverage.issue
+        ):
+            filename_label = mf.coverage.issue_label if mf.coverage else ""
+            if mf.metadata_number:
+                label = normalize_issue_label(mf.metadata_number)
+            elif filename_label and re.fullmatch(r"\d+(?:\.\d+)?", filename_label) is None:
+                label = filename_label
+        exact = by_label.get(label, [])
+        if len(exact) == 1:
+            issue = exact[0]
+        elif exact or (label and re.fullmatch(r"\d+(?:\.\d+)?", label) is None):
+            # Neither ambiguous identity nor an untracked variant can prove a
+            # plain issue or an entire volume, including metadata-only labels.
+            unmatched.append(mf)
+            continue
+        else:
+            issue = _pick_issue(mf, by_number.get(mf.issue_number, [])) if mf.issue_number is not None else None
         if issue is not None:
             matched.append(MatchedFile(media=mf, issue=issue, volume=None,
                                        covered_issues=[issue]))

@@ -6,6 +6,7 @@ bounds so tracked decimal issues are included without inventing issue rows.
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import lru_cache
 
 BRACKET_GROUPS = re.compile(r"\([^)]*\)|\[[^\]]*\]")
@@ -13,12 +14,22 @@ _NUMBER = r"\d+(?:\.\d+)?"
 _ISSUE = r"(?:#\s*|(?<![a-z])(?:no|issue)[ ._]{0,2})"
 _VOLUME = r"(?<![a-z0-9])v(?:ol(?:ume)?)?[ ._]{0,2}"
 _ISSUE_TOKEN = re.compile(
-    rf"{_ISSUE}({_NUMBER})(?:\s*[-–—]\s*(?:{_ISSUE})?({_NUMBER}))?(?![a-z0-9]|\.\d)", re.I
+    rf"{_ISSUE}({_NUMBER})([a-z]+|\.[a-z][a-z0-9]*)?"
+    rf"(?:\s*[-–—]\s*(?:{_ISSUE})?({_NUMBER}))?(?![a-z0-9]|\.\d)", re.I
 )
 _VOLUME_TOKEN = re.compile(
     rf"{_VOLUME}(\d+)(?:\s*[-–—]\s*(?:{_VOLUME})?(\d+))?(?![a-z0-9]|\.\d)", re.I
 )
 _BARE = re.compile(rf"(?<![\w.])({_NUMBER})(?:\s*[-–—]\s*({_NUMBER}))?\s*$")
+
+
+def normalize_issue_label(value: str) -> str:
+    value = value.strip().casefold()
+    match = re.fullmatch(rf"({_NUMBER})([a-z]+|\.[a-z][a-z0-9]*)?", value)
+    if match:
+        # Scene files often zero-pad the numeric part of a variant too.
+        return format(Decimal(match[1]).normalize(), "f") + (match[2] or "")
+    return value
 
 
 @dataclass(frozen=True)
@@ -27,6 +38,7 @@ class FilenameCoverage:
     volume: tuple[int, int] | None = None
     explicit_issue: bool = False
     ambiguous: bool = False
+    issue_label: str = ""
 
     @property
     def is_range(self) -> bool:
@@ -56,7 +68,8 @@ def parse_filename(text: str) -> FilenameCoverage:
     outside_volumes = list(_VOLUME_TOKEN.finditer(untagged))
     issue_matches = outside_issues + [m for tag in tags if (m := _ISSUE_TOKEN.fullmatch(tag))]
     volume_matches = outside_volumes + [m for tag in tags if (m := _VOLUME_TOKEN.fullmatch(tag))]
-    issues = {(float(m[1]), float(m[2] or m[1])) for m in issue_matches}
+    issues = {(float(m[1]), float(m[3] or m[1])) for m in issue_matches}
+    labels = {normalize_issue_label(m[1] + (m[2] or "")) for m in issue_matches if not m[3]}
     volumes = {(int(m[1]), int(m[2] or m[1])) for m in volume_matches}
     explicit = bool(issues)
     bare = _BARE.search(untagged)
@@ -64,12 +77,16 @@ def parse_filename(text: str) -> FilenameCoverage:
         issues.add((float(bare[1]), float(bare[2] or bare[1])))
     issue = next(iter(issues), None)
     volume = next(iter(volumes), None)
-    ambiguous = len(issues) > 1 or len(volumes) > 1
+    ambiguous = len(issues) > 1 or len(volumes) > 1 or len(labels) > 1
+    # Variant labels identify one issue, never a numeric span's endpoint.
+    ambiguous |= any(m[2] and m[3] for m in issue_matches)
     ambiguous |= any(span is not None and span[1] < span[0] for span in (issue, volume))
     if explicit and bare and not any(m.end() == len(untagged) for m in outside_issues + outside_volumes):
         ambiguous |= (float(bare[1]), float(bare[2] or bare[1])) != issue
+        ambiguous |= any(m[2] for m in outside_issues)
     # Do not let an incomplete marked span fall back to its first endpoint.
     for match in outside_issues + outside_volumes:
         if re.match(r"\s*[-–—]\s*(?:#|(?:issue|no|v(?:ol(?:ume)?)?)[ ._]*)?\d", untagged[match.end():], re.I):
             ambiguous = True
-    return FilenameCoverage(issue, volume, explicit, ambiguous)
+    label = next(iter(labels)) if len(labels) == 1 else ""
+    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label)

@@ -445,3 +445,148 @@ def test_external_primary_is_an_availability_boundary(tmp_path, monkeypatch, sta
     assert not list(external.glob("*.cbz"))
     if state == "missing":
         assert not external.exists()
+
+
+@pytest.mark.parametrize("kind", ["primary", "extra"])
+@pytest.mark.parametrize("state", ["missing", "empty", "unreadable"])
+async def test_external_scan_and_reconciliation_preserve_ownership(session, tmp_path, monkeypatch, kind, state):
+    root = tmp_path / "library"
+    # An available matching folder must not replace a missing external primary.
+    (root / "Series").mkdir(parents=True)
+    external = tmp_path / "external"
+    if state != "missing":
+        external.mkdir()
+    series = await make_series(session, root)
+    series.issues[0].file_path = str(external / "Series #001.cbz")
+    if kind == "primary":
+        series.folder_name = str(external)
+    else:
+        series.extra_folders.append(SeriesFolder(path=str(external)))
+    await session.commit()
+    if state == "unreadable":
+        original = Path.iterdir
+
+        def unreadable(path):
+            if path == external:
+                raise PermissionError("share unavailable")
+            return original(path)
+
+        monkeypatch.setattr(Path, "iterdir", unreadable)
+    assert await tasks.library_root_unavailable(session, series)
+    assert await tasks.reconcile_downloaded_files(session, series) == 0
+    with pytest.raises(HTTPException) as error:
+        await library.scan(series.id, session)
+    assert error.value.status_code == 409
+    with pytest.raises(scanner.LibraryUnavailableError):
+        await tasks.scan_series_folder(session, series)
+    assert series.issues[0].downloaded
+    assert series.issues[0].file_path == str(external / "Series #001.cbz")
+    assert series.issues[0].file_source == "fake"
+    assert series.folder_name == (str(external) if kind == "primary" else "Series")
+
+
+@pytest.mark.parametrize("primary", ["external", "absolute_inside", "root"])
+async def test_available_destinations_still_reconcile_deleted_files(session, tmp_path, primary):
+    root = tmp_path / "library"
+    root.mkdir()
+    folder = tmp_path / "external" if primary == "external" else root / "Series" if primary == "absolute_inside" else root
+    folder.mkdir(exist_ok=True)
+    (folder / "other.txt").write_text("available")
+    series = await make_series(session, root)
+    series.folder_name = "." if primary == "root" else str(folder)
+    series.issues[0].file_path = str(folder / "deleted.cbz")
+    await session.commit()
+    assert await tasks.library_root_unavailable(session, series) == ""
+    assert await tasks.reconcile_downloaded_files(session, series) == 1
+    assert not series.issues[0].downloaded
+    assert not series.issues[0].file_path and not series.issues[0].file_source
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_deleted_relative_folder_and_file_on_available_external_share_are_reconciled(tmp_path, external):
+    root = tmp_path / "library"
+    root.mkdir()
+    (root / "Other Series").mkdir()
+    folder = tmp_path / "external" if external else root / "Deleted Series"
+    if external:
+        folder.mkdir()
+        (folder / "other.txt").write_text("available")
+    issue = owned(folder)
+    result = scanner.scan_series(Series(title="Series"), [issue], [folder], root=root)
+    assert not result.root_unavailable and result.cleared == 1
+    assert not issue.downloaded
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "unreadable"])
+def test_external_share_lost_during_scan_applies_no_partial_state(tmp_path, monkeypatch, state):
+    root = tmp_path / "library"
+    root.mkdir()
+    (root / "Series #002.cbz").write_bytes(comic_bytes())
+    external = tmp_path / "external"
+    external.mkdir()
+    source = external / "Series #001.cbz"
+    source.write_bytes(comic_bytes())
+    issues = [owned(external), Issue(id=2, number=2, downloaded=False)]
+    issues[0].file_path = str(source)
+    original = scanner.find_media_files
+    original_iterdir = Path.iterdir
+    lost = False
+
+    def disappear(path):
+        nonlocal lost
+        result = original(path)
+        if path == external:
+            source.unlink()
+            if state == "missing":
+                external.rmdir()
+            lost = True
+        return result
+
+    def unreadable(path):
+        if state == "unreadable" and path == external and lost:
+            raise PermissionError("share unavailable")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(scanner, "find_media_files", disappear)
+    monkeypatch.setattr(Path, "iterdir", unreadable)
+    # Root-level primary plus external extra: a successful local scan must not
+    # commit half its results after the external mount disappears.
+    result = scanner.scan_series(Series(title="Series", folder_name="."), issues, [root, external], root=root)
+    assert result.root_unavailable
+    assert issues[0].downloaded and issues[0].file_path == str(source)
+    assert issues[0].file_source == "fake" and issues[0].file_download_id == 10
+    assert not issues[1].downloaded
+
+
+async def test_external_share_lost_during_reconciliation_preserves_state(session, tmp_path, monkeypatch):
+    root = tmp_path / "library"
+    root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    source = external / "Series #001.cbz"
+    source.write_bytes(comic_bytes())
+    series = await make_series(session, root)
+    series.folder_name = str(external)
+    series.issues[0].file_path = str(source)
+    await session.commit()
+    original = Path.is_file
+
+    def disappear(path):
+        if path == source:
+            source.unlink()
+            external.rmdir()
+            return False
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_file", disappear)
+    assert await tasks.reconcile_downloaded_files(session, series) == 0
+    assert series.issues[0].downloaded and series.issues[0].file_path == str(source)
+
+
+def test_empty_external_destination_without_owned_files_is_valid(tmp_path):
+    root = tmp_path / "library"
+    external = tmp_path / "external"
+    root.mkdir()
+    external.mkdir()
+    result = scanner.scan_series(Series(title="Series"), [], [external], root=root)
+    assert not result.root_unavailable
