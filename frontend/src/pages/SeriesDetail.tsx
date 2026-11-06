@@ -794,7 +794,7 @@ export default function SeriesDetail() {
                   className="volume-header"
                   onClick={() => setCollapsed({ ...collapsed, [key]: !isCollapsed })}
                 >
-                  <span className="chevron"><Icon name={isCollapsed ? "chevron-right" : "chevron-down"} size={14} /></span>
+                  <span className="chevron"><Icon name={isCollapsed ? "chevron-right" : "chevron-down"} size={16} /></span>
                   <button
                     className={`monitor-toggle${allMonitored ? " on" : ""}`}
                     title={allMonitored ? "Unmonitor this volume" : "Monitor this volume"}

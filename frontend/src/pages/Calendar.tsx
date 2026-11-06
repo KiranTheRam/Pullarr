@@ -31,7 +31,7 @@ export default function Calendar() {
       <p className="section-hint">Known ComicVine issue dates for series in your library. Dates can change as metadata is updated.</p>
       {releases.isLoading && <Spinner />}
       {releases.isError && <QueryError error={releases.error} retry={() => releases.refetch()} />}
-      {releases.data?.length === 0 && <EmptyState icon={<Icon name="calendar" size={40} />} title="No dated issues this month" hint="Try another month or refresh a series." />}
+      {releases.data?.length === 0 && <EmptyState icon={<Icon name="calendar" size={44} />} title="No dated issues this month" hint="Try another month or refresh a series." />}
       {releases.data && <div className="calendar-grid">
         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <div className="calendar-weekday" key={day}>{day}</div>)}
         {Array.from({ length: offset }, (_, index) => <div key={`blank-${index}`} className="calendar-day empty" />)}

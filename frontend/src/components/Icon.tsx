@@ -27,7 +27,7 @@ const artwork = {
   "scan": <><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M7 9h10M7 15h3m5 0h2"/><circle cx="12.5" cy="15" r=".5" fill="currentColor" stroke="none"/></>,
   "search-missing": <><circle cx="10" cy="10" r="5.5"/><path d="m14.5 14.5 5 5M10 7.5v5m-2.5-2.5h5"/></>,
   "search": <><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4.5 4.5"/></>,
-  "settings": <><path d="M10 3h4l.5 2.2 2 .9 1.9-1.1 2.8 2.8-1.1 1.9.9 2L23 12v2l-2.2.5-.9 2 1.1 1.9-2.8 2.8-1.9-1.1-2 .9L14 23h-4l-.5-2.2-2-.9-1.9 1.1-2.8-2.8 1.1-1.9-.9-2L1 14v-2l2.2-.5.9-2L3 7.6l2.8-2.8 1.9 1.1 2-.9z" transform="translate(1 1) scale(.92)"/><circle cx="12" cy="12" r="3"/></>,
+  "settings": <><path d="M10 3h4l.5 2.2 2 .9 1.9-1.1 2.8 2.8-1.1 1.9.9 2L23 12v2l-2.2.5-.9 2 1.1 1.9-2.8 2.8-1.9-1.1-2 .9L14 23h-4l-.5-2.2-2-.9-1.9 1.1-2.8-2.8 1.1-1.9-.9-2L1 14v-2l2.2-.5.9-2L3 7.6l2.8-2.8 1.9 1.1 2-.9z" transform="translate(.96 .04) scale(.92)"/><circle cx="12" cy="12" r="3"/></>,
   "wanted": <><circle cx="11" cy="11" r="6"/><path d="m15.5 15.5 4 4M11 8v3m0 3h.01"/></>,
   "warning": <><path d="M12 4 21 20H3zM12 9v5m0 3h.01"/></>,
 };
@@ -35,6 +35,6 @@ const artwork = {
 export type IconName = keyof typeof artwork;
 
 /** Decorative artwork: the surrounding label or control supplies the accessible name. */
-export function Icon({ name, size = 18, className = "" }: { name: IconName; size?: number; className?: string }) {
+export function Icon({ name, size = 20, className = "" }: { name: IconName; size?: number; className?: string }) {
   return <svg className={`ui-icon ${className}`.trim()} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{artwork[name]}</svg>;
 }

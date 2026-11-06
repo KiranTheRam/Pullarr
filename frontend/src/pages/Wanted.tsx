@@ -28,7 +28,7 @@ export default function Wanted() {
           <QueryError error={error} retry={() => refetch()} />
         ) : !data || data.length === 0 ? (
           <EmptyState
-            icon={<Icon name="check" size={40} />}
+            icon={<Icon name="check" size={44} />}
             title={scope === "automatic" ? "Nothing queued for automation" : scope === "future" ? "No upcoming monitored issues" : "No missing issues"}
             hint={scope === "automatic" ? "All released, monitored issues in monitored series are downloaded." : undefined}
           />

@@ -54,7 +54,7 @@ function PosterCard({ series, selecting, selected, onSelect }: { series: Series;
         }
       }}
     >
-      {selecting && <span className={`poster-select${selected ? " checked" : ""}`}>{selected ? <Icon name="check" size={14} /> : null}</span>}
+      {selecting && <span className={`poster-select${selected ? " checked" : ""}`}>{selected ? <Icon name="check" size={16} /> : null}</span>}
       {series.cover_url ? (
         <img src={series.cover_url} alt={series.title} loading="lazy" />
       ) : (
@@ -157,13 +157,13 @@ export default function Library() {
           <QueryError error={error} retry={() => refetch()} />
         ) : !data || data.length === 0 ? (
           <EmptyState
-            icon={<Icon name="library" size={40} />}
+            icon={<Icon name="library" size={44} />}
             title="Your library is empty"
             hint="Add a series to start building your comic collection."
           />
         ) : visible.length === 0 ? (
           <EmptyState
-            icon={<Icon name="search" size={40} />}
+            icon={<Icon name="search" size={44} />}
             title="No matches"
             hint={
               query

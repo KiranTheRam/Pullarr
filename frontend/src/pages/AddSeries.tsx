@@ -265,7 +265,7 @@ export default function AddSeries() {
         ) : isError ? (
           <QueryError error={error} retry={() => refetch()} />
         ) : results && results.length === 0 ? (
-          <EmptyState icon={<Icon name="search" size={40} />} title="No results" hint="Try a different title." />
+          <EmptyState icon={<Icon name="search" size={44} />} title="No results" hint="Try a different title." />
         ) : (
           results?.map((r) => {
             const clickable = canAdd && !r.in_library;
