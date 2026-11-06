@@ -877,10 +877,13 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
         nonlocal last_progress_commit
         if _is_cancelled(dl.id):
             raise DownloadCancelled("removed by user")
-        if total > 0:
-            dl.progress = min(done / total, 1.0)
+        progress = min(done / total, 1.0) if total > 0 else dl.progress
         now = time.monotonic()
-        if now - last_progress_commit >= 1.0 or dl.progress >= 1.0:
+        if now - last_progress_commit >= 1.0 or progress >= 1.0:
+            # Leave no pending progress UPDATE between commits. An ORM read
+            # would autoflush it and hold the write lock across the next slow
+            # download chunk, blocking settings saves and other jobs.
+            dl.progress = progress
             last_progress_commit = now
             await session.commit()
 

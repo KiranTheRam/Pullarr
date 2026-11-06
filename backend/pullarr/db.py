@@ -1,11 +1,37 @@
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .config import config
 
+# SQLite still permits only one writer; wait for short transactions to finish.
+BUSY_TIMEOUT_MS = 30_000
+
 engine = create_async_engine(config.db_url, echo=False)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        # Set this first, including for the first journal-mode transition.
+        cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA journal_mode")
+        current = cursor.fetchone()[0].lower()
+        wanted = "wal" if config.sqlite_wal else "delete"
+        # Memory databases keep their own journal; avoid redundant persistent
+        # mode changes when later pooled connections open during a write.
+        if current not in {wanted, "memory"}:
+            cursor.execute(f"PRAGMA journal_mode={wanted}")
+            actual = cursor.fetchone()[0].lower()
+            if actual != wanted:
+                raise RuntimeError(f"SQLite journal mode stayed {actual}; expected {wanted}")
+    finally:
+        cursor.close()
+
+
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

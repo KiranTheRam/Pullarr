@@ -20,6 +20,8 @@ class AppConfig(BaseSettings):
     log_level: str = "INFO"
     # When unset, an API key is generated on first run and stored in data_dir/api_key
     api_key: str | None = None
+    # WAL requires a local data_dir; disable before using NFS/SMB storage.
+    sqlite_wal: bool = True
     # Optional environment-managed HTTP Basic login. Otherwise set up in browser.
     allow_unauthenticated_browser: bool = False
     auth_username: str = ""

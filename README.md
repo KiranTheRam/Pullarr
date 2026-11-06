@@ -229,10 +229,33 @@ Environment variables (all optional):
 | ------------------- | ------- | ------------------------------------ |
 | `PULLARR_PORT`      | `6997`  | HTTP port                            |
 | `PULLARR_DATA_DIR`  | `data`  | SQLite DB, API key, DDL staging      |
+| `PULLARR_SQLITE_WAL` | `true` | Use WAL on local database storage; see below |
 | `PULLARR_AUTH_USERNAME` | *(empty)* | Optional environment-managed HTTP Basic login username |
 | `PULLARR_AUTH_PASSWORD` | *(empty)* | Browser login password; set together with the username |
 | `PULLARR_ALLOW_UNAUTHENTICATED_BROWSER` | `false` | Explicitly disable first-run login for an externally authenticated deployment |
 | `PULLARR_ALLOWED_HOSTS` | `[]` | Additional exact DNS names as a JSON array (no scheme, port or wildcard) |
+
+**Database storage and backups.** SQLite uses WAL so reads can continue while
+another connection writes, with a 30-second busy timeout for competing writers.
+Keep the config/data directory on local storage: WAL does not support NFS/SMB.
+If that directory uses network storage, set `PULLARR_SQLITE_WAL=false` before
+starting; Pullarr switches the database back to the DELETE rollback journal.
+This avoids WAL's shared-memory requirement; the filesystem must still provide
+reliable SQLite locking. Prefer local storage for the database even when comics
+live on a network share. The directory must be writable for SQLite's sidecar files.
+
+WAL creates `pullarr.db-wal` and `pullarr.db-shm` beside the database; committed
+data may still be in the WAL. Use SQLite's online backup API or
+`sqlite3 pullarr.db ".backup backup.db"` for a live backup. For a filesystem
+backup, stop every process accessing the database first and copy the database
+and any remaining sidecars together. Never copy just a live `pullarr.db`.
+
+The journal change requires no schema migration. To roll back WAL, stop all
+Pullarr processes, keep a verified backup, then restart with
+`PULLARR_SQLITE_WAL=false` (or run `PRAGMA journal_mode=DELETE` with SQLite
+while the app is stopped). Confirm the returned mode is `delete` before moving
+the database to network storage or running an older image. Rolling back this
+change leaves the existing schema and download records intact.
 
 Everything else (ComicVine key, GetComics base URL/proxy, naming template,
 qBittorrent, monitor interval) lives in the UI under Settings and is stored
