@@ -20,7 +20,7 @@ const artwork = {
   "folder-up": <><path d="M3 8a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM12 17v-6m-3 3 3-3 3 3"/></>,
   "folder": <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></>,
   "history": <><path d="M4 11a8 8 0 1 1 2 6M4 5v6h6M12 7v5l3 2"/></>,
-  "library": <><path d="M4 5h4v14H4zM10 5h4v14h-4zM16 6l3-1 2 13-3 1z"/></>,
+  "library": <><rect x="4" y="5" width="4" height="14" rx="0.6"/><rect x="10" y="5" width="4" height="14" rx="0.6"/><rect x="16" y="5" width="4" height="14" rx="0.6" transform="rotate(-8 18 12)"/></>,
   "link": <><path d="m10 14 4-4M8 16H6a4 4 0 0 1 0-8h3m6 0h3a4 4 0 1 1 0 8h-3"/></>,
   "refresh": <><path d="M19 9a7.5 7.5 0 0 0-13-2L4 9m0-5v5h5M5 15a7.5 7.5 0 0 0 13 2l2-2m0 5v-5h-5"/></>,
   "rename": <><path d="m5 16-.5 3.5L8 19 19 8l-3-3zM14.5 6.5l3 3M5 21h14"/></>,
