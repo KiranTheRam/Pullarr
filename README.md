@@ -150,8 +150,9 @@ holds more than once is ambiguous — rather than guess between reboots it falls
 back to a library scan, as it also does for a series Kavita has never indexed.
 Alternate titles are excluded because they can name an unrelated existing
 series. *Whole library every time* skips the lookup. Each import restarts a
-15-second quiet period for its series; later imports within five minutes of
-its last scan wait for one trailing scan. Other series can scan independently,
+15-second quiet period for its series, capped at one minute of continuous
+imports. Later imports within five minutes of its last scan wait for one
+trailing scan. Other series can scan independently,
 and a library scan covers all series targets in the same batch. Pending scans
 are held in memory and are lost on restart. A Kavita that is down or
 misconfigured never fails a download.

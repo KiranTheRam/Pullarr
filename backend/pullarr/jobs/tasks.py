@@ -23,7 +23,8 @@ from ..db import session_scope
 from ..download.ddl import DownloadCancelled, download_release
 from ..download.qbittorrent import QbtClient, QbtError
 from ..library.importer import import_payload
-from ..library.scanner import LibraryUnavailableError, require_root_available, root_unavailable
+from ..library.scanner import (LibraryUnavailableError, recorded_files_expect_content,
+                               require_root_available, root_unavailable)
 from ..library.work import run_library_work
 from ..metadata.comicvine import derive_status, provider as comicvine
 from ..metadata.metron import provider as metron
@@ -298,17 +299,18 @@ async def link_sources(session: AsyncSession, series: Series, values: dict[str, 
 
 async def root_expects_content(session: AsyncSession, series: Series) -> bool:
     """A new series shares the mount assumptions of all its root's neighbours."""
-    if any(issue.downloaded for issue in series.issues):
-        return True
     if series.root_folder is None:
         return False
+    root = Path(series.root_folder.path)
+    if recorded_files_expect_content(root, (issue.file_path for issue in series.issues if issue.downloaded)):
+        return True
     owned = await session.execute(
-        select(Issue.id).join(Series, Issue.series_id == Series.id).where(
+        select(Issue.file_path).join(Series, Issue.series_id == Series.id).where(
             Series.root_folder_id == series.root_folder.id,
             Issue.downloaded == True,  # noqa: E712
-        ).limit(1)
+        )
     )
-    return owned.first() is not None
+    return recorded_files_expect_content(root, owned.scalars())
 
 
 async def library_root_unavailable(session: AsyncSession, series: Series) -> str:

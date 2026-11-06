@@ -141,6 +141,13 @@ def series_folder(series_title: str, year: int | None = None) -> str:
     return sanitize_filename(series_title)
 
 
+def unmatched_filename(series_title: str, source_stem: str, year: int | None = None,
+                       ext: str = ".cbz") -> str:
+    """Preserve an extra's identity within the same atomic-write byte budget."""
+    budget = NAME_MAX_BYTES - len((ext + _ATOMIC_SUFFIX).encode("utf-8"))
+    return sanitize_filename(f"{series_folder(series_title, year)} - {source_stem}", budget) + ext
+
+
 def issue_path(
     root: Path,
     template: str,

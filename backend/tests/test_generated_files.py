@@ -211,3 +211,34 @@ def test_import_keeps_long_issue_names_and_shared_series_prefixes_separate(tmp_p
     assert len(set(placed)) == 4
     assert len({dest.parent for dest in placed}) == 2
     assert not list(root.rglob("*.importing")) and not list(root.rglob("*.metadata-partial"))
+
+
+@pytest.mark.parametrize("char,extension", [("x", ".cbz"), ("長", ".zip")])
+def test_long_unmatched_import_names_fit_and_remain_distinct(tmp_path, char, extension):
+    from pullarr.library.importer import import_payload
+    from pullarr.models import Series
+
+    root = tmp_path / "library"
+    root.mkdir()
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    # Both source names fit one filesystem component. Their full generated
+    # destination names used to exceed it after adding the series prefix.
+    stems = [char * (240 // len(char.encode())) + ending for ending in ("One", "Two")]
+    for index, stem in enumerate(stems):
+        with zipfile.ZipFile(payload / f"{stem}{extension}", "w") as archive:
+            archive.writestr("001.png", b"page" + bytes([index]))
+    series = Series(title="A moderately long series title", year=2026, folder_name="Series")
+    imported = import_payload(payload, series, [], root, naming.DEFAULT_TEMPLATE, move=True)
+    assert len(imported) == 2
+    assert len({item.dest.name for item in imported}) == 2
+    for index, item in enumerate(imported):
+        assert item.status == "unmatched" and not item.covered
+        assert item.dest.suffix == ".cbz"
+        assert len((item.dest.name + ".metadata-partial").encode()) <= 255
+        assert item.dest.name == naming.unmatched_filename(series.title, stems[index], series.year)
+        with zipfile.ZipFile(item.dest) as archive:
+            assert archive.read("001.png") == b"page" + bytes([index])
+            assert "ComicInfo.xml" in archive.namelist()
+    assert not list(payload.iterdir())
+    assert not list(root.rglob("*.importing")) and not list(root.rglob("*.metadata-partial"))

@@ -38,6 +38,8 @@ TIMEOUT = 30.0
 # Issues of one series import one after another; each would otherwise fire its
 # own scan. Collect a burst and scan once when it goes quiet.
 DEBOUNCE_SECONDS = 15.0
+# Continuous fast imports must still become visible before the run finishes.
+MAX_DEBOUNCE_SECONDS = 60.0
 
 # Imports can finish further apart than the debounce window. Coalesce those
 # into a later scan instead of asking Kavita to scan after every issue.
@@ -324,8 +326,14 @@ class ScanRequest:
     titles: tuple[str, ...]  # most specific first (year-qualified, then bare)
 
 
+@dataclass
+class PendingScan:
+    due_at: float
+    deadline: float
+
+
 # Monotonic due times and last attempts, keyed by the series' own names/root.
-_pending: dict[ScanRequest, float] = {}
+_pending: dict[ScanRequest, PendingScan] = {}
 _last_scanned: dict[ScanRequest, float] = {}
 _wake: asyncio.Event | None = None
 _flush_task: asyncio.Task | None = None
@@ -387,12 +395,12 @@ async def _flush() -> None:
         # pending, including another import for the target currently scanning.
         while _pending:
             now = loop.time()
-            requests = {request for request, due in _pending.items() if due <= now}
+            requests = {request for request, pending in _pending.items() if pending.due_at <= now}
             if not requests:
                 assert _wake is not None
                 _wake.clear()
                 try:
-                    await asyncio.wait_for(_wake.wait(), min(_pending.values()) - now)
+                    await asyncio.wait_for(_wake.wait(), min(p.due_at for p in _pending.values()) - now)
                 except asyncio.TimeoutError:
                     pass
                 continue
@@ -415,8 +423,8 @@ async def _flush() -> None:
                     for request in requests:
                         _last_scanned[request] = completed
                         if request in _pending:
-                            _pending[request] = max(
-                                _pending[request], completed + RESCAN_SECONDS
+                            _pending[request].due_at = max(
+                                _pending[request].due_at, completed + RESCAN_SECONDS
                             )
     finally:
         _flush_task = None
@@ -449,9 +457,14 @@ def notify_import(
         root_path=root_path,
         titles=tuple(dict.fromkeys(t.strip() for t in titles if t and t.strip())),
     )
-    _pending[request] = max(
-        now + DEBOUNCE_SECONDS,
-        _last_scanned.get(request, now - RESCAN_SECONDS) + RESCAN_SECONDS,
+    pending = _pending.get(request)
+    deadline = pending.deadline if pending else now + MAX_DEBOUNCE_SECONDS
+    _pending[request] = PendingScan(
+        due_at=max(
+            min(now + DEBOUNCE_SECONDS, deadline),
+            _last_scanned.get(request, now - RESCAN_SECONDS) + RESCAN_SECONDS,
+        ),
+        deadline=deadline,
     )
     if _flush_task is None or _flush_task.done():
         _wake = asyncio.Event()

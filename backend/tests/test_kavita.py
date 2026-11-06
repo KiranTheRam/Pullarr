@@ -541,6 +541,31 @@ async def test_every_import_restarts_its_series_debounce(scan_batches):
     assert scan_batches.empty()
 
 
+async def test_continuous_imports_scan_before_the_series_goes_quiet(scan_batches, monkeypatch):
+    monkeypatch.setattr(kavita, "MAX_DEBOUNCE_SECONDS", 0.12)
+    still_importing = asyncio.Event()
+    still_importing.set()
+
+    async def import_continuously():
+        while still_importing.is_set():
+            kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+            await asyncio.sleep(0.01)
+
+    producer = asyncio.create_task(import_continuously())
+    try:
+        _, requests = await next_batch(scan_batches)
+        assert requests == {ScanRequest(1, "/comics/DC", ("Batman",))}
+        assert not producer.done() and still_importing.is_set()
+        # The next scan also cannot starve, and must retain its rescan floor.
+        completed = asyncio.get_running_loop().time()
+        _, requests = await next_batch(scan_batches)
+        assert requests == {ScanRequest(1, "/comics/DC", ("Batman",))}
+        assert asyncio.get_running_loop().time() - completed >= kavita.RESCAN_SECONDS - 0.01
+    finally:
+        still_importing.clear()
+        await producer
+
+
 async def test_slow_issue_burst_has_one_trailing_scan_after_cooldown(scan_batches):
     kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
     await next_batch(scan_batches)

@@ -11,6 +11,8 @@ of them and, where an issue is available both as a loose file and inside a
 whole-volume archive, the exact issue file wins."""
 
 import logging
+import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,6 +44,20 @@ def series_dir(root: Path, series: Series) -> Path:
 
 class LibraryUnavailableError(RuntimeError):
     """The configured library cannot currently be trusted for reads or writes."""
+
+
+def recorded_files_expect_content(root: Path, paths: Iterable[str]) -> bool:
+    """Only ownership inside this root proves its mount should be populated.
+
+    Absolute extra folders can hold all of a series' files while its primary
+    root is legitimately empty. Compare recorded paths without touching a
+    potentially unavailable share. Unknown legacy paths stay conservative.
+    """
+    try:
+        recorded_root = Path(os.path.abspath(root))
+        return any(not path or Path(os.path.abspath(path)).is_relative_to(recorded_root) for path in paths)
+    except OSError:
+        return True
 
 
 def root_unavailable(root: Path, expect_content: bool = True) -> str:
@@ -133,7 +149,7 @@ def scan_series(
     if root is None:
         return _scan_series(series, issues, folders)
     if expect_content is None:
-        expect_content = any(issue.downloaded for issue in issues)
+        expect_content = recorded_files_expect_content(root, (issue.file_path for issue in issues if issue.downloaded))
     reason = root_unavailable(root, expect_content)
     if reason:
         return ScanResult(root_unavailable=reason)

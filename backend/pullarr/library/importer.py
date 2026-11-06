@@ -23,8 +23,9 @@ from ..download.archive import (ArchiveBudget, ImportValidationError, MAX_ARCHIV
 from ..models import Issue, Series
 from ..util import normalize_title, strip_issue_suffix
 from .matcher import ARCHIVE_EXTS, IMAGE_EXTS, MediaFile, find_media_files, match_files
-from .naming import issue_filename, range_filename, series_folder, volume_filename, volume_range_filename
-from .scanner import require_root_available
+from .naming import (issue_filename, range_filename, series_folder, unmatched_filename,
+                     volume_filename, volume_range_filename)
+from .scanner import recorded_files_expect_content, require_root_available
 
 log = logging.getLogger(__name__)
 
@@ -219,7 +220,7 @@ def import_payload(
     archive_budget = _archive_budget or ArchiveBudget()
     library_root = Path(library_root)
     if check_library is None:
-        expect_content = any(issue.downloaded for issue in issues)
+        expect_content = recorded_files_expect_content(library_root, (issue.file_path for issue in issues if issue.downloaded))
         check_library = lambda: require_root_available(library_root, expect_content)
     check_library()
     folder = library_root / (
@@ -277,7 +278,7 @@ def import_payload(
         elif volume is not None:
             dest_name = volume_filename(series.title, volume, ext)
         else:
-            dest_name = f"{series_folder(series.title, series.year)} - {media.path.stem}{ext}"
+            dest_name = unmatched_filename(series.title, media.path.stem, series.year, ext)
         return folder / dest_name
 
     def place(media: MediaFile, issue: Issue | None, volume: int | None,

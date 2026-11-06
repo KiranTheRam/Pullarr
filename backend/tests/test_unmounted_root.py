@@ -15,7 +15,7 @@ from pullarr.api import library
 from pullarr.jobs import tasks
 from pullarr.library import importer, scanner
 from pullarr.library.naming import DEFAULT_TEMPLATE
-from pullarr.models import Base, Download, DownloadKind, DownloadStatus, Issue, RootFolder, Series, SeriesSourceLink
+from pullarr.models import Base, Download, DownloadKind, DownloadStatus, Issue, RootFolder, Series, SeriesFolder, SeriesSourceLink
 from pullarr.sources.base import DDLSource, SourceRelease
 
 
@@ -174,6 +174,69 @@ async def test_new_series_in_neighbours_empty_root_is_blocked(session, tmp_path)
     with pytest.raises(HTTPException) as error:
         await library.scan(newcomer.id, session)
     assert error.value.status_code == 409
+
+
+async def test_external_extra_folder_does_not_make_empty_primary_root_unavailable(session, tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    extra = tmp_path / "other" / "Series"
+    extra.mkdir(parents=True)
+    external = extra / "Series #001.cbz"
+    external.write_bytes(comic_bytes())
+    series = await make_series(session, root)
+    series.issues[0].file_path = str(external)
+    series.extra_folders.append(SeriesFolder(path=str(extra)))
+    await session.commit()
+
+    assert not await tasks.root_expects_content(session, series)
+    assert await tasks.library_root_unavailable(session, series) == ""
+    result = await library.scan(series.id, session)
+    assert result.cleared == 0
+    assert series.issues[0].downloaded and series.issues[0].file_path == str(external)
+    assert await tasks.reconcile_downloaded_files(session, series) == 0
+    assert not list(root.iterdir())
+
+    # The direct scanner/importer defaults must use the same path-aware rule.
+    result = scanner.scan_series(series, list(series.issues), [extra], root=root)
+    assert not result.root_unavailable
+    payload = tmp_path / "Series #002.cbz"
+    payload.write_bytes(comic_bytes())
+    placed = importer.import_payload(payload, series, list(series.issues), root, DEFAULT_TEMPLATE)
+    assert placed[0].covered == [series.issues[1]]
+    assert external.exists() and placed[0].dest.is_file()
+
+
+async def test_external_only_neighbour_does_not_block_new_series(session, tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    existing = await make_series(session, root)
+    extra = tmp_path / "library-other" / "Series #001.cbz"
+    extra.parent.mkdir()
+    extra.write_bytes(comic_bytes())
+    existing.issues[0].file_path = str(extra)
+    newcomer = Series(title="New", root_folder=existing.root_folder, issues=[Issue(number=1)])
+    session.add(newcomer)
+    await session.commit()
+    newcomer = await tasks._load_series(session, newcomer.id)
+    assert not await tasks.root_expects_content(session, newcomer)
+    assert await tasks.library_root_unavailable(session, newcomer) == ""
+    await library.scan(newcomer.id, session)
+
+    # A missing file recorded beneath the root still proves a lost mount,
+    # even when an external-only neighbour was returned by the query first.
+    internal = Series(title="Internal", root_folder=existing.root_folder,
+                      issues=[Issue(number=1, downloaded=True, file_path=str(root / "missing.cbz"))])
+    session.add(internal)
+    await session.commit()
+    assert await tasks.root_expects_content(session, newcomer)
+    assert "empty" in await tasks.library_root_unavailable(session, newcomer)
+
+
+def test_unknown_owned_path_retains_conservative_root_check(tmp_path):
+    issue = Issue(number=1, downloaded=True, file_path="")
+    result = scanner.scan_series(Series(title="Series"), [issue], [], root=tmp_path)
+    assert result.root_unavailable
+    assert issue.downloaded
 
 
 async def test_resync_rejects_before_deleting_owned_rows(session, tmp_path):
