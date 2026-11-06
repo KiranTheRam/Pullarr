@@ -3,6 +3,7 @@ source linking, grabbing, DDL download processing, qBittorrent sync, and the
 monitor loop."""
 
 import base64
+from contextlib import AsyncExitStack
 import binascii
 import logging
 import re
@@ -20,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from .. import kavita, notifications
 from ..config import config
 from ..db import session_scope
+from ..download.coordination import importing_download, _importing_downloads
 from ..download.ddl import DownloadCancelled, download_release
 from ..download.qbittorrent import QbtClient, QbtError
 from ..library.importer import import_payload
@@ -63,7 +65,6 @@ BTIH_RE = re.compile(r"btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})")
 ISSUE_SEARCH_CAP = 5
 
 _active_downloads: dict[int, Event] = {}
-_importing_downloads: set[int] = set()
 
 
 FAILED_GRAB_RETRY_AFTER = timedelta(hours=24)
@@ -127,11 +128,7 @@ def download_is_importing(download_id: int) -> bool:
 
 
 async def _import_download_payload(download_id: int, *args, **kwargs):
-    _importing_downloads.add(download_id)
-    try:
-        return await run_library_work(import_payload, *args, **kwargs)
-    finally:
-        _importing_downloads.discard(download_id)
+    return await run_library_work(import_payload, *args, **kwargs)
 
 
 def _is_cancelled(download_id: int) -> bool:
@@ -817,12 +814,15 @@ async def _run_direct_download(session: AsyncSession, dl: Download) -> None:
         return
     _active_downloads[dl.id] = Event()
     try:
-        await _run_direct_attempt(session, dl)
+        async with AsyncExitStack() as import_stack:
+            await _run_direct_attempt(session, dl, import_stack)
     finally:
         _active_downloads.pop(dl.id, None)
 
 
-async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
+async def _run_direct_attempt(
+    session: AsyncSession, dl: Download, import_stack: AsyncExitStack,
+) -> None:
     values = await registry.apply_settings(session)
     await session.refresh(dl)
     if dl.status != DownloadStatus.QUEUED or _is_cancelled(dl.id):
@@ -899,6 +899,8 @@ async def _run_direct_attempt(session: AsyncSession, dl: Download) -> None:
             source, dl.payload, _staging_dir(values),
             progress_cb=on_progress, cancel_cb=should_cancel,
         )
+        # Hold through all later awaits, cleanup and completion bookkeeping.
+        await import_stack.enter_async_context(importing_download(dl.id))
         await session.refresh(dl)
         if dl.status == DownloadStatus.FAILED or _is_cancelled(dl.id):
             dl.status = DownloadStatus.FAILED
@@ -1082,15 +1084,16 @@ async def sync_qbittorrent() -> None:
                             error=str(exc)[:500], error_code="invalid_payload",
                         )
                         continue
-                    if not await _update_if_still_synced(
-                        session, dl, status=DownloadStatus.IMPORTING,
-                    ):
-                        log.info("torrent download %d left the queue during sync; "
-                                 "not importing it", dl.id)
-                        continue
-                    await _import_torrent(
-                        session, dl, Path(torrent.content_path), values, files=files,
-                    )
+                    async with importing_download(dl.id):
+                        if not await _update_if_still_synced(
+                            session, dl, status=DownloadStatus.IMPORTING,
+                        ):
+                            log.info("torrent download %d left the queue during sync; "
+                                     "not importing it", dl.id)
+                            continue
+                        await _import_torrent(
+                            session, dl, Path(torrent.content_path), values, files=files,
+                        )
                 else:
                     await session.commit()
         finally:

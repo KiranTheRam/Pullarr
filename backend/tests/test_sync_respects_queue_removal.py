@@ -184,3 +184,166 @@ async def test_missing_torrent_stays_queued_without_import(env):
     async with maker() as session:
         assert (await session.get(Download, dl_id)).status == DownloadStatus.DOWNLOADING
     assert imports == []
+
+
+@pytest.mark.parametrize("pause", ["after_claim", "before_completion_commit"])
+async def test_removal_is_rejected_through_claim_and_completion(env, monkeypatch, pause):
+    from fastapi import HTTPException
+
+    maker, client, dl_id, library, _ = env
+    entered, release = asyncio.Event(), asyncio.Event()
+    if pause == "after_claim":
+        original = tasks._load_series
+
+        async def paused_load(*args):
+            # The IMPORTING claim has committed on a separate connection.
+            entered.set()
+            await release.wait()
+            return await original(*args)
+
+        monkeypatch.setattr(tasks, "_load_series", paused_load)
+    else:
+        # Pause the real session's commit after files have been written and
+        # ownership/history have been staged, before any are durable.
+        from sqlalchemy.ext.asyncio import AsyncSession
+        original = AsyncSession.commit
+
+        async def paused_commit(session):
+            if any(isinstance(row, HistoryEvent) and row.event == "imported"
+                   for row in session.new):
+                entered.set()
+                await release.wait()
+            return await original(session)
+
+        monkeypatch.setattr(AsyncSession, "commit", paused_commit)
+    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        async with maker() as session:
+            assert (await session.get(Download, dl_id)).status == DownloadStatus.IMPORTING
+            with pytest.raises(HTTPException) as exc:
+                await queue._remove_downloads(session, [dl_id])
+            assert exc.value.status_code == 409
+        assert client.deleted == []
+        assert bool(list(library.rglob("*.cbz"))) == (pause == "before_completion_commit")
+    finally:
+        release.set()
+        await asyncio.wait_for(sync, 5)
+    assert not tasks.download_is_importing(dl_id)
+    async with maker() as session:
+        assert (await session.get(Download, dl_id)).status == DownloadStatus.DONE
+        assert (await session.scalar(select(Issue))).downloaded
+        assert (await session.scalars(select(HistoryEvent.event))).all() == ["imported"]
+    assert len(list(library.rglob("*.cbz"))) == 1
+
+
+async def test_removal_transaction_finishes_before_import_claim(env, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    maker, client, dl_id, _, _ = env
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = AsyncSession.commit
+
+    async def paused_commit(session):
+        if any(isinstance(row, HistoryEvent) and row.event == "removed"
+               for row in session.new):
+            entered.set()
+            await release.wait()
+        return await original(session)
+
+    monkeypatch.setattr(AsyncSession, "commit", paused_commit)
+
+    async def remove():
+        async with maker() as session:
+            await queue._remove_downloads(session, [dl_id])
+
+    claim_entered = asyncio.Event()
+    original_guard = tasks.importing_download
+
+    @asynccontextmanager
+    async def attempted_claim(download_id):
+        claim_entered.set()
+        async with original_guard(download_id):
+            yield
+
+    monkeypatch.setattr(tasks, "importing_download", attempted_claim)
+    removal = asyncio.create_task(remove())
+    await asyncio.wait_for(entered.wait(), 5)
+    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    try:
+        # Sync has finished qBittorrent calls and is trying to acquire the
+        # same download's lock while the removal transaction still owns it.
+        await asyncio.wait_for(claim_entered.wait(), 5)
+        assert not tasks.download_is_importing(dl_id)
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(removal, sync), 5)
+    assert not tasks.download_is_importing(dl_id)
+    await assert_removed(env)
+
+
+@pytest.mark.parametrize("pause", ["after_claim", "before_completion_commit"])
+async def test_direct_import_guard_also_covers_awaits_and_completion(env, monkeypatch, pause):
+    from fastapi import HTTPException
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    maker, client, dl_id, library, _ = env
+    async with maker() as session:
+        dl = await session.get(Download, dl_id)
+        dl.kind, dl.status, dl.source_name = DownloadKind.DIRECT, DownloadStatus.QUEUED, "fake"
+        await session.commit()
+    values = dict(settings_service.DEFAULTS, source_fake_enabled="true")
+
+    async def settings(session):
+        return values
+
+    async def download(*args, **kwargs):
+        return client.payload.parent
+
+    monkeypatch.setattr(tasks.registry, "apply_settings", settings)
+    monkeypatch.setitem(tasks.registry.DDL_SOURCES, "fake", object())
+    monkeypatch.setattr(tasks, "download_release", download)
+    entered, release = asyncio.Event(), asyncio.Event()
+    if pause == "after_claim":
+        original = tasks._import_download_payload
+
+        async def paused_import(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(tasks, "_import_download_payload", paused_import)
+    else:
+        original = AsyncSession.commit
+
+        async def paused_commit(session):
+            if any(isinstance(row, HistoryEvent) and row.event == "imported"
+                   for row in session.new):
+                entered.set()
+                await release.wait()
+            return await original(session)
+
+        monkeypatch.setattr(AsyncSession, "commit", paused_commit)
+
+    async def run():
+        async with maker() as session:
+            await tasks._run_direct_download(session, await session.get(Download, dl_id))
+
+    worker = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        async with maker() as session:
+            assert (await session.get(Download, dl_id)).status == DownloadStatus.IMPORTING
+            with pytest.raises(HTTPException) as exc:
+                await queue._remove_downloads(session, [dl_id])
+            assert exc.value.status_code == 409
+    finally:
+        release.set()
+        await asyncio.wait_for(worker, 5)
+    assert not tasks.download_is_importing(dl_id)
+    assert not tasks.download_is_active(dl_id)
+    async with maker() as session:
+        assert (await session.get(Download, dl_id)).status == DownloadStatus.DONE
+        assert (await session.scalar(select(Issue))).downloaded
+        assert (await session.scalars(select(HistoryEvent.event))).all() == ["imported"]
+    assert len(list(library.rglob("*.cbz"))) == 1

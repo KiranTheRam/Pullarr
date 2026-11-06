@@ -222,22 +222,34 @@ def import_payload(
     if check_library is None:
         expect_content = recorded_files_expect_content(library_root, (issue.file_path for issue in issues if issue.downloaded))
         check_library = lambda: require_root_available(library_root, expect_content)
-    check_library()
-    folder = library_root / (
-        series.folder_name or series_folder(series.title, series.year)
-    )
-    # Create only children, never the configured mount point or its parents.
-    # A disappearance after the check must fail instead of rebuilding the root.
-    if library_root not in folder.parents:
-        raise ImportValidationError("invalid series folder outside library root")
-    missing = []
-    current = folder
-    while current != library_root and not current.exists():
-        missing.append(current)
-        current = current.parent
-    for child in reversed(missing):
+    folder_name = series.folder_name or series_folder(series.title, series.year)
+    folder = library_root / folder_name
+    if Path(folder_name).is_absolute():
+        # Explicit external primary folders are supported, but are themselves
+        # availability boundaries: never recreate a missing external mount.
+        root_check = check_library
+        expect_destination = recorded_files_expect_content(
+            folder, (issue.file_path for issue in issues if issue.downloaded),
+        )
+
+        def check_library():
+            root_check()
+            require_root_available(folder, expect_destination)
+
         check_library()
-        child.mkdir(exist_ok=True)
+    else:
+        # Relative folders may equal the root ("."), but must stay within it.
+        if not folder.resolve().is_relative_to(library_root.resolve()):
+            raise ImportValidationError("invalid series folder outside library root")
+        check_library()
+        missing = []
+        current = folder
+        while current != library_root and not current.exists():
+            missing.append(current)
+            current = current.parent
+        for child in reversed(missing):
+            check_library()
+            child.mkdir(exist_ok=True)
     imported: list[ImportedFile] = []
     media_files = find_media_files(content_path, files=files)
 

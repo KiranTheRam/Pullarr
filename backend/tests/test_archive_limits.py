@@ -1,6 +1,7 @@
 """Hostile containers must be bounded without changing ordinary comic payloads."""
 import io
 import os
+import shlex
 import stat
 import struct
 import subprocess
@@ -208,7 +209,10 @@ def test_nested_extract_uses_checked_member_and_cumulative_budget(tmp_path):
 
 def fake_decoder(tmp_path, body):
     decoder = tmp_path / "decoder"
-    decoder.write_text(f"#!{sys.executable}\n" + body)
+    script = tmp_path / "decoder.py"
+    script.write_text(body)
+    decoder.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable)
+                       + " " + shlex.quote(str(script)) + ' "$@"\n')
     decoder.chmod(0o700)
     return str(decoder)
 

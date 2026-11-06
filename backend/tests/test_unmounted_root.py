@@ -399,3 +399,49 @@ async def test_source_failure_retains_its_cooldown(session, tmp_path, monkeypatc
     assert dl.status == DownloadStatus.FAILED
     assert dl.error_code == "network_error"
     assert await tasks.grab_missing_issues(session, series, values) == 0
+
+
+@pytest.mark.parametrize("destination", ["external", "root"])
+def test_import_preserves_supported_primary_destinations(tmp_path, destination):
+    root = tmp_path / "library"
+    root.mkdir()
+    folder = tmp_path / "external" if destination == "external" else root
+    folder.mkdir(exist_ok=True)
+    source = tmp_path / "Series #2.cbz"
+    source.write_bytes(comic_bytes())
+    series = Series(title="Series", folder_name=str(folder) if destination == "external" else ".")
+    issue = Issue(number=2, downloaded=False)
+    result = importer.import_payload(source, series, [issue], root, DEFAULT_TEMPLATE)
+    assert len(result) == 1 and result[0].dest.parent == folder
+    assert result[0].dest.is_file()
+
+
+@pytest.mark.parametrize("state", ["missing", "empty_owned", "lost_during_copy"])
+def test_external_primary_is_an_availability_boundary(tmp_path, monkeypatch, state):
+    root = tmp_path / "library"
+    root.mkdir()
+    external = tmp_path / "external"
+    if state != "missing":
+        external.mkdir()
+    source = tmp_path / "Series #2.cbz"
+    source.write_bytes(comic_bytes())
+    series = Series(title="Series", folder_name=str(external))
+    issues = [Issue(number=2, downloaded=False)]
+    if state == "empty_owned":
+        issues.append(owned(external))
+    if state == "lost_during_copy":
+        original = importer.shutil.copy2
+
+        def lose_destination(*args, **kwargs):
+            result = original(*args, **kwargs)
+            shutil.rmtree(external)
+            return result
+
+        monkeypatch.setattr(importer.shutil, "copy2", lose_destination)
+    with pytest.raises(scanner.LibraryUnavailableError):
+        importer.import_payload(source, series, issues, root, DEFAULT_TEMPLATE)
+    assert source.exists()
+    assert not list(root.rglob("*.cbz"))
+    assert not list(external.glob("*.cbz"))
+    if state == "missing":
+        assert not external.exists()
