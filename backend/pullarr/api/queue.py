@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..download.coordination import queue_mutation
 from ..db import get_session
 from ..download.qbittorrent import QbtClient
 from ..jobs.tasks import (
@@ -85,6 +86,7 @@ async def retry_download(download_id: int, session: AsyncSession = Depends(get_s
         dl.status = DownloadStatus.QUEUED
     dl.progress = 0.0
     dl.attempt_count = 0
+    dl.transient_error = False
     dl.next_retry_at = None
     dl.error = ""
     dl.error_code = ""
@@ -146,28 +148,31 @@ async def resolve_download(download_id: int, session: AsyncSession = Depends(get
 
 async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
     """Mark downloads as removed and stop matching qBittorrent transfers."""
-    result = await session.execute(select(Download).where(Download.id.in_(ids)))
-    downloads = result.scalars().all()
-    if any(download_is_importing(dl.id) for dl in downloads):
+    if any(download_is_importing(download_id) for download_id in ids):
         raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
-    hashes = [
-        dl.torrent_hash for dl in downloads
-        if dl.kind == DownloadKind.TORRENT and dl.torrent_hash and dl.status in ACTIVE
-    ]
-    for dl in downloads:
-        dl.status = DownloadStatus.FAILED
-        dl.error = "removed by user"
-        dl.error_code = "cancelled"
-        dl.next_retry_at = None
-        dl.blocked = False
-        session.add(HistoryEvent(
-            series_id=dl.series_id,
-            issue_id=dl.issue_id,
-            event="removed",
-            source_name=dl.source_name,
-            detail=dl.title or "Download removed by user",
-        ))
-    await session.commit()
+    async with queue_mutation(ids):
+        result = await session.execute(select(Download).where(Download.id.in_(ids)))
+        downloads = result.scalars().all()
+        if any(download_is_importing(dl.id) for dl in downloads):
+            raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
+        hashes = [
+            dl.torrent_hash for dl in downloads
+            if dl.kind == DownloadKind.TORRENT and dl.torrent_hash and dl.status in ACTIVE
+        ]
+        for dl in downloads:
+            dl.status = DownloadStatus.FAILED
+            dl.error = "removed by user"
+            dl.error_code = "cancelled"
+            dl.next_retry_at = None
+            dl.blocked = False
+            session.add(HistoryEvent(
+                series_id=dl.series_id,
+                issue_id=dl.issue_id,
+                event="removed",
+                source_name=dl.source_name,
+                detail=dl.title or "Download removed by user",
+            ))
+        await session.commit()
     cancel_downloads([
         dl.id for dl in downloads
         if dl.kind == DownloadKind.DIRECT and dl.status == DownloadStatus.FAILED

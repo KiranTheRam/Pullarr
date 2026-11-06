@@ -3,11 +3,25 @@ Kavita). GetComics files arrive as finished CBR/CBZ archives, so instead of
 packing pages we inject/refresh ComicInfo.xml into CBZ (zip) files on import;
 CBR (rar) can't be rewritten without rar tooling and is left untouched."""
 
+import re
+from copy import copy
 import shutil
 import zipfile
+import zlib
 from pathlib import Path
 from xml.dom import minidom
-from xml.etree.ElementTree import Element, ParseError, SubElement, fromstring, tostring
+from xml.etree.ElementTree import Element, ParseError, SubElement, TreeBuilder, XMLParser, fromstring, tostring
+
+from .archive import (ArchiveBudget, ImportValidationError, MAX_ARCHIVE_ENTRIES, MAX_EXPANDED_BYTES,
+                      MAX_MEMBER_BYTES, checked_zip_infos,
+                      copy_zip_member, expansion_limit, open_zip)
+
+
+# Plenty for ordinary metadata, independent of the archive's compressed size.
+MAX_COMICINFO_BYTES = 1024 * 1024
+
+# XML 1.0 Char, including supplementary Unicode but excluding lone surrogates.
+_XML_ILLEGAL = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
 def build_comicinfo(
@@ -48,7 +62,7 @@ def build_comicinfo(
     def add(tag: str, value) -> None:
         if value is None or value == "":
             return
-        SubElement(root, tag).text = str(value)
+        SubElement(root, tag).text = _XML_ILLEGAL.sub("", str(value))
 
     add("Title", title)
     add("Series", series)
@@ -89,9 +103,9 @@ def build_comicinfo(
 
 def has_comicinfo(archive: Path) -> bool:
     try:
-        with zipfile.ZipFile(archive) as zf:
+        with open_zip(archive) as zf:
             return any(n.lower() == "comicinfo.xml" for n in zf.namelist())
-    except (zipfile.BadZipFile, OSError):
+    except (zipfile.BadZipFile, OSError, ImportValidationError):
         return False
 
 
@@ -101,38 +115,98 @@ def inject_comicinfo(archive: Path, comicinfo_xml: str) -> bool:
     archive = Path(archive)
     if archive.suffix.lower() not in (".cbz", ".zip") or not zipfile.is_zipfile(archive):
         return False
-    if has_comicinfo(archive):
-        return False
+    with open_zip(archive) as source:
+        checked_zip_infos(source, archive)
+        if any(i.filename.lower() == "comicinfo.xml" for i in source.infolist()):
+            return False
+    metadata = _metadata_bytes(comicinfo_xml)
     tmp = archive.with_suffix(archive.suffix + ".partial")
-    shutil.copy2(archive, tmp)
     try:
+        shutil.copy2(archive, tmp)
         with zipfile.ZipFile(tmp, "a", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("ComicInfo.xml", comicinfo_xml)
+            zf.writestr("ComicInfo.xml", metadata)
+        with open_zip(tmp):
+            pass
         tmp.replace(archive)
         return True
-    except OSError:
+    finally:
         tmp.unlink(missing_ok=True)
-        raise
+
+
+def read_comicinfo_bytes(archive: Path) -> bytes | None:
+    """ComicInfo.xml's raw bytes, or None when missing or unsafe to read.
+    Archives are untrusted, and this runs on every file of every scan."""
+    try:
+        with open_zip(archive) as zf:
+            member = next((i for i in zf.infolist() if i.filename.lower() == "comicinfo.xml"), None)
+            # zipfile's BZIP2/LZMA readers can allocate unbounded decompressed
+            # output before applying read(n), unlike STORED/DEFLATED. Ignore
+            # metadata using those methods, even if the declared size is small.
+            if (member is None or member.file_size > MAX_COMICINFO_BYTES
+                    or member.compress_size > MAX_COMICINFO_BYTES + 64 * 1024
+                    or member.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}):
+                return None
+            # Pass the actual ZipInfo (duplicate names must not change which
+            # entry was checked), and bound decompression even for bad headers.
+            with zf.open(member) as stream:
+                data = stream.read(MAX_COMICINFO_BYTES + 1)
+    except (OSError, KeyError, ValueError, RuntimeError, EOFError,
+            zipfile.BadZipFile, zlib.error):
+        return None
+    return None if len(data) > MAX_COMICINFO_BYTES else data
 
 
 def read_comicinfo(archive: Path) -> str | None:
+    data = read_comicinfo_bytes(archive)
+    return None if data is None else data.decode("utf-8-sig", errors="replace")
+
+
+class _MetadataTreeBuilder(TreeBuilder):
+    def __init__(self):
+        super().__init__()
+        self.depth = 0
+        self.nodes = 0
+
+    def start(self, tag, attrs):
+        self.depth += 1
+        self.nodes += 1
+        if self.depth > 64 or self.nodes > 10_000:
+            raise ParseError("ComicInfo structure exceeds safety limit")
+        return super().start(tag, attrs)
+
+    def end(self, tag):
+        self.depth -= 1
+        return super().end(tag)
+
+    def doctype(self, name, pubid, system):
+        raise ParseError("ComicInfo DTD is not supported")
+
+
+def parse_comicinfo(data: str | bytes) -> Element:
+    if len(data) > MAX_COMICINFO_BYTES:
+        raise ParseError("ComicInfo exceeds safety limit")
+    return fromstring(data, parser=XMLParser(target=_MetadataTreeBuilder()))
+
+
+def _metadata_bytes(xml: str) -> bytes:
+    data = xml.encode("utf-8")
+    if len(data) > MAX_COMICINFO_BYTES:
+        raise ImportValidationError("ComicInfo exceeds the 1 MiB safety limit")
+    # Bound external structure before merging or pretty-printing it.
     try:
-        with zipfile.ZipFile(archive) as zf:
-            name = next((n for n in zf.namelist() if n.lower() == "comicinfo.xml"), None)
-            if name is None:
-                return None
-            return zf.read(name).decode("utf-8-sig", errors="replace")
-    except (zipfile.BadZipFile, OSError, KeyError):
-        return None
+        parse_comicinfo(data)
+    except ParseError as exc:
+        raise ImportValidationError("invalid ComicInfo metadata") from exc
+    return data
 
 
 def merge_comicinfo(existing_xml: str | None, pullarr_xml: str) -> str:
     """Preserve unknown/external fields while refreshing Pullarr-owned ones."""
-    incoming = fromstring(pullarr_xml)
+    incoming = parse_comicinfo(pullarr_xml)
     if not existing_xml:
         return pullarr_xml
     try:
-        root = fromstring(existing_xml)
+        root = parse_comicinfo(existing_xml)
     except ParseError:
         return pullarr_xml
     for child in incoming:
@@ -158,41 +232,55 @@ def upsert_comicinfo(archive: Path, comicinfo_xml: str) -> bool:
     archive = Path(archive)
     if archive.suffix.lower() not in (".cbz", ".zip") or not zipfile.is_zipfile(archive):
         return False
+    _metadata_bytes(comicinfo_xml)
     existing = read_comicinfo(archive)
     merged = merge_comicinfo(existing, comicinfo_xml)
     if existing:
         try:
-            if _semantic_xml(fromstring(existing)) == _semantic_xml(fromstring(merged)):
+            if _semantic_xml(parse_comicinfo(existing)) == _semantic_xml(parse_comicinfo(merged)):
                 return False
         except ParseError:
             pass
+    metadata = _metadata_bytes(merged)
     tmp = archive.with_suffix(archive.suffix + ".metadata-partial")
     try:
-        with zipfile.ZipFile(archive, "r") as source, zipfile.ZipFile(tmp, "w") as target:
-            for info in source.infolist():
+        with open_zip(archive) as source, zipfile.ZipFile(tmp, "w") as target:
+            entries = checked_zip_infos(source, archive, skip_metadata=True)
+            budget = ArchiveBudget(limit=expansion_limit(archive))
+            for info in entries:
                 if info.filename.lower() == "comicinfo.xml":
                     continue
-                target.writestr(info, source.read(info.filename))
-            target.writestr("ComicInfo.xml", merged, compress_type=zipfile.ZIP_DEFLATED)
+                with target.open(copy(info), "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as output:
+                    copy_zip_member(source, info, archive, output, budget)
+            target.writestr("ComicInfo.xml", metadata, compress_type=zipfile.ZIP_DEFLATED)
+        with open_zip(tmp):
+            pass
         tmp.replace(archive)
         return True
-    except (OSError, zipfile.BadZipFile):
+    finally:
         tmp.unlink(missing_ok=True)
-        raise
 
 
 def write_cbz(dest: Path, pages: list[bytes], comicinfo_xml: str) -> Path:
     """Writes ordered page images + ComicInfo.xml into a .cbz at dest (used
     when packing a folder of loose images)."""
+    metadata = _metadata_bytes(comicinfo_xml)
+    if len(pages) >= MAX_ARCHIVE_ENTRIES or any(len(page) > MAX_MEMBER_BYTES for page in pages) or sum(map(len, pages)) > MAX_EXPANDED_BYTES:
+        raise ImportValidationError("comic pages exceed archive safety limits")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".cbz.partial")
     width = max(3, len(str(len(pages))))
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
-        zf.writestr("ComicInfo.xml", comicinfo_xml)
-        for i, data in enumerate(pages, start=1):
-            zf.writestr(f"{i:0{width}d}{guess_extension(data)}", data)
-    tmp.rename(dest)
-    return dest
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("ComicInfo.xml", metadata)
+            for i, data in enumerate(pages, start=1):
+                zf.writestr(f"{i:0{width}d}{guess_extension(data)}", data)
+        with open_zip(tmp):
+            pass
+        tmp.replace(dest)
+        return dest
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 EXT_BY_SIGNATURE = {

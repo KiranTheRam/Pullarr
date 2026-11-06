@@ -248,6 +248,7 @@ class QueueItemOut(BaseModel):
     progress: float
     error: str
     error_code: str
+    transient_error: bool
     attempt_count: int
     next_retry_at: datetime | None
     blocked: bool

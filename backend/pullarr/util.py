@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import re
 import time
@@ -7,7 +8,35 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from .filename import parse_filename
+
 log = logging.getLogger(__name__)
+
+
+def error_chain(exc: BaseException):
+    """Follow wrapped failures without looping on malformed exception chains."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """Network interruptions and retryable HTTP responses, including wrappers.
+
+    Parser, authentication and filesystem errors need repair rather than an
+    automatic source retry. Do not infer network failure from arbitrary text.
+    """
+    for cause in error_chain(exc):
+        if isinstance(cause, (httpx.InvalidURL, httpx.UnsupportedProtocol, httpx.LocalProtocolError)):
+            return False
+        if isinstance(cause, (httpx.TransportError, ConnectionError, TimeoutError)):
+            return True
+        if isinstance(cause, httpx.HTTPStatusError):
+            status = cause.response.status_code
+            return status in {408, 425, 429} or 500 <= status < 600
+    return False
 
 
 class RateLimiter:
@@ -97,12 +126,52 @@ async def rl_request(
     return resp  # type: ignore[return-value]
 
 
+def raise_for_status_redacted(resp: httpx.Response, service: str) -> None:
+    """raise_for_status without the request URL in the message: ComicVine,
+    Torznab and indexer download URLs carry API keys in their query strings,
+    and these exceptions end up in logs, job details, and API errors."""
+    if not resp.is_success:
+        raise httpx.HTTPStatusError(
+            f"{service} returned HTTP {resp.status_code}",
+            request=resp.request, response=resp,
+        )
+
+
 ILLEGAL_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
-def sanitize_filename(name: str) -> str:
-    cleaned = ILLEGAL_PATH_CHARS.sub("", name).strip().rstrip(".")
-    return re.sub(r"\s+", " ", cleaned) or "Unknown"
+# Leave room for issue labels, archive extensions and atomic-write suffixes.
+NAME_MAX_BYTES = 255
+TITLE_MAX_BYTES = 200
+WINDOWS_RESERVED_NAME = re.compile(
+    r"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?= *\.|$)", re.I
+)
+_DIGEST_BYTES = 18  # ~ + 64-bit hexadecimal digest + ~
+
+
+def truncate_utf8(text: str, max_bytes: int) -> str:
+    """Cut on a Unicode character boundary, measured in filesystem bytes."""
+    return text.encode("utf-8")[:max(0, max_bytes)].decode("utf-8", errors="ignore")
+
+
+def shorten_utf8(text: str, max_bytes: int) -> str:
+    """Keep shortened names distinct and stable, including shared long prefixes.
+
+    Delimit both ends of the digest so the scanner cannot read a numeric
+    digest as a trailing issue number or join it onto an issue/volume marker.
+    """
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    tag = "~" + hashlib.blake2s(text.encode("utf-8"), digest_size=8).hexdigest() + "~"
+    if max_bytes < _DIGEST_BYTES:
+        return truncate_utf8(text, max_bytes).rstrip(" .")
+    return truncate_utf8(text, max_bytes - _DIGEST_BYTES).rstrip(" .") + tag
+
+
+def sanitize_filename(name: str, max_bytes: int = TITLE_MAX_BYTES) -> str:
+    cleaned = re.sub(r"\s+", " ", ILLEGAL_PATH_CHARS.sub("", name)).strip(" .")
+    cleaned = WINDOWS_RESERVED_NAME.sub(r"\1_", cleaned)
+    return shorten_utf8(cleaned or "Unknown", max_bytes)
 
 
 # Comic issue markers: "#12", "# 12.5", "No. 12", "Issue 12". The "#" form is
@@ -128,44 +197,24 @@ _MAX_RANGE_SPAN = 60  # sanity cap so garbage can't claim a huge span
 
 
 def has_issue_marker(text: str) -> bool:
-    """True when text has an explicit issue token (#/no./issue + number),
-    as opposed to a bare trailing number that might actually be a volume."""
-    return ISSUE_PREFIX_PATTERN.search(text) is not None
+    return parse_filename(text).explicit_issue
 
 
 def parse_issue_range(text: str) -> tuple[float, float] | None:
-    """A multi-issue span like "#1-3" / "001-003" → (1.0, 3.0). Returns None
-    for single issues, TPBs, and volume ranges ("Vol. 1-3")."""
-    stripped = BRACKET_GROUPS.sub(" ", text)
-    for m in ISSUE_RANGE_PATTERN.finditer(stripped):
-        pre = stripped[max(0, m.start() - 7):m.start()].lower().rstrip()
-        if pre.endswith(("v", "vol", "vol.", "volume")):
-            continue  # a collected-volume range, not an issue range
-        start, end = int(m.group(1)), int(m.group(2))
-        if end > start and end - start <= _MAX_RANGE_SPAN:
-            return float(start), float(end)
+    coverage = parse_filename(text)
+    if not coverage.ambiguous and coverage.issue and coverage.issue[0] != coverage.issue[1]:
+        return coverage.issue
     return None
 
 
 def parse_issue_number(text: str) -> float | None:
-    m = ISSUE_PREFIX_PATTERN.search(text)
-    if m:
-        return float(m.group(1))
-    # scene-style names bury the issue number before tag groups:
-    # "Absolute_Batman_015_(2026)_(Webrip)_(DCP)" → strip (…)/[…] and
-    # underscores, then the issue is the trailing number
-    stripped = BRACKET_GROUPS.sub(" ", text)
-    stripped = re.sub(r"[_\s]+", " ", stripped).strip()
-    m = TRAILING_NUMBER_PATTERN.search(stripped)
-    if m:
-        return float(m.group(1))
-    return None
+    return parse_filename(text).issue_number
 
 
 # Same marker forms as ISSUE_PREFIX_PATTERN but keeping a variant suffix
 # ("#78.BEY", "#16.HU") that the numeric pattern stops before.
 ISSUE_LABEL_PATTERN = re.compile(
-    r"(?:#[ ]?|(?<![a-z])(?:no|issue)[ ._]{0,2})(\d+(?:\.[a-z0-9]+)?)", re.I
+    r"(?:#[ ]?|(?<![a-z])(?:no|issue)[ ._]{0,2})(\d+(?:\.[a-z0-9]+|[a-z]+)?)", re.I
 )
 _PLAIN_LABEL = re.compile(r"\d+(?:\.\d+)?$")
 
@@ -244,13 +293,7 @@ def release_covers_issue(release, issue, series=None) -> bool:
 
 
 def parse_volume_number(text: str) -> int | None:
-    m = VOLUME_PATTERN.search(text)
-    if m:
-        try:
-            return int(m.group(1))
-        except ValueError:
-            return None
-    return None
+    return parse_filename(text).volume_number
 
 
 def parse_year(text: str) -> int | None:

@@ -120,8 +120,10 @@ async def series_fixture(session):
 
 
 @pytest.mark.parametrize("issue_linked", [True, False])
-async def test_blocked_release_does_not_hide_alternative(session, monkeypatch, issue_linked):
+async def test_blocked_release_does_not_hide_alternative(session, monkeypatch, tmp_path, issue_linked):
     series = await series_fixture(session)
+    from pullarr.models import RootFolder
+    series.root_folder = RootFolder(path=str(tmp_path))
     blocked = await download(session, DownloadStatus.FAILED)
     blocked.series_id = series.id
     blocked.issue_id = series.issues[0].id if issue_linked else None
@@ -206,7 +208,7 @@ async def test_scan_applies_detached_worker_results_on_the_loop(monkeypatch, tmp
     from pullarr.library import scanner
     original = Issue(id=1, number=1, downloaded=False, file_path="")
     loop_thread = threading.get_ident()
-    def scan(series, copies, folders):
+    def scan(series, copies, folders, root=None, expect_content=None):
         assert threading.get_ident() != loop_thread
         assert copies[0] is not original
         copies[0].downloaded = True
@@ -225,6 +227,7 @@ def test_invalid_archive_never_enters_library(tmp_path, payload):
     path.write_bytes(payload)
     issue = Issue(id=1, number=1, display_number="1", downloaded=False)
     series = Series(id=1, title="Test", alt_titles="", folder_name="Test")
+    (tmp_path / "library").mkdir()
     with pytest.raises(ImportValidationError):
         import_payload(path, series, [issue], tmp_path / "library", DEFAULT_TEMPLATE)
     assert not issue.downloaded

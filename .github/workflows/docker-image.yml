@@ -24,6 +24,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve application version
+        id: version
+        shell: sh
+        run: |
+          BUILD_VERSION="$(sed 's/+local$//' backend/VERSION)+g${GITHUB_SHA}"
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              BUILD_VERSION="${GITHUB_REF#refs/tags/}"
+              BUILD_VERSION="${BUILD_VERSION#v}"
+              ;;
+          esac
+          printf 'version=%s\n' "$BUILD_VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -53,6 +66,9 @@ jobs:
           context: .
           file: docker/Dockerfile
           push: true
+          build-args: |
+            PULLARR_BUILD_VERSION=${{ steps.version.outputs.version }}
+            PULLARR_BUILD_REVISION=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 

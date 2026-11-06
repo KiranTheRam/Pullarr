@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,13 +18,20 @@ def get_api_key() -> str:
     return _api_key
 
 
-async def require_api_key(
+async def require_api_access(
+    request: Request,
     x_api_key: str = Header(default=""),
     session: AsyncSession = Depends(get_session),
 ) -> None:
+    if not x_api_key and getattr(request.state, "browser_session", False):
+        return
+    await require_api_key(x_api_key, session)
+
+
+async def require_api_key(x_api_key: str, session: AsyncSession) -> None:
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    # Bootstrap key handed to the web UI via initialize.json.
+    # Bootstrap key retained for existing integrations and environment-managed UI.
     if x_api_key == get_api_key():
         return
     # User-managed keys created in Settings.

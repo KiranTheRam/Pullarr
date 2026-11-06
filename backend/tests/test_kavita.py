@@ -27,11 +27,20 @@ ENABLED = {
 
 
 @pytest.fixture(autouse=True)
-def _reset_pending():
+async def _reset_pending():
     kavita._pending.clear()
+    kavita._last_scanned.clear()
+    kavita._flush_values.clear()
+    kavita._wake = None
     kavita._flush_task = None
     yield
+    if kavita._flush_task is not None:
+        kavita._flush_task.cancel()
+        await asyncio.gather(kavita._flush_task, return_exceptions=True)
     kavita._pending.clear()
+    kavita._last_scanned.clear()
+    kavita._flush_values.clear()
+    kavita._wake = None
     kavita._flush_task = None
 
 
@@ -410,7 +419,7 @@ async def test_import_path_notifies_kavita_year_qualified_titles_first(monkeypat
     queried = [call.request.url.params["queryString"] for call in search.calls]
     assert queried[0] == "Batman (2016)"  # most specific first
     assert "Batman" in queried
-    assert "Batman Rebirth" in queried
+    assert "Batman Rebirth" not in queried
     # folder_name and series_folder(title, year) coincide here — sent once
     assert len(queried) == len(set(queried))
     # /comics/DC matched Kavita's /data/comics/DC on the folder name
@@ -444,3 +453,221 @@ def test_validate_settings_requires_a_usable_connection_when_enabled():
         kavita.validate_settings({**ENABLED, "kavita_library_map": "{oops"})
     with pytest.raises(ValueError, match="JSON object"):
         kavita.validate_settings({**ENABLED, "kavita_library_map": "[1]"})
+
+
+@respx.mock
+async def test_new_series_alternate_title_cannot_target_existing_series(monkeypatch):
+    from pullarr.jobs import tasks
+    from pullarr.models import RootFolder, Series
+
+    monkeypatch.setattr(kavita, "DEBOUNCE_SECONDS", 0.01)
+    mock_auth()
+    mock_libraries()
+
+    def search(request):
+        query = request.url.params["queryString"]
+        return Response(200, json={"series": [
+            {"seriesId": 9, "name": "Batman", "libraryId": 5}
+        ] if query == "Batman" else []})
+
+    queries = respx.get(f"{BASE}/api/Search/search").mock(side_effect=search)
+    partial = respx.post(f"{BASE}/api/Series/scan").mock(return_value=Response(200))
+    full = respx.post(f"{BASE}/api/Library/scan").mock(return_value=Response(200))
+    series = Series(id=1, title="Batman Beyond", year=2026,
+                    folder_name="Batman Beyond (2026)", alt_titles="Batman", root_folder_id=1)
+    series.root_folder = RootFolder(id=1, path="/comics/DC")
+    tasks._notify_kavita(ENABLED, series)
+    if kavita._flush_task is not None:
+        await asyncio.wait_for(kavita._flush_task, 1)
+    assert not partial.called
+    assert full.call_count == 1
+    assert full.calls[0].request.url.params["libraryId"] == "5"
+    assert "Batman" not in [call.request.url.params["queryString"] for call in queries.calls]
+
+
+def test_equal_path_matches_require_explicit_library_mapping():
+    libs = [KavitaLibrary(5, "DC", ["/one/comics/DC"]),
+            KavitaLibrary(6, "Other DC", ["/two/comics/DC"])]
+    assert kavita.match_library(libs, "/comics/DC") is None
+    assert kavita.match_library(list(reversed(libs)), "/comics/DC") is None
+    assert kavita.match_library(libs, "/one/comics/DC").id == 5
+    # A library exposing the same suffix twice is not ambiguous by itself.
+    libs[0].folders.append("/three/comics/DC")
+    assert kavita.match_library(libs[:1], "/comics/DC").id == 5
+
+
+@respx.mock
+async def test_exact_series_wins_over_similar_and_other_library_results():
+    mock_auth()
+    mock_libraries()
+    respx.get(f"{BASE}/api/Search/search").mock(return_value=Response(200, json={
+        "series": [
+            {"seriesId": 1, "name": "Batman Beyond", "libraryId": 5},
+            {"seriesId": 2, "name": "Batman", "libraryId": 4},
+            {"seriesId": 3, "name": "Batman", "libraryId": 5},
+        ]
+    }))
+    partial = respx.post(f"{BASE}/api/Series/scan").mock(return_value=Response(200))
+    await kavita.run_scans(ENABLED, {ScanRequest(1, "/comics/DC", ("Batman",))})
+    assert json.loads(partial.calls[0].request.content)["seriesId"] == 3
+
+
+@pytest.fixture
+def scan_batches(monkeypatch):
+    batches = asyncio.Queue()
+
+    async def record(values, requests):
+        batches.put_nowait((values, requests))
+
+    monkeypatch.setattr(kavita, "run_scans", record)
+    monkeypatch.setattr(kavita, "DEBOUNCE_SECONDS", 0.04)
+    monkeypatch.setattr(kavita, "RESCAN_SECONDS", 0.3)
+    return batches
+
+
+async def next_batch(batches):
+    return await asyncio.wait_for(batches.get(), 1)
+
+
+async def test_every_import_restarts_its_series_debounce(scan_batches):
+    for _ in range(5):
+        kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+        await asyncio.sleep(0.015)
+        assert scan_batches.empty()
+    _, requests = await next_batch(scan_batches)
+    assert requests == {ScanRequest(1, "/comics/DC", ("Batman",))}
+    if kavita._flush_task is not None:
+        await asyncio.wait_for(kavita._flush_task, 1)
+    assert scan_batches.empty()
+
+
+async def test_continuous_imports_scan_before_the_series_goes_quiet(scan_batches, monkeypatch):
+    monkeypatch.setattr(kavita, "MAX_DEBOUNCE_SECONDS", 0.12)
+    still_importing = asyncio.Event()
+    still_importing.set()
+
+    async def import_continuously():
+        while still_importing.is_set():
+            kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+            await asyncio.sleep(0.01)
+
+    producer = asyncio.create_task(import_continuously())
+    try:
+        _, requests = await next_batch(scan_batches)
+        assert requests == {ScanRequest(1, "/comics/DC", ("Batman",))}
+        assert not producer.done() and still_importing.is_set()
+        # The next scan also cannot starve, and must retain its rescan floor.
+        completed = asyncio.get_running_loop().time()
+        _, requests = await next_batch(scan_batches)
+        assert requests == {ScanRequest(1, "/comics/DC", ("Batman",))}
+        assert asyncio.get_running_loop().time() - completed >= kavita.RESCAN_SECONDS - 0.01
+    finally:
+        still_importing.clear()
+        await producer
+
+
+async def test_slow_issue_burst_has_one_trailing_scan_after_cooldown(scan_batches):
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    await next_batch(scan_batches)
+    # Further apart than debounce, but within the five-minute rescan floor.
+    for _ in range(3):
+        kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+        await asyncio.sleep(0.06)
+        assert scan_batches.empty()
+    _, requests = await next_batch(scan_batches)
+    assert requests == {ScanRequest(1, "/comics/DC", ("Batman",))}
+    if kavita._flush_task is not None:
+        await asyncio.wait_for(kavita._flush_task, 1)
+    assert scan_batches.empty()
+
+
+async def test_one_series_cooldown_does_not_delay_another(scan_batches, monkeypatch):
+    monkeypatch.setattr(kavita, "RESCAN_SECONDS", 60)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    await next_batch(scan_batches)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    # Let the worker start waiting on Batman's long cooldown.
+    await asyncio.sleep(0.01)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Superman"])
+    _, requests = await next_batch(scan_batches)
+    assert requests == {ScanRequest(1, "/comics/DC", ("Superman",))}
+    assert ScanRequest(1, "/comics/DC", ("Batman",)) in kavita._pending
+
+
+async def test_same_series_import_during_delivery_is_preserved_without_overlap(scan_batches, monkeypatch):
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    active = 0
+
+    async def record(values, requests):
+        nonlocal active
+        active += 1
+        assert active == 1
+        calls.append(requests)
+        started.set()
+        await release.wait()
+        active -= 1
+
+    monkeypatch.setattr(kavita, "run_scans", record)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    await asyncio.wait_for(started.wait(), 1)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    # Simulate delivery taking longer than the cooldown itself.
+    await asyncio.sleep(0.35)
+    assert len(calls) == 1
+    release.set()
+    await asyncio.sleep(0.06)
+    assert len(calls) == 1  # the floor starts after delivery completes
+    if kavita._flush_task is not None:
+        await asyncio.wait_for(kavita._flush_task, 1)
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+
+
+async def test_changed_connection_does_not_receive_previous_pending_targets(scan_batches, monkeypatch):
+    monkeypatch.setattr(kavita, "RESCAN_SECONDS", 60)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    await next_batch(scan_batches)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    changed = {**ENABLED, "kavita_url": "http://new-kavita.test", "kavita_library_map": '{"2": 4}'}
+    kavita.notify_import(changed, 2, "/comics/Marvel", ["Daredevil"])
+    values, requests = await next_batch(scan_batches)
+    assert values["kavita_url"] == changed["kavita_url"]
+    assert requests == {ScanRequest(2, "/comics/Marvel", ("Daredevil",))}
+    assert not kavita._last_scanned.get(ScanRequest(1, "/comics/DC", ("Batman",)))
+
+
+async def test_disabling_connection_discards_pending_delivery(scan_batches):
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    task = kavita._flush_task
+    kavita.notify_import({**ENABLED, "kavita_enabled": "false"}, 1, "/comics/DC", ["Batman"])
+    await asyncio.wait_for(task, 1)
+    assert scan_batches.empty()
+
+
+async def test_unexpected_kavita_failure_does_not_stop_later_delivery(scan_batches, monkeypatch, caplog):
+    attempts = asyncio.Queue()
+
+    async def fail_once(values, requests):
+        attempts.put_nowait(requests)
+        if attempts.qsize() == 1:
+            raise ValueError("malformed upstream response")
+
+    monkeypatch.setattr(kavita, "run_scans", fail_once)
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["Batman"])
+    if kavita._flush_task is not None:
+        await asyncio.wait_for(kavita._flush_task, 1)
+    assert "Kavita scan request failed unexpectedly" in caplog.text
+    kavita.notify_import(ENABLED, 2, "/comics/Marvel", ["Daredevil"])
+    if kavita._flush_task is not None:
+        await asyncio.wait_for(kavita._flush_task, 1)
+    assert attempts.qsize() == 2
+
+
+async def test_expired_cooldown_entries_are_pruned(scan_batches, monkeypatch):
+    request = ScanRequest(1, "/comics/DC", ("Old",))
+    kavita._flush_values = {key: value for key, value in ENABLED.items() if key.startswith("kavita_")}
+    kavita._last_scanned[request] = asyncio.get_running_loop().time() - 100
+    kavita.notify_import(ENABLED, 1, "/comics/DC", ["New"])
+    assert request not in kavita._last_scanned
+    await next_batch(scan_batches)

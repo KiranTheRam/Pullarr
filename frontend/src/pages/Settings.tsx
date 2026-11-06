@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api/client";
+import { api, browserAuthMode, updateBrowserLogin } from "../api/client";
 import type {
   ApiKey,
   KavitaTestResult,
@@ -20,7 +20,7 @@ function TorznabSettings({ form, setForm }: { form: SettingsType; setForm: (valu
   const update = (next: TorznabConfig[]) => setForm({ ...form, torznab_indexers: JSON.stringify(next) });
   return <div className="settings-section">
     <h3>Torznab indexers</h3>
-    <p className="section-hint">Add a Torznab API URL from Prowlarr or another torrent indexer. Enable qBittorrent below to search and download releases.</p>
+    <p className="section-hint">Add a Torznab API URL from Prowlarr or another torrent indexer. Enable qBittorrent below to search and download releases. Re-enter an indexer's API key after changing its URL.</p>
     {entries.map((entry, index) => {
       const set = (patch: Partial<TorznabConfig>) => update(entries.map((item, i) => i === index ? { ...item, ...patch } : item));
       return <fieldset key={entry.id} style={{ marginBottom: 16 }}>
@@ -38,6 +38,70 @@ function TorznabSettings({ form, setForm }: { form: SettingsType; setForm: (valu
     <div className="form-row"><label htmlFor="torrent-templates">Default query templates</label><textarea id="torrent-templates" value={form.torrent_query_templates ?? "{series} {issue}"} onChange={(e) => setForm({ ...form, torrent_query_templates: e.target.value })} /></div>
     <p className="section-hint">One variant per line. Tokens: {"{series}, {issue}, {year}"}; padding: {"{issue:03d}"}. Example: {"{series} Tome {issue}"} or {"{series} T{issue:02d}"}. Override these on a series page. Automatic grabs require the rendered title and issue query to match the release title.</p>
   </div>;
+}
+
+function BrowserSecurity({ dirty }: { dirty: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const mode = browserAuthMode();
+
+  async function submit(action: "password" | "logout", event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    const form = event?.currentTarget;
+    const fields = new URLSearchParams();
+    if (form) {
+      new FormData(form).forEach((value, name) => fields.set(name, String(value)));
+      if (fields.get("password") !== fields.get("confirmation")) {
+        setError("The new passwords do not match.");
+        return;
+      }
+    }
+    setError("");
+    setBusy(true);
+    try {
+      await updateBrowserLogin(action, form ? fields : undefined);
+      form?.reset();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not update the browser login.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="settings-section" aria-labelledby="browser-security-title">
+      <h3 id="browser-security-title">Browser Security</h3>
+      {mode === "managed" ? (
+        <>
+          <p className="section-hint">Changing your password signs out every browser session. API keys keep working.</p>
+          {dirty && <p className="section-hint">Save your other settings before changing your password or signing out.</p>}
+          {error && <p role="alert">{error}</p>}
+          <form onSubmit={(event) => void submit("password", event)}>
+            <div className="form-row">
+              <label htmlFor="browser-current-password">Current password</label>
+              <input id="browser-current-password" name="current" type="password" autoComplete="current-password" maxLength={256} required />
+            </div>
+            <div className="form-row">
+              <label htmlFor="browser-new-password">New password</label>
+              <input id="browser-new-password" name="password" type="password" autoComplete="new-password" minLength={12} maxLength={256} required />
+            </div>
+            <div className="form-row">
+              <label htmlFor="browser-confirm-password">Confirm new password</label>
+              <input id="browser-confirm-password" name="confirmation" type="password" autoComplete="new-password" minLength={12} maxLength={256} required />
+            </div>
+            <button className="btn primary" disabled={busy || dirty}>Change Password</button>{" "}
+            <button className="btn" type="button" disabled={busy || dirty} onClick={() => void submit("logout")}>Sign Out</button>
+          </form>
+        </>
+      ) : (
+        <p className="section-hint">
+          {mode === "environment"
+            ? "This login is managed by your deployment. Change the configured password and restart Pullarr."
+            : "Pullarr's browser login is disabled for this deployment."}
+        </p>
+      )}
+    </section>
+  );
 }
 
 function RootFolders() {
@@ -332,6 +396,7 @@ function KavitaSettings({
       <p className="section-hint">
         Trigger a Kavita scan after issues are imported so new downloads appear in the reader
         right away. Create an API key in Kavita under Settings → Account → API Key.
+        Re-enter the API key after changing the URL, before testing or saving.
       </p>
       <div className="form-row">
         <label>Enabled</label>
@@ -517,6 +582,7 @@ export default function Settings() {
         </button>
       </Toolbar>
       <div className="content">
+        <BrowserSecurity dirty={dirty} />
         <RootFolders />
         <ApiKeys />
         {save.isError && <div className="error-banner" role="alert">{(save.error as Error).message}</div>}
@@ -625,7 +691,8 @@ export default function Settings() {
           <h3>Download Client — qBittorrent (optional)</h3>
           <p className="section-hint">
             Torrent releases are sent to qBittorrent and imported when complete. Not needed
-            for GetComics direct downloads.
+            for GetComics direct downloads. Re-enter the password after changing the URL or
+            username, before testing or saving.
           </p>
           <div className="form-row">
             <label>Enabled</label>
@@ -674,6 +741,7 @@ export default function Settings() {
             Notify a request manager (e.g. NextPanel) whenever issues are imported, so requests
             flip to Available instantly. Point the URL at NextPanel's
             /api/v1/webhooks/pullarr endpoint and paste the same webhook secret configured there.
+            Re-enter the secret after changing the URL, before testing or saving.
           </p>
           <div className="form-row">
             <label>Enabled</label>

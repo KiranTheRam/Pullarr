@@ -4,12 +4,12 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { api } from "../src/api/client";
+import { api, browserAuthMode, updateBrowserLogin } from "../src/api/client";
 import Activity from "../src/pages/Activity";
 import Settings from "../src/pages/Settings";
 import { Modal } from "../src/components/common";
 
-vi.mock("../src/api/client", () => ({ api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() } }));
+vi.mock("../src/api/client", () => ({ browserAuthMode: vi.fn(() => "external"), updateBrowserLogin: vi.fn(), api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() } }));
 
 const clients: QueryClient[] = [];
 function mount(element: React.ReactNode) {
@@ -194,4 +194,42 @@ test("a rejected DDL grab shows its error and keeps the search dialog open", asy
   await userEvent.setup().click(screen.getByRole("button", { name: "Grab", exact: true }));
   expect((await screen.findByRole("alert")).textContent).toContain("The download could not be queued");
   expect(close).not.toHaveBeenCalled();
+});
+
+
+test("browser password changes validate confirmation, clear fields, and report failures", async () => {
+  vi.mocked(browserAuthMode).mockReturnValue("managed");
+  vi.mocked(api.get).mockImplementation(async (path) => path === "/settings" ? {} : []);
+  vi.mocked(updateBrowserLogin).mockRejectedValueOnce(new Error("The current password is incorrect."));
+  mount(<Settings />);
+  const user = userEvent.setup();
+  await user.type(await screen.findByLabelText("Current password"), "old fixture password");
+  await user.type(screen.getByLabelText("New password"), "new fixture password");
+  await user.type(screen.getByLabelText("Confirm new password"), "wrong fixture password");
+  await user.click(screen.getByRole("button", { name: "Change Password" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("do not match");
+  expect(updateBrowserLogin).not.toHaveBeenCalled();
+  await user.clear(screen.getByLabelText("Confirm new password"));
+  await user.type(screen.getByLabelText("Confirm new password"), "new fixture password");
+  await user.click(screen.getByRole("button", { name: "Change Password" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("current password is incorrect");
+  await user.click(screen.getByRole("button", { name: "Change Password" }));
+  await waitFor(() => expect((screen.getByLabelText("Current password") as HTMLInputElement).value).toBe(""));
+  const [action, fields] = vi.mocked(updateBrowserLogin).mock.calls[1];
+  expect(action).toBe("password");
+  expect(fields?.get("password")).toBe("new fixture password");
+  await user.click(screen.getByRole("button", { name: "Sign Out" }));
+  expect(updateBrowserLogin).toHaveBeenLastCalledWith("logout", undefined);
+});
+
+test("unsaved settings disable browser password changes and sign-out", async () => {
+  vi.mocked(browserAuthMode).mockReturnValue("managed");
+  vi.mocked(api.get).mockImplementation(async (path) => path === "/settings" ? {metron_enabled: "false"} : []);
+  mount(<Settings />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("switch", {name: "Enable Metron"}));
+  expect(screen.getByRole("button", {name: "Change Password"}).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", {name: "Sign Out"}).hasAttribute("disabled")).toBe(true);
+  await user.click(screen.getByRole("button", {name: "Discard changes"}));
+  expect(screen.getByRole("button", {name: "Sign Out"}).hasAttribute("disabled")).toBe(false);
 });

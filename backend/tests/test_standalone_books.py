@@ -84,6 +84,7 @@ async def library(tmp_path, monkeypatch, request):
     maker = async_sessionmaker(engine, expire_on_commit=False)
     async with maker() as session:
         series = book(title, year)
+        (tmp_path / "comics").mkdir()
         series.root_folder = RootFolder(path=str(tmp_path / 'comics'))
         series.source_links = [SeriesSourceLink(source_name='getcomics', external_id=strip_issue_suffix(release_title))]
         session.add(series)

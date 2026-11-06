@@ -7,6 +7,7 @@ import httpx
 from lxml import etree
 
 from .. import USER_AGENT
+from ..util import raise_for_status_redacted
 from .base import TorrentIndexer, TorrentRelease
 
 MASK = "••••••••"
@@ -49,12 +50,15 @@ def mask_indexers(value: str) -> str:
 
 def restore_keys(value: str, previous: str) -> str:
     entries = json.loads(validate_indexers(value))
-    old = {item["id"]: item["api_key"] for item in json.loads(previous)}
+    old = {item["id"]: item for item in json.loads(previous)}
     for item in entries:
         if item["api_key"] == MASK:
             if item["id"] not in old:
                 raise ValueError("Enter an API key for the new Torznab indexer")
-            item["api_key"] = old[item["id"]]
+            # A saved key only goes back to the exact URL it was entered for.
+            if item["url"] != old[item["id"]]["url"]:
+                raise ValueError(f"Re-enter the API key for {item['name']} after changing its URL")
+            item["api_key"] = old[item["id"]]["api_key"]
     return json.dumps(entries)
 
 
@@ -75,7 +79,7 @@ class TorznabIndexer(TorrentIndexer):
         }
         async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
             response = await client.get(self.settings["url"], params=params)
-            response.raise_for_status()
+            raise_for_status_redacted(response, f"Torznab indexer {self.name}")
         return self.parse(response.content)
 
     def parse(self, content: bytes) -> list[TorrentRelease]:
