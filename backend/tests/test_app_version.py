@@ -52,9 +52,10 @@ def test_api_and_app_share_installed_version():
     ("refs/heads/main", None), ("refs/heads/v0.2.1", None),
     ("refs/tags/v0.2.1", "0.2.1"), ("refs/tags/0.3.0rc1", "0.3.0rc1"),
 ])
-def test_image_workflow_resolves_supported_forgejo_refs(ref, tag):
+@pytest.mark.parametrize("workflow_path", [".forgejo/workflows/build-image.yml", ".github/workflows/docker-image.yml"])
+def test_image_workflow_resolves_supported_refs(ref, tag, workflow_path):
     root = Path(__file__).resolve().parents[2]
-    workflow = (root / ".forgejo/workflows/build-image.yml").read_text()
+    workflow = (root / workflow_path).read_text()
     start = workflow.index('BUILD_VERSION=')
     end = workflow.index('esac', start) + len('esac')
     script = workflow[start:end] + '\nprintf "%s" "$BUILD_VERSION"'
