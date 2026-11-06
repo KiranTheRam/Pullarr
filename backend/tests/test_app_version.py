@@ -52,8 +52,9 @@ def test_api_and_app_share_installed_version():
     ("refs/heads/main", None), ("refs/heads/v0.2.1", None),
     ("refs/tags/v0.2.1", "0.2.1"), ("refs/tags/0.3.0rc1", "0.3.0rc1"),
 ])
+@pytest.mark.parametrize("run_number", [1, 42, 43])
 @pytest.mark.parametrize("workflow_path", [".forgejo/workflows/build-image.yml", ".github/workflows/docker-image.yml"])
-def test_image_workflow_resolves_supported_refs(ref, tag, workflow_path):
+def test_image_workflow_resolves_supported_refs(ref, tag, workflow_path, run_number):
     root = Path(__file__).resolve().parents[2]
     workflow = (root / workflow_path).read_text()
     start = workflow.index('BUILD_VERSION=')
@@ -62,8 +63,11 @@ def test_image_workflow_resolves_supported_refs(ref, tag, workflow_path):
     sha = "a" * 40
     result = subprocess.run(
         ["sh", "-eu", "-c", script], cwd=root,
-        env={"PATH": os.defpath, "GITHUB_REF": ref, "GITHUB_SHA": sha},
+        env={"PATH": os.defpath, "GITHUB_REF": ref, "GITHUB_SHA": sha, "GITHUB_RUN_NUMBER": str(run_number)},
         capture_output=True, text=True, check=True,
     )
     base = (root / "backend/VERSION").read_text().strip().removesuffix("+local")
+    if workflow_path.startswith(".github/") and ref == "refs/heads/main":
+        prefix, patch = base.rsplit(".", 1)
+        base = f"{prefix}.{int(patch) + run_number}"
     assert result.stdout == (tag or f"{base}+g{sha}")

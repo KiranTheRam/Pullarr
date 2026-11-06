@@ -257,7 +257,7 @@ image digests when deploying a validated release.
 
 The sidebar, API, startup log, and outgoing `User-Agent` report the installed
 Python package version. Local installs and Docker builds default to
-`0.2.0+local`; reinstall the backend after changing its version metadata.
+`0.3.0+local`; reinstall the backend after changing its version metadata.
 The frontend package version is a development manifest, not the running app's
 version.
 
@@ -270,8 +270,13 @@ Set `PULLARR_BUILD_REVISION` to the full commit SHA to record it in the image's
 `org.opencontainers.image.revision` label. These are build-time values; runtime
 environment variables cannot change the installed version. Custom or dirty
 builds must supply their own distinguishing suffix if `+local` is insufficient.
-Release tags must be valid Python versions. Patch numbers are not incremented
-automatically.
+Release tags must be valid Python versions. GitHub main-branch image builds
+increment the patch number automatically: the patch in `backend/VERSION` plus
+the Docker image workflow's run number (for example, run 42 builds
+`0.3.42+g<full-commit-sha>`). Merging a PR triggers this build, so every merge
+gets a higher installed application version. Rerunning the same workflow run
+keeps its version; tag builds retain the explicit tag version. The source
+`backend/VERSION` remains the local-build baseline.
 
 ### Recovering downloads
 
@@ -337,9 +342,9 @@ for new integrations.
 
 On first use, including upgrades without configured credentials, open Pullarr on
 a trusted local network and create a username and password. The first visitor to
-submit setup creates the login. Passwords must contain 12–128 printable
-characters. Setup signs you in automatically; passwords are hashed with scrypt
-in a private `<data dir>/browser_login.json` file. Keep this file with the config
+submit setup creates the login. Passwords must contain 8–128 printable
+characters, with no required capitals, numbers, or special characters. Setup
+signs you in automatically; passwords are hashed with scrypt in a private `<data dir>/browser_login.json` file. Keep this file with the config
 volume across container upgrades. Existing library data, settings, and API keys
 are unchanged; no database migration is required.
 

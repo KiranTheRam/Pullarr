@@ -117,13 +117,13 @@ async def test_browser_setup_keeps_existing_api_and_accepts_one_login(client, tm
     page = await client.get("/", follow_redirects=True)
     assert page.url.path == "/setup"
     assert "Set up your Pullarr login" in page.text
-    assert "Use 12 to 128 characters" in page.text
+    assert "Use 8 to 128 characters" in page.text
     assert page.headers["cache-control"] == "no-store"
     assert 'name="code"' not in page.text
     assert page.text.count('type="password" required maxlength="256"') == 2
     assert (await client.get("/initialize.json")).status_code == 403
     assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "bootstrap"})).status_code == 200
-    password = "correct horse battery staple"
+    password = "abcdefgh"
     data = {"username": "reader", "password": password, "confirmation": password}
     headers = {"Origin": "http://localhost"}
     assert (await client.post("/setup", data=data)).status_code == 403
@@ -306,3 +306,13 @@ def test_sign_in_throttle_bounds_peers_pending_and_ipv6_prefixes(monkeypatch):
     assert not isinstance(attempt, int)
     limiter.finish("192.0.2.3", attempt, success=True)
     assert not limiter._windows
+
+
+@pytest.mark.parametrize("password, accepted", [
+    ("abcdefg", False), ("abcdefgh", True), ("12345678", True),
+    ("ABCDEFGH", True), ("!@#$%^&*", True), ("a" * 128, True),
+    ("a" * 129, False), ("abcdefg\n", False),
+])
+def test_password_length_without_composition_requirements(password, accepted):
+    assert browser_setup.valid_password(password, password) is accepted
+    assert not browser_setup.valid_password(password, password + "x")
