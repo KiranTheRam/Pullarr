@@ -19,7 +19,17 @@ jobs:
         run: |
           IMAGE="forgejo.ram-home.org/${GITHUB_REPOSITORY}"
           SHORT_SHA="$(printf '%s' "${GITHUB_SHA}" | cut -c1-12)"
+          BUILD_VERSION="$(sed 's/+local$//' backend/VERSION)+g${GITHUB_SHA}"
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              BUILD_VERSION="${GITHUB_REF#refs/tags/}"
+              BUILD_VERSION="${BUILD_VERSION#v}"
+              ;;
+          esac
           echo "${{ secrets.REGISTRY_TOKEN }}" | docker login forgejo.ram-home.org -u "${GITHUB_ACTOR}" --password-stdin
-          docker build -f docker/Dockerfile -t "${IMAGE}:latest" -t "${IMAGE}:${SHORT_SHA}" .
+          docker build -f docker/Dockerfile \
+            --build-arg "PULLARR_BUILD_VERSION=${BUILD_VERSION}" \
+            --build-arg "PULLARR_BUILD_REVISION=${GITHUB_SHA}" \
+            -t "${IMAGE}:latest" -t "${IMAGE}:${SHORT_SHA}" .
           docker push "${IMAGE}:latest"
           docker push "${IMAGE}:${SHORT_SHA}"

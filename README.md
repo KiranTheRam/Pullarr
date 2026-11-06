@@ -254,6 +254,24 @@ then run backend tests, `pip-audit`, the image build and integration checks.
 The base-image tags and OS packages still follow upstream updates; use immutable
 image digests when deploying a validated release.
 
+The sidebar, API, startup log, and outgoing `User-Agent` report the installed
+Python package version. Local installs and Docker builds default to
+`0.2.0+local`; reinstall the backend after changing its version metadata.
+The frontend package version is a development manifest, not the running app's
+version.
+
+For a release image, pass the Git tag as `PULLARR_BUILD_VERSION` (for example
+`--build-arg PULLARR_BUILD_VERSION=v0.2.1`). Python normalizes it to `0.2.1`.
+For an untagged build, pass `0.2.0+g<full-commit-sha>` instead. The existing
+Forgejo image workflow supplies the tag for a tag-selected manual run, or the
+commit version for main-branch builds; its publication triggers are unchanged.
+Set `PULLARR_BUILD_REVISION` to the full commit SHA to record it in the image's
+`org.opencontainers.image.revision` label. These are build-time values; runtime
+environment variables cannot change the installed version. Custom or dirty
+builds must supply their own distinguishing suffix if `+local` is insufficient.
+Release tags must be valid Python versions. Patch numbers are not incremented
+automatically.
+
 ### Recovering downloads
 
 After a restart, interrupted direct downloads appear under **Activity → Failed**

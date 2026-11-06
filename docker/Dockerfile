@@ -15,9 +15,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-COPY backend/pyproject.toml backend/constraints.txt ./
+COPY backend/pyproject.toml backend/constraints.txt backend/VERSION ./
 COPY backend/pullarr ./pullarr
-RUN python -m pip install --no-cache-dir --upgrade pip \
+ARG PULLARR_BUILD_VERSION
+ARG PULLARR_BUILD_REVISION=unknown
+LABEL org.opencontainers.image.revision="${PULLARR_BUILD_REVISION}"
+RUN if [ -n "$PULLARR_BUILD_VERSION" ]; then printf '%s\n' "$PULLARR_BUILD_VERSION" > VERSION; fi \
+    && python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -c constraints.txt .
 
 COPY --from=frontend /build/static ./static
