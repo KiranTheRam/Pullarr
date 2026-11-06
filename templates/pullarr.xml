@@ -19,4 +19,7 @@
   <Config Name="WebUI Port" Target="6997" Default="6997" Mode="tcp" Description="Pullarr web interface port." Type="Port" Display="always" Required="true" Mask="false"/>
   <Config Name="Appdata" Target="/config" Default="/mnt/user/appdata/pullarr" Mode="rw" Description="Persistent database, API key, and settings." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Comics" Target="/comics" Default="/mnt/user/media/comics" Mode="rw" Description="Comic library folder. Add /comics as a root folder in Pullarr after installation." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="PUID" Target="PUID" Default="" Mode="" Description="Optional decimal user ID, e.g. 99. Set with PGID; empty preserves the default identity. Prepares only dedicated appdata ownership." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="PGID" Target="PGID" Default="" Mode="" Description="Optional decimal group ID, e.g. 100. Set with PUID; empty preserves the default identity." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="UMASK" Target="UMASK" Default="" Mode="" Description="Optional octal mask, e.g. 002 for new ordinary files 664 and directories 775. Login credentials remain private." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

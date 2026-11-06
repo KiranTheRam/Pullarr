@@ -7,7 +7,11 @@ services:
     volumes:
       - ./data/pullarr-config:/config
       - ./data/comics:/comics
+    # Optional container identity (set PUID and PGID together; see README).
     # environment:
+    #   - PUID=1000
+    #   - PGID=1000
+    #   - UMASK=002
     #   - PULLARR_AUTH_USERNAME=admin
     #   - PULLARR_AUTH_PASSWORD=change-me
     #   - 'PULLARR_ALLOWED_HOSTS=["pullarr", "comics.example.com"]'

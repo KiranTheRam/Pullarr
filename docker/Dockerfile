@@ -12,7 +12,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Decode RAR/7z to validate downloads without extracting untrusted paths.
-RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools \
+RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/pyproject.toml backend/constraints.txt ./
@@ -22,6 +22,8 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 
 COPY --from=frontend /build/static ./static
 COPY docker/healthcheck.py ./healthcheck.py
+COPY docker/entrypoint.py ./entrypoint.py
+ENTRYPOINT ["python", "-I", "-B", "/app/entrypoint.py"]
 
 ENV PULLARR_DATA_DIR=/config \
     PULLARR_HOST=0.0.0.0 \

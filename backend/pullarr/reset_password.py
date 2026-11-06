@@ -2,14 +2,34 @@
 
 import argparse
 import asyncio
+import os
+import stat
 import sys
 import warnings
 from getpass import GetPassWarning, getpass
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from .browser_setup import load_browser_login, replace_browser_password, valid_password
+from .browser_setup import LOGIN_FILE, load_browser_login, replace_browser_password, valid_password
 from .config import config
+
+
+def _use_login_owner(path) -> None:
+    # Docker exec/Unraid consoles bypass the image entrypoint and may be root
+    # even while the server is non-root. Drop before opening SQLite or replacing
+    # the private login, so recovery cannot leave root-owned state behind.
+    if os.geteuid() != 0:
+        return
+    try:
+        owner = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(owner.st_mode):
+        raise OSError("browser login must be a regular file")
+    if owner.st_uid != 0:
+        os.setgroups([])
+        os.setgid(owner.st_gid)
+        os.setuid(owner.st_uid)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        _use_login_owner(config.data_dir / LOGIN_FILE)
         login = load_browser_login()
     except (OSError, KeyError, ValueError, TypeError):
         print("Could not read the browser login in the configured data directory.", file=sys.stderr)

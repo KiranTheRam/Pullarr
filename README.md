@@ -84,6 +84,49 @@ First-run checklist, in the pullarr UI:
 5. **Optional Metron**: create an account at <https://metron.cloud>, enter the
    username/password under Settings → Metadata enrichment, and test it.
 
+### Container file ownership (PUID / PGID / UMASK)
+
+The image preserves its existing identity and inherited umask when these variables
+are unset or empty (normally root and `022`). To create files as your host user:
+
+| Variable | Example | Meaning |
+| --- | --- | --- |
+| `PUID` | `99` | Decimal user ID; set together with PGID |
+| `PGID` | `100` | Decimal primary group ID; set together with PUID |
+| `UMASK` | `002` | Octal mask for new files and directories; works independently |
+
+Unraid commonly uses `99:100` (`nobody:users`). `UMASK=002` gives ordinary new
+files mode `664` and directories `775`; browser credential files remain `600`.
+Existing file modes, copied files and hardlinks retain their existing permissions.
+IDs must be in `0..4294967294`, and masks in `000..777` (an optional leading zero
+is accepted). IDs must also be supported by the host filesystem and Docker/LXC
+user mapping; unsupported ownership changes fail before the command starts.
+Use a nonzero user ID to run without root identity.
+
+Setting PUID and PGID opts into preparing **only the dedicated appdata directory**
+(`PULLARR_DATA_DIR`, `/config` by default). Startup changes its ownership and that
+of regular files and directories inside it, failing if ownership cannot be set.
+Keep libraries and downloads outside appdata. Symlinks, multiply linked files,
+special files and nested mounts are skipped; symlinked appdata and system/media
+paths are refused. No library or external download folder is automatically chowned.
+For an existing installation, stop Pullarr, back up appdata, and give the selected
+user access to the specific library and download folders on the host yourself.
+Use compatible ownership and group permissions for qBittorrent and shared mounts.
+
+PUID/PGID require root at startup; the command then runs with the chosen numeric
+IDs, no supplementary groups or Linux capabilities, and no privilege escalation.
+No user accounts are created. Alternatively use Docker `--user UID:GID` (Compose
+`user:`), omit PUID/PGID, and prepare writable appdata and media paths yourself.
+Docker `--group-add` groups are preserved in this mode. UMASK works with either
+mode, including a read-only root filesystem when the mounted appdata is writable.
+
+The supplied command replaces startup as PID 1, so custom commands, listener
+settings, healthchecks and stop signals work as before. Docker exec does not run
+the entrypoint: use `--user UID:GID` for other maintenance commands that write app
+data. The existing password recovery command works from a root console too: it
+drops to the saved login file's owner before opening the database or replacing
+credentials. Login and recovery remain managed by Pullarr.
+
 ### Triggering Kavita scans
 
 Kavita only picks up new issue files when it scans. To have imports show up in
