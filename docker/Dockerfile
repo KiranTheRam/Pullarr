@@ -21,6 +21,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -c constraints.txt .
 
 COPY --from=frontend /build/static ./static
+COPY docker/healthcheck.py ./healthcheck.py
 
 ENV PULLARR_DATA_DIR=/config \
     PULLARR_HOST=0.0.0.0 \
@@ -30,4 +31,9 @@ ENV PULLARR_DATA_DIR=/config \
 VOLUME ["/config", "/comics"]
 EXPOSE 6997
 
-CMD ["uvicorn", "pullarr.main:app", "--host", "0.0.0.0", "--port", "6997"]
+# Follow the listener configuration without API keys, proxy routing, or output.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -I -B /app/healthcheck.py >/dev/null 2>&1 || exit 1
+
+# Exec form keeps the server as PID 1 and honors PULLARR_HOST/PULLARR_PORT.
+CMD ["python", "-m", "pullarr.main"]

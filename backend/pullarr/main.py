@@ -59,6 +59,12 @@ api.include_router(system.router)
 app.mount("/api/v1", api)
 
 
+@app.get("/ping")
+async def ping():
+    """Public liveness only: no database, integrations, sessions, or secrets."""
+    return JSONResponse({"status": "OK"}, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/initialize.json")
 async def initialize(request: Request):
     """Browser bootstrap, protected by the browser access boundary."""

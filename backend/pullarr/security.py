@@ -65,6 +65,10 @@ async def access_boundary(request: Request, call_next):
     root_path = request.scope.get("root_path", "")
     if root_path and (path == root_path or path.startswith(root_path + "/")):
         path = path[len(root_path):]
+    # Only this exact liveness route bypasses browser setup/login. Keep Host
+    # validation above it and every API route inside its authentication boundary.
+    if path == "/ping" and request.method == "GET":
+        return await call_next(request)
     is_api = path == "/api/v1" or path.startswith("/api/v1/")
     # API keys and app-managed browser sessions are independent.
     if is_api and request.headers.get("x-api-key"):

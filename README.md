@@ -67,6 +67,11 @@ docker compose up -d
 The default compose file runs the `kirantheram/pullarr:latest` Docker Hub image
 and does not include a VPN or download-client sidecar. Open
 <http://localhost:6997> after the container starts.
+The image checks the public, secret-free `GET /ping` route and shows as `healthy`
+once Pullarr is serving, including when `PULLARR_HOST` or `PULLARR_PORT` is set.
+The probe bypasses HTTP proxies; browser login and API authentication still apply
+to their normal routes, and Host validation also applies to `/ping`. This is a
+liveness check, so it does not test the database or external services.
 
 First-run checklist, in the pullarr UI:
 
@@ -227,6 +232,7 @@ Environment variables (all optional):
 
 | Variable            | Default | Description                          |
 | ------------------- | ------- | ------------------------------------ |
+| `PULLARR_HOST`      | `0.0.0.0` | HTTP bind address (IPv4, IPv6, or a local DNS name) |
 | `PULLARR_PORT`      | `6997`  | HTTP port                            |
 | `PULLARR_DATA_DIR`  | `data`  | SQLite DB, API key, DDL staging      |
 | `PULLARR_SQLITE_WAL` | `true` | Use WAL on local database storage; see below |
