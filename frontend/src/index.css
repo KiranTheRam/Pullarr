@@ -1398,3 +1398,12 @@ h4.link-text:hover {
   min-height: 80px;
   resize: vertical;
 }
+
+/* Consistent alignment at navigation, action, and empty-state sizes. */
+.ui-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  vertical-align: -0.18em;
+}
+.nav-item .icon { display: inline-flex; align-items: center; justify-content: center; }
+.empty-state .ui-icon { color: var(--text-dim); }

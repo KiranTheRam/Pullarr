@@ -1,3 +1,4 @@
+import { Icon } from "../components/Icon";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -22,15 +23,15 @@ export default function Calendar() {
   const offset = start.getUTCDay();
   return <>
     <Toolbar title="Release Calendar">
-      <button className="btn" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>←</button>
+      <button aria-label="Previous month" className="btn" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}><Icon name="arrow-left" /></button>
       <strong>{month.toLocaleString(undefined, { month: "long", year: "numeric" })}</strong>
-      <button className="btn" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>→</button>
+      <button aria-label="Next month" className="btn" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}><Icon name="arrow-right" /></button>
     </Toolbar>
     <div className="content">
       <p className="section-hint">Known ComicVine issue dates for series in your library. Dates can change as metadata is updated.</p>
       {releases.isLoading && <Spinner />}
       {releases.isError && <QueryError error={releases.error} retry={() => releases.refetch()} />}
-      {releases.data?.length === 0 && <EmptyState icon="🗓" title="No dated issues this month" hint="Try another month or refresh a series." />}
+      {releases.data?.length === 0 && <EmptyState icon={<Icon name="calendar" size={40} />} title="No dated issues this month" hint="Try another month or refresh a series." />}
       {releases.data && <div className="calendar-grid">
         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <div className="calendar-weekday" key={day}>{day}</div>)}
         {Array.from({ length: offset }, (_, index) => <div key={`blank-${index}`} className="calendar-day empty" />)}

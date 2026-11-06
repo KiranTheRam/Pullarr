@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
-  <title id="title">Pullarr icon</title>
-  <desc id="desc">A blue geometric letter P on a dark charcoal background.</desc>
-  <rect width="1024" height="1024" fill="#20242c"/>
-  <path fill="#3b8cff" d="M320 220h384v220H512v364H320z"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Pullarr"><rect width="64" height="64" rx="13" fill="#22262f"/><path d="M19 12h20l7 7v16M19 12v40h14M39 12v8h7" fill="none" stroke="#91a9c7" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M27 24h11M27 31h7M42 32v17m-6-6 6 6 6-6" fill="none" stroke="#5c9dff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>

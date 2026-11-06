@@ -1,3 +1,4 @@
+import { Icon } from "../components/Icon";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -58,7 +59,7 @@ function Queue() {
   if (isLoading) return <Spinner />;
   if (isError) return <QueryError error={error} retry={() => refetch()} />;
   if (!data || data.length === 0)
-    return <EmptyState icon="⇅" title="Queue is empty" hint="Grabbed releases will appear here." />;
+    return <EmptyState icon={<Icon name="activity" size={40} />} title="Queue is empty" hint="Grabbed releases will appear here." />;
 
   const selectedVisible = data.filter((item) => selected.has(item.id)).map((item) => item.id);
   const allSelected = selectedVisible.length === data.length;
@@ -181,7 +182,7 @@ function History() {
       ))}
     </div>
     {isLoading ? <Spinner /> : isError ? <QueryError error={error} retry={() => refetch()} /> : !items.length ? <>
-      <EmptyState icon="🕘" title={eventFilter ? "No events match this filter" : offset ? "No more history" : "No history yet"} />
+      <EmptyState icon={<Icon name="history" size={40} />} title={eventFilter ? "No events match this filter" : offset ? "No more history" : "No history yet"} />
       {eventFilter && <button className="btn" onClick={() => { setEventFilter(""); setOffset(0); }}>Clear filter</button>}
     </> : <table className="data-table">
       <thead><tr><th>Event</th><th>Series</th><th>Detail</th><th>Source</th><th>Date</th></tr></thead>
@@ -217,7 +218,7 @@ function FailedDownloads() {
   });
   if (isLoading) return <Spinner />;
   if (isError) return <QueryError error={error} retry={() => refetch()} />;
-  if (!data?.length) return <><EmptyState icon="✔" title={offset ? "No more failed downloads" : "No failed downloads"} /><PageControls offset={offset} next={false} pending={false} setOffset={setOffset} /></>;
+  if (!data?.length) return <><EmptyState icon={<Icon name="check" size={40} />} title={offset ? "No more failed downloads" : "No failed downloads"} /><PageControls offset={offset} next={false} pending={false} setOffset={setOffset} /></>;
   return (
     <>{(retry.isError || block.isError) && <div className="error-banner">{String((retry.error || block.error) as Error)}</div>}<table className="data-table">
       <thead><tr><th>Release</th><th>Failure</th><th>Attempts</th><th>Date</th><th></th></tr></thead>
@@ -245,7 +246,7 @@ function Jobs() {
   });
   if (isLoading) return <Spinner />;
   if (isError) return <QueryError error={error} retry={() => refetch()} />;
-  if (!data?.length) return <EmptyState icon="⚙" title="No background jobs yet" />;
+  if (!data?.length) return <EmptyState icon={<Icon name="settings" size={40} />} title="No background jobs yet" />;
   return (
     <table className="data-table">
       <thead><tr><th>Job</th><th>Series</th><th>Status</th><th>Phase</th><th>Progress</th><th>Detail</th></tr></thead>
