@@ -1,16 +1,17 @@
+import { Icon, type IconName } from "./Icon";
 import { NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, appVersion } from "../api/client";
 import type { QueueItem } from "../api/types";
 
 const items = [
-  { to: "/", label: "Library", icon: "▦" },
-  { to: "/add", label: "Add New", icon: "+" },
-  { to: "/calendar", label: "Calendar", icon: "▦" },
-  { to: "/activity", label: "Activity", icon: "⇅" },
-  { to: "/wanted", label: "Wanted", icon: "!" },
-  { to: "/settings", label: "Settings", icon: "⚙" },
-];
+  { to: "/", label: "Library", icon: "library" },
+  { to: "/add", label: "Add New", icon: "add" },
+  { to: "/calendar", label: "Calendar", icon: "calendar" },
+  { to: "/activity", label: "Activity", icon: "activity" },
+  { to: "/wanted", label: "Wanted", icon: "wanted" },
+  { to: "/settings", label: "Settings", icon: "settings" },
+] satisfies { to: string; label: string; icon: IconName }[];
 
 export default function Sidebar({ onGoTo }: { onGoTo: () => void }) {
   const { data: queue } = useQuery({
@@ -25,7 +26,7 @@ export default function Sidebar({ onGoTo }: { onGoTo: () => void }) {
         <img className="logo-mark" src="/pullarr-icon.svg" alt="" /> pullarr
       </div>
       <nav>
-        <button className="nav-item go-to" onClick={onGoTo}><span className="icon">⌕</span> Go to… <span className="shortcut">⌘K</span></button>
+        <button className="nav-item go-to" onClick={onGoTo}><span className="icon"><Icon name="search" /></span> Go to… <span className="shortcut">⌘K</span></button>
         {items.map((item) => (
           <NavLink
             key={item.to}
@@ -33,7 +34,7 @@ export default function Sidebar({ onGoTo }: { onGoTo: () => void }) {
             end={item.to === "/"}
             className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
           >
-            <span className="icon">{item.icon}</span>
+            <span className="icon"><Icon name={item.icon} /></span>
             {item.label}
             {item.to === "/activity" && queue && queue.length > 0 && (
               <span className="nav-badge">{queue.length}</span>

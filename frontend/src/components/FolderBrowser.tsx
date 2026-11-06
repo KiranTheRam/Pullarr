@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
@@ -62,7 +63,7 @@ export function FolderBrowser({
         <ul className="fs-list">
           {data?.parent != null && (
             <li className="fs-row up" onClick={() => navigate(data.parent!)}>
-              ⬑ ..
+              <Icon name="folder-up" /> ..
             </li>
           )}
           {data?.entries.length === 0 && (
@@ -73,7 +74,7 @@ export function FolderBrowser({
           )}
           {entries?.map((e) => (
             <li key={e.path} className="fs-row" onClick={() => navigate(e.path)}>
-              📁 {e.name}
+              <Icon name="folder" /> {e.name}
             </li>
           ))}
         </ul>

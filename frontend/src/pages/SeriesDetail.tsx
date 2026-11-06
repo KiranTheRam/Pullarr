@@ -1,3 +1,4 @@
+import { Icon } from "../components/Icon";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -292,7 +293,7 @@ export function InteractiveSearch({
                       disabled={grab.isPending || grabSelected.isPending}
                       onClick={() => grab.mutate(r)}
                     >
-                      {grab.isPending && grab.variables === r ? "Queuing…" : "⇓"}
+                      {grab.isPending && grab.variables === r ? "Queuing…" : <Icon name="download" />}
                     </button>
                   </td>
                 </tr>
@@ -517,11 +518,12 @@ export default function SeriesDetail() {
               <button
                 className={`monitor-toggle${ch.monitored ? " on" : ""}`}
                 title={ch.monitored ? "Monitored" : "Unmonitored"}
+                aria-label={ch.monitored ? "Unmonitor issue" : "Monitor issue"}
                 onClick={() =>
                   toggleIssue.mutate({ issueIds: [ch.id], monitored: !ch.monitored })
                 }
               >
-                {ch.monitored ? "🔖" : "◻"}
+                <Icon name={ch.monitored ? "bookmark" : "bookmark-off"} />
               </button>
             </td>
             <td>
@@ -561,6 +563,7 @@ export default function SeriesDetail() {
               <button
                 className="btn icon-btn"
                 title="Interactive search"
+                aria-label="Interactive search"
                 onClick={() =>
                   setSearch({
                     issueId: ch.id,
@@ -568,7 +571,7 @@ export default function SeriesDetail() {
                   })
                 }
               >
-                🔍
+                <Icon name="search" />
               </button>
             </td>
           </tr>
@@ -587,7 +590,7 @@ export default function SeriesDetail() {
           onClick={() => refresh.mutate()}
           disabled={refresh.isPending}
         >
-          ⟳ Refresh
+          <Icon name="refresh" /> Refresh
         </button>
         <button
           className="btn"
@@ -595,28 +598,28 @@ export default function SeriesDetail() {
           onClick={() => scan.mutate()}
           disabled={scan.isPending}
         >
-          {scan.isPending ? "Scanning…" : "🗂 Scan Disk"}
+          {scan.isPending ? "Scanning…" : <><Icon name="scan" /> Scan Disk</>}
         </button>
         <button
           className="btn"
           title="Browse detected files and manually map unmatched files (e.g. a TPB to an issue range)"
           onClick={() => setShowFiles(true)}
         >
-          📄 Files
+          <Icon name="files" /> Files
         </button>
         <button
           className="btn"
           title="Preview and apply the configured file naming pattern"
           onClick={() => setShowRename(true)}
         >
-          ✏️ Rename
+          <Icon name="rename" /> Rename
         </button>
         <button
           className="btn"
           title="Find duplicate or orphaned files that can be cleaned up"
           onClick={() => setShowCleanup(true)}
         >
-          🧹 Clean up
+          <Icon name="cleanup" /> Clean up
         </button>
         <button
           className="btn"
@@ -624,14 +627,14 @@ export default function SeriesDetail() {
           onClick={() => searchMissing.mutate()}
           disabled={searchMissing.isPending}
         >
-          🎯 Search Missing
+          <Icon name="search-missing" /> Search Missing
         </button>
         <button
           className="btn"
           title="Search enabled sources for releases of this series"
           onClick={() => setSearch({ title: `${series.title} (all releases)` })}
         >
-          🔍 Search Releases
+          <Icon name="search" /> Search Releases
         </button>
         <button
           className="btn"
@@ -643,18 +646,19 @@ export default function SeriesDetail() {
           onClick={() => toggleMonitor.mutate()}
           disabled={toggleMonitor.isPending}
         >
-          {series.monitored ? "🔖 Monitored" : "◻ Unmonitored"}
+          <Icon name={series.monitored ? "bookmark" : "bookmark-off"} /> {series.monitored ? "Monitored" : "Unmonitored"}
         </button>
         <button
           className="btn danger"
           title="Remove this series from Pullarr without deleting files"
+          aria-label="Remove series"
           disabled={deleteSeries.isPending}
           onClick={() => {
             if (confirm(`Remove "${series.title}" from library? Files on disk are kept.`))
               deleteSeries.mutate();
           }}
         >
-          ✕
+          <Icon name="close" />
         </button>
       </Toolbar>
       <div className="content">
@@ -741,7 +745,7 @@ export default function SeriesDetail() {
             <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
               {series.source_links.map((sl) => (
                 <span className="tag" key={sl.id} title={sl.external_title}>
-                  🔗 {sl.source_name}
+                  <Icon name="link" /> {sl.source_name}
                 </span>
               ))}
               <button className="btn sm" onClick={() => setShowSources(true)}>
@@ -790,10 +794,11 @@ export default function SeriesDetail() {
                   className="volume-header"
                   onClick={() => setCollapsed({ ...collapsed, [key]: !isCollapsed })}
                 >
-                  <span className="chevron">{isCollapsed ? "▸" : "▾"}</span>
+                  <span className="chevron"><Icon name={isCollapsed ? "chevron-right" : "chevron-down"} size={16} /></span>
                   <button
                     className={`monitor-toggle${allMonitored ? " on" : ""}`}
                     title={allMonitored ? "Unmonitor this volume" : "Monitor this volume"}
+                    aria-label={allMonitored ? "Unmonitor this volume" : "Monitor this volume"}
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleIssue.mutate({
@@ -802,7 +807,7 @@ export default function SeriesDetail() {
                       });
                     }}
                   >
-                    {allMonitored ? "🔖" : "◻"}
+                    <Icon name={allMonitored ? "bookmark" : "bookmark-off"} />
                   </button>
                   {archiveFile ? (
                     <h4

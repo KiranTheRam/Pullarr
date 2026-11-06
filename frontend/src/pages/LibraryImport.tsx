@@ -1,3 +1,4 @@
+import { Icon } from "../components/Icon";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -75,7 +76,7 @@ export default function LibraryImport() {
       {roots.isError && <QueryError error={roots.error} retry={() => roots.refetch()} />}
       {folders.isLoading && <Spinner />}
       {folders.isError && <QueryError error={folders.error} retry={() => folders.refetch()} />}
-      {folders.data?.length === 0 && <EmptyState icon="📂" title="No untracked folders found" hint="Check another root folder or add a series manually." />}
+      {folders.data?.length === 0 && <EmptyState icon={<Icon name="folder-open" size={44} />} title="No untracked folders found" hint="Check another root folder or add a series manually." />}
       {folders.data?.map((folder) => <FolderMatch key={folder.path} folder={folder} selected={selected[folder.folder_name]} onChoose={(value) => setSelected((current) => {
         const next = { ...current };
         if (value) next[folder.folder_name] = value; else delete next[folder.folder_name];

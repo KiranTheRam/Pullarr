@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import { useEffect, useId, useRef } from "react";
 import type { ReactNode } from "react";
 
@@ -26,7 +27,7 @@ export function Spinner() {
   );
 }
 
-export function EmptyState({ icon, title, hint }: { icon: string; title: string; hint?: string }) {
+export function EmptyState({ icon, title, hint }: { icon: ReactNode; title: string; hint?: string }) {
   return (
     <div className="empty-state">
       <div className="big">{icon}</div>
@@ -105,7 +106,7 @@ export function Modal({
         <div className="modal-header" id={titleId}>
           {title}
           <button ref={closeRef} onClick={onClose} aria-label="Close dialog" style={{ fontSize: 18, color: "var(--text-dim)" }}>
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <div className="modal-body">{children}</div>

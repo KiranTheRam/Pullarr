@@ -1,3 +1,4 @@
+import { Icon } from "../components/Icon";
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, browserAuthMode, updateBrowserLogin } from "../api/client";
@@ -133,7 +134,7 @@ function RootFolders() {
         <div className="form-row" key={rf.id}>
           <label className="form-path">{rf.path}</label>
           <button className="btn icon-btn" title="Remove root folder" aria-label={`Remove ${rf.path}`} onClick={() => remove.mutate(rf.id)}>
-            ✕
+            <Icon name="close" />
           </button>
         </div>
       ))}
@@ -190,7 +191,7 @@ function ApiKeyRow({ apiKey, onRemove }: { apiKey: ApiKey; onRemove: () => void 
         {copied ? "Copied" : "Copy"}
       </button>
       <button className="btn icon-btn" title="Revoke key" aria-label={`Revoke ${apiKey.name}`} onClick={onRemove}>
-        ✕
+        <Icon name="close" />
       </button>
     </div>
   );
@@ -292,16 +293,16 @@ function SourcePriority({
           <div className={`priority-row${enabled ? "" : " disabled"}`} key={name}>
             <span className="priority-rank">{i + 1}</span>
             <span className="priority-arrows">
-              <button className="btn icon-btn" disabled={i === 0} onClick={() => move(i, -1)} title="Higher priority">
-                ↑
+              <button className="btn icon-btn" disabled={i === 0} onClick={() => move(i, -1)} title="Higher priority" aria-label="Higher priority">
+                <Icon name="arrow-up" />
               </button>
               <button
                 className="btn icon-btn"
                 disabled={i === order.length - 1}
                 onClick={() => move(i, 1)}
-                title="Lower priority"
+                title="Lower priority" aria-label="Lower priority"
               >
-                ↓
+                <Icon name="arrow-down" />
               </button>
             </span>
             <span className="priority-name">{SOURCE_LABELS[name] ?? name}</span>
@@ -444,7 +445,7 @@ function KavitaSettings({
           <span
             style={{ fontSize: 13, color: testResult.startsWith("✔") ? "var(--success)" : "var(--danger)" }}
           >
-            {testResult}
+            <Icon name={testResult.startsWith("✔") ? "check" : "close"} /> {testResult.replace(/^[✔✖]\s*/, "")}
           </span>
         )}
       </div>
@@ -623,7 +624,7 @@ export default function Settings() {
             <span style={{ color: "var(--text-faint)", fontSize: 13 }}>Gradually enriches large series while respecting Metron rate limits.</span>
           </div>
           <div className="form-row"><label></label><button className="btn" onClick={() => testMetron.mutate()} disabled={testMetron.isPending}>Test Metron</button>
-            {metronTest && <span style={{ fontSize: 13, color: metronTest.startsWith("✔") ? "var(--success)" : "var(--danger)" }}>{metronTest}</span>}
+            {metronTest && <span style={{ fontSize: 13, color: metronTest.startsWith("✔") ? "var(--success)" : "var(--danger)" }}><Icon name={metronTest.startsWith("✔") ? "check" : "close"} /> {metronTest.replace(/^[✔✖]\s*/, "")}</span>}
           </div>
         </div>
 
@@ -644,7 +645,7 @@ export default function Settings() {
             </button>
             {cvTest && (
               <span style={{ fontSize: 13, color: cvTest.startsWith("✔") ? "var(--success)" : "var(--danger)" }}>
-                {cvTest}
+                <Icon name={cvTest.startsWith("✔") ? "check" : "close"} /> {cvTest.replace(/^[✔✖]\s*/, "")}
               </span>
             )}
           </div>
@@ -721,7 +722,7 @@ export default function Settings() {
             </button>
             {qbtTest && (
               <span style={{ fontSize: 13, color: qbtTest.startsWith("✔") ? "var(--success)" : "var(--danger)" }}>
-                {qbtTest}
+                <Icon name={qbtTest.startsWith("✔") ? "check" : "close"} /> {qbtTest.replace(/^[✔✖]\s*/, "")}
               </span>
             )}
           </div>
@@ -762,7 +763,7 @@ export default function Settings() {
             </button>
             {webhookTest && (
               <span style={{ fontSize: 13, color: webhookTest.startsWith("✔") ? "var(--success)" : "var(--danger)" }}>
-                {webhookTest}
+                <Icon name={webhookTest.startsWith("✔") ? "check" : "close"} /> {webhookTest.replace(/^[✔✖]\s*/, "")}
               </span>
             )}
           </div>
