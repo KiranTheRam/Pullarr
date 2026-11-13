@@ -17,7 +17,7 @@ from ..filename import BRACKET_GROUPS, parse_filename
 from ..models import Issue, Series
 from ..util import parse_issue_label
 from .matcher import MediaFile, find_media_files, match_files
-from .naming import issue_filename, volume_filename
+from .naming import filename_for_issue, volume_filename
 
 log = logging.getLogger(__name__)
 
@@ -173,9 +173,7 @@ def analyze(
 def _group(series, kind, num, files, referenced, issue_by_num, template):
     ext = Path(str(files[0].path)).suffix.lower()
     if kind == "issue":
-        issue = issue_by_num[num]
-        canonical = issue_filename(template, series.title, issue.display_number or issue.number,
-                                   issue.title, series.year, ext=ext)
+        canonical = filename_for_issue(template, series, issue_by_num[num], ext=ext)
         label = f"Issue {num:g}"
     else:
         canonical = volume_filename(series.title, num, ext)

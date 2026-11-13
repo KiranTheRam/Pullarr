@@ -9,6 +9,7 @@ from functools import lru_cache
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from ..models import Issue, Series
 from ..util import NAME_MAX_BYTES, sanitize_filename, shorten_utf8, truncate_utf8
 
 log = logging.getLogger(__name__)
@@ -115,6 +116,13 @@ def issue_filename(
         return name
     _warn_long_template(template)
     return _numbered_filename(_issue_render(DEFAULT_TEMPLATE, issue, year), series_title, ext)
+
+
+def filename_for_issue(template: str, series: Series, issue: Issue, ext: str = ".cbz") -> str:
+    year = issue.released_at.year if issue.released_at is not None else series.year
+    return issue_filename(
+        template, series.title, issue.display_number or issue.number, issue.title, year, ext=ext,
+    )
 
 
 def volume_filename(series_title: str, volume: int, ext: str = ".cbz") -> str:

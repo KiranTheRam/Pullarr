@@ -23,7 +23,7 @@ from ..download.archive import (ArchiveBudget, ImportValidationError, MAX_ARCHIV
 from ..models import Issue, Series
 from ..util import normalize_title, strip_issue_suffix
 from .matcher import ARCHIVE_EXTS, IMAGE_EXTS, MediaFile, find_media_files, match_files
-from .naming import (issue_filename, range_filename, series_folder, unmatched_filename,
+from .naming import (filename_for_issue, range_filename, series_folder, unmatched_filename,
                      volume_filename, volume_range_filename)
 from .scanner import recorded_files_expect_content, require_root_available
 
@@ -277,10 +277,7 @@ def import_payload(
     def destination(media: MediaFile, issue: Issue | None, volume: int | None) -> Path:
         ext = _dest_ext(media)
         if issue is not None:
-            dest_name = issue_filename(
-                template, series.title, issue.display_number or issue.number,
-                issue.title, series.year, ext=ext
-            )
+            dest_name = filename_for_issue(template, series, issue, ext=ext)
         elif media.issue_range is not None:
             lo, hi = media.issue_range
             dest_name = range_filename(series.title, lo, hi, series.year, ext=ext)

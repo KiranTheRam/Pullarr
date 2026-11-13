@@ -334,6 +334,11 @@ Everything else (ComicVine key, GetComics base URL/proxy, naming template,
 qBittorrent, monitor interval) lives in the UI under Settings and is stored
 in the DB.
 
+In the issue naming template, `{year}` uses the issue's release year and falls
+back to the series start year if the release date is missing. This applies to
+download imports and the Rename tool. Default series folders use the series
+start year.
+
 Existing bootstrap API keys at `<data dir>/api_key` keep working through
 `X-Api-Key`. Create independently revocable keys under **Settings → API Keys**
 for new integrations.
