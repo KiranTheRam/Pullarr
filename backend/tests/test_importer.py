@@ -1,5 +1,6 @@
 import io
 import zipfile
+from datetime import datetime, timezone
 
 import pytest
 
@@ -233,9 +234,15 @@ class TestImportPayload:
         assert second[0].dest.stat().st_mtime_ns == mtime
 
 
-def test_import_pads_numeric_display_number(tmp_path, series, issues):
+@pytest.mark.parametrize(("released_at", "year"), [
+    (datetime(2026, 1, 7, tzinfo=timezone.utc), 2026),
+    (None, 2024),
+])
+def test_import_formats_issue_number_and_year(tmp_path, series, issues, released_at, year):
     issues[0].display_number = '1'
+    issues[0].released_at = released_at
     src = tmp_path / 'Absolute Batman 1.cbz'
     make_cbz(src)
     result = import_payload(src, series, issues, tmp_path / 'lib', '{series} {issue:03d} ({year})')
-    assert result[0].dest.name == 'Absolute Batman 001 (2024).cbz'
+    assert result[0].dest.name == f'Absolute Batman 001 ({year}).cbz'
+    assert result[0].dest.parent.name == 'Absolute Batman (2024)'

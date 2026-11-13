@@ -1,3 +1,7 @@
+from datetime import datetime, timezone
+
+import pytest
+
 from pullarr.library.naming import DEFAULT_TEMPLATE
 from pullarr.library.rename import apply_renames, plan_renames
 from pullarr.models import Issue, Series
@@ -124,10 +128,21 @@ class TestApplyRenames:
         assert outcomes[0].status == "skipped-missing"
 
 
-def test_rename_pads_numeric_display_number(tmp_path):
+@pytest.mark.parametrize(("released_at", "year"), [
+    (datetime(2026, 1, 7, tzinfo=timezone.utc), 2026),
+    (None, 2024),
+])
+def test_rename_formats_issue_number_and_year(tmp_path, released_at, year):
     src = tmp_path / 'Absolute Batman 1.cbz'
     src.write_bytes(b'x')
     row = issue(1, 1, src)
     row.display_number = '1'
-    result = plan_renames(series(), [row], '{series} {issue:03d} ({year})')
-    assert result[0].new_name == 'Absolute Batman 001 (2024).cbz'
+    row.released_at = released_at
+    template = '{series} {issue:03d} ({year})'
+
+    items = plan_renames(series(), [row], template)
+    expected = tmp_path / f'Absolute Batman 001 ({year}).cbz'
+    assert items[0].new_name == expected.name
+    assert apply_renames(items, {row.id: row})[0].status == 'renamed'
+    assert expected.is_file()
+    assert plan_renames(series(), [row], template) == []

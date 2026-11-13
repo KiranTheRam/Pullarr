@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..filename import parse_filename
 from ..models import Issue, Series
-from .naming import issue_filename, range_filename, volume_filename, volume_range_filename
+from .naming import filename_for_issue, range_filename, volume_filename, volume_range_filename
 
 log = logging.getLogger(__name__)
 
@@ -75,11 +75,9 @@ def plan_renames(
             desired = volume_filename(series.title, vol, ext)
             key = (0, float(vol))
         elif len(batch) == 1:
-            desired = issue_filename(
-                template, series.title, batch[0].display_number or batch[0].number, batch[0].title,
-                series.year, ext=ext,
-            )
-            key = (1, batch[0].number)
+            issue = batch[0]
+            desired = filename_for_issue(template, series, issue, ext=ext)
+            key = (1, issue.number)
         else:
             numbers = sorted(i.number for i in batch)
             desired = range_filename(series.title, numbers[0], numbers[-1], series.year, ext=ext)

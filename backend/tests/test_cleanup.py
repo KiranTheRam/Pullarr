@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from pullarr.library.cleanup import analyze, apply_cleanup
 from pullarr.library.naming import DEFAULT_TEMPLATE
 from pullarr.models import Issue, Series
@@ -34,6 +36,19 @@ class TestAnalyze:
         by_name = {f.name: f for f in group.files}
         assert by_name["Saga 003 (2013) (digital).cbz"].keep  # referenced wins
         assert not by_name["Saga #003.cbz"].keep
+
+    def test_prefers_release_year_when_neither_duplicate_is_referenced(self, tmp_path):
+        old = tmp_path / "Saga 029 (2012).cbz"
+        current = tmp_path / "Saga 029 (2015).cbz"
+        old.write_bytes(b"larger")
+        current.write_bytes(b"x")
+        row = issue(1, 29)
+        row.released_at = datetime(2015, 6, 10, tzinfo=timezone.utc)
+
+        plan = analyze(series(), [row], [tmp_path], "{series} {issue:03d} ({year})")
+
+        assert len(plan.groups) == 1
+        assert [f.name for f in plan.groups[0].files if f.keep] == [current.name]
 
     def test_orphan_covered_issue_marked_deletable(self, tmp_path):
         folder = tmp_path / "Saga (2012)"
