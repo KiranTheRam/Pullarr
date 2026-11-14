@@ -22,7 +22,7 @@ class AppConfig(BaseSettings):
     api_key: str | None = None
     # WAL requires a local data_dir; disable before using NFS/SMB storage.
     sqlite_wal: bool = True
-    # Optional environment-managed HTTP Basic login. Otherwise set up in browser.
+    # Optional environment-managed browser login. Otherwise set up in browser.
     allow_unauthenticated_browser: bool = False
     auth_username: str = ""
     auth_password: SecretStr = SecretStr("")

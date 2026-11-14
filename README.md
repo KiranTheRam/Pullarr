@@ -303,7 +303,7 @@ Environment variables (all optional):
 | `PULLARR_PORT`      | `6997`  | HTTP port                            |
 | `PULLARR_DATA_DIR`  | `data`  | SQLite DB, API key, DDL staging      |
 | `PULLARR_SQLITE_WAL` | `true` | Use WAL on local database storage; see below |
-| `PULLARR_AUTH_USERNAME` | *(empty)* | Optional environment-managed HTTP Basic login username |
+| `PULLARR_AUTH_USERNAME` | *(empty)* | Optional environment-managed browser login username |
 | `PULLARR_AUTH_PASSWORD` | *(empty)* | Browser login password; set together with the username |
 | `PULLARR_ALLOW_UNAUTHENTICATED_BROWSER` | `false` | Explicitly disable first-run login for an externally authenticated deployment |
 | `PULLARR_ALLOWED_HOSTS` | `[]` | Additional exact DNS names as a JSON array (no scheme, port or wildcard) |
@@ -370,11 +370,12 @@ directory. The interactive command displays the retained username and prompts
 for a new password without echoing it. Do not delete the login file to reset a
 password: deletion reopens first-visitor setup.
 
-Existing environment-managed logins remain supported: set both
-`PULLARR_AUTH_USERNAME` and `PULLARR_AUTH_PASSWORD`, then restart. Setting only
-one stops startup. Recover those credentials by updating the environment and
-restarting. Use HTTPS on a trusted reverse proxy when credentials cross the
-network. An externally authenticated deployment can explicitly set
+Set both `PULLARR_AUTH_USERNAME` and `PULLARR_AUTH_PASSWORD` to manage the
+browser login through your deployment. Sign in on the Pullarr login page.
+Changing either credential and restarting invalidates previous browser sessions.
+Keep `environment_login.json` in the config volume to preserve sessions across
+ordinary restarts. Setting only one credential stops startup. Use HTTPS on a
+trusted reverse proxy when credentials cross the network. An externally authenticated deployment can explicitly set
 `PULLARR_ALLOW_UNAUTHENTICATED_BROWSER=true` to skip setup when no login exists;
 anyone who reaches such an instance can obtain API access, and startup warns.
 This option does not override an existing app-managed or environment login.
@@ -389,9 +390,9 @@ for recovery. Proxies must preserve an allowed Host or set one explicitly.
 Host validation limits DNS rebinding; it is not a login.
 
 `X-Api-Key` clients and named API keys keep working without browser credentials.
-App-managed browser sessions authenticate API requests with same-origin checks
-for writes. Environment-managed Basic credentials alone do not authenticate API
-calls. API keys do not unlock the browser UI.
+Browser sessions authenticate API requests with same-origin checks for writes.
+Scripts that used HTTP Basic for browser routes can use `X-Api-Key` on
+`/api/v1` instead. API keys do not unlock the browser UI.
 
 Saved integration secrets are bound to the exact saved URL, including scheme, port
 and path, and the qBittorrent password also to the username. The Metron password

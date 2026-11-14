@@ -42,7 +42,7 @@ async def test_ping_is_public_and_does_not_load_login_or_api_key(client, monkeyp
         (tmp_path / LOGIN_FILE).write_text("must not read this")
     elif mode == "external":
         monkeypatch.setattr(config, "allow_unauthenticated_browser", True)
-    monkeypatch.setattr(security, "load_browser_login", Mock(side_effect=AssertionError("login touched")))
+    monkeypatch.setattr(security, "load_active_login", Mock(side_effect=AssertionError("login touched")))
     monkeypatch.setattr(config.__class__, "resolve_api_key", Mock(side_effect=AssertionError("key touched")))
     for headers in ({}, {"X-Api-Key": "wrong", "Authorization": "Basic !!!"}):
         response = await client.get("/ping", headers=headers)

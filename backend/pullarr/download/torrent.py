@@ -8,6 +8,10 @@ from ..util import raise_for_status_redacted
 MAX_TORRENT_SIZE = 10_000_000
 
 
+class UnsupportedTorrentVersion(ValueError):
+    """Torrent metadata does not provide a v1 identity for tracking."""
+
+
 def torrent_info_hash(data: bytes) -> str:
     def parse(pos: int, depth: int = 0):
         if depth > 64 or pos >= len(data):
@@ -15,8 +19,7 @@ def torrent_info_hash(data: bytes) -> str:
         token = data[pos:pos + 1]
         if token == b'i':
             end = data.index(b'e', pos + 1)
-            int(data[pos + 1:end])
-            return end + 1, None
+            return end + 1, int(data[pos + 1:end])
         if token in (b'd', b'l'):
             cursor = pos + 1
             while cursor < len(data) and data[cursor:cursor + 1] != b'e':
@@ -40,12 +43,27 @@ def torrent_info_hash(data: bytes) -> str:
     pos, info = 1, None
     while pos < len(data) and data[pos:pos + 1] != b'e':
         pos, key = parse(pos)
+        if key != b'info':
+            pos, _ = parse(pos)
+            continue
+        if info is not None or data[pos:pos + 1] != b'd':
+            raise ValueError("Invalid torrent info dictionary")
         start = pos
-        pos, _ = parse(pos)
-        if key == b'info':
-            if info is not None or data[start:start + 1] != b'd':
-                raise ValueError("Invalid torrent info dictionary")
-            info = data[start:pos]
+        pos += 1
+        version = pieces = None
+        while data[pos:pos + 1] != b'e':
+            pos, field = parse(pos, 1)
+            pos, value = parse(pos, 1)
+            if field == b'meta version':
+                version = value
+            elif field == b'pieces':
+                pieces = value
+        pos += 1
+        # qBittorrent sync and cancellation use v1 hashes. Hybrids retain
+        # v1 pieces, so their original info dictionary still has that identity.
+        if version == 2 and (not isinstance(pieces, bytes) or not pieces or len(pieces) % 20):
+            raise UnsupportedTorrentVersion("BitTorrent v2-only metadata is unsupported; choose a v1 or hybrid torrent")
+        info = data[start:pos]
     if pos != len(data) - 1 or data[pos:] != b'e' or info is None:
         raise ValueError("Missing torrent info dictionary")
     return hashlib.sha1(info).hexdigest()

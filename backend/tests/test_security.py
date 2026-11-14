@@ -1,4 +1,3 @@
-import base64
 import json
 import logging
 import zipfile
@@ -9,7 +8,7 @@ import respx
 from fastapi import FastAPI, HTTPException
 from pydantic import SecretStr, ValidationError
 
-from pullarr import kavita, notifications, security
+from pullarr import browser_setup, kavita, notifications, security
 from pullarr.api import settings as settings_api
 from pullarr.config import AppConfig
 from pullarr.download.cbz import MAX_COMICINFO_BYTES, read_comicinfo, upsert_comicinfo
@@ -22,11 +21,6 @@ from pullarr.settings_service import get_all
 from pullarr.sources.torznab import MASK, TorznabIndexer, restore_keys
 
 SECRET = "SECRETKEY123"
-
-
-def basic(user: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{user}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 
 @pytest.fixture
@@ -62,13 +56,6 @@ def no_login(monkeypatch):
     monkeypatch.setattr(security.config, "allowed_hosts", ["comics.example.com"])
 
 
-@pytest.fixture
-def login(monkeypatch):
-    monkeypatch.setattr(security.config, "auth_username", "reader")
-    monkeypatch.setattr(security.config, "auth_password", SecretStr("pässword"))
-    monkeypatch.setattr(security.config, "allowed_hosts", [])
-
-
 @pytest.mark.parametrize("host", [
     "127.0.0.1", "127.0.0.1:6997", "192.168.1.5:6997", "[::1]:6997", "localhost:6997",
     "LOCALHOST", "comics.example.com", "COMICS.example.com:443",
@@ -91,17 +78,20 @@ async def test_unrecognized_hosts_are_rejected(browser_app, no_login, host):
             assert "PULLARR_ALLOWED_HOSTS" in resp.json()["detail"]
 
 
-async def test_login_guards_bootstrap_but_not_the_api_key_boundary(browser_app, login):
+async def test_login_guards_bootstrap_but_not_the_api_key_boundary(browser_app, no_login, monkeypatch):
+    monkeypatch.setattr(security.config, "auth_username", "reader")
+    digest = browser_setup._environment_digest("reader", "pässword".encode())
+    browser_app.state.environment_login = browser_setup.EnvironmentLogin("reader", bytes(32), digest)
     async with client_for(browser_app) as client:
         denied = await client.get("/initialize.json")
         assert denied.status_code == 401
-        assert denied.headers["www-authenticate"].startswith("Basic")
         assert denied.headers["cache-control"] == "no-store"
-        assert (await client.get("/initialize.json", headers=basic("reader", "wrong"))).status_code == 401
-        assert (await client.get("/initialize.json", headers=basic("wrong", "pässword"))).status_code == 401
-        assert (await client.get("/initialize.json", headers={"Authorization": "Basic !!"})).status_code == 401
-        assert (await client.get("/initialize.json", headers=basic("reader", "pässword"))).status_code == 200
-        # the mounted API authenticates itself with X-Api-Key
+        assert (await client.get("/initialize.json", auth=("reader", "pässword"))).status_code == 401
+        origin = {"Origin": "http://127.0.0.1:6997"}
+        assert (await client.post("/login", data={"username": "reader", "password": "wrong"}, headers=origin)).status_code == 401
+        assert (await client.post("/login", data={"username": "reader", "password": "pässword"}, headers=origin)).status_code == 303
+        assert (await client.get("/initialize.json")).status_code == 200
+        # The mounted API enforces its own key or session requirement.
         assert (await client.get("/api/v1/thing")).status_code == 200
 
 

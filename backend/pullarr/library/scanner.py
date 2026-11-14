@@ -207,15 +207,16 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
 
     owned_now: set[int] = set()
 
-    # exact issue files first — they take precedence over volume coverage
-    for mf in match.matched:
-        if mf.issue is None:
-            continue
+    # Exact issue files take precedence over volume coverage. Prefer a
+    # still-matching recorded file to preserve its ownership and provenance.
+    exact = [mf for mf in match.matched if mf.issue is not None]
+    exact.sort(key=lambda mf: mf.issue.file_path != str(mf.media.path))
+    for mf in exact:
         issue = mf.issue
+        if issue.id in owned_now:
+            continue
         path_str = str(mf.media.path)
-        if issue.id not in owned_now and (
-            not issue.downloaded or issue.file_path != path_str
-        ):
+        if not issue.downloaded or issue.file_path != path_str:
             if not issue.downloaded:
                 result.matched_issues += 1
             if issue.file_path != path_str:

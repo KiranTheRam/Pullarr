@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from ..download.coordination import queue_mutation
 from ..db import get_session
 from ..download.qbittorrent import QbtClient
+from ..download.torrent import UnsupportedTorrentVersion
 from ..jobs.tasks import (
     cancel_downloads,
     download_is_active,
@@ -79,6 +80,8 @@ async def retry_download(download_id: int, session: AsyncSession = Depends(get_s
             raise HTTPException(400, "qBittorrent is not enabled in settings")
         try:
             dl.torrent_hash = await submit_torrent(dl.payload, values, keep_existing=True)
+        except UnsupportedTorrentVersion as exc:
+            raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, "Torrent submission failed; check the indexer and qBittorrent settings") from exc
         dl.status = DownloadStatus.DOWNLOADING
@@ -253,6 +256,8 @@ async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
                 session, series, body.magnet, body.title or "manual torrent", values,
                 source_name=body.source_name or "manual", issue=issue
             )
+        except UnsupportedTorrentVersion as exc:
+            raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, "Torrent submission failed; check the indexer and qBittorrent settings") from exc
     else:
