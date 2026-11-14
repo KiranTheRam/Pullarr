@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .api import apikeys, calendar, discover, library, library_editor, library_import, queue, search, series, settings, system
 from .api.deps import get_api_key, require_api_access
-from .browser_setup import load_browser_login
+from .browser_setup import load_browser_login, prepare_environment_login
 from .config import config
 from .db import init_db
 from .frontend import install_frontend
@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):
         else:
             log.info("Open Pullarr on a trusted network to create the browser login.")
     await init_db()
+    app.state.environment_login = await prepare_environment_login()
     await scheduler.start()
     log.info("Pullarr %s ready on %s:%d", __version__, config.host, config.port)
     yield
@@ -68,9 +69,9 @@ async def ping():
 @app.get("/initialize.json")
 async def initialize(request: Request):
     """Browser bootstrap, protected by the browser access boundary."""
-    mode = "managed" if request.state.browser_session else "environment" if config.auth_username else "external"
+    mode = "environment" if config.auth_username else "managed" if request.state.browser_session else "external"
     return JSONResponse(
-        {"apiKey": "" if mode == "managed" else get_api_key(), "authMode": mode,
+        {"apiKey": get_api_key() if mode == "external" else "", "authMode": mode,
          "version": __version__, "urlBase": ""},
         headers={"Cache-Control": "no-store"},
     )

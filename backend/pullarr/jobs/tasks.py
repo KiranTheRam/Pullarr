@@ -609,8 +609,13 @@ def magnet_btih_hex(magnet: str) -> str:
         return ""
 
 
+class SuppressedTorrentRelease(ValueError):
+    """The release matches a torrent already blocked by the monitor."""
+
+
 async def submit_torrent(
     magnet: str, values: dict[str, str], *, keep_existing: bool = False,
+    blocked_hashes: set[str] | None = None,
 ) -> str:
     """Submit a magnet to qBittorrent and return its info hash.
 
@@ -627,6 +632,8 @@ async def submit_torrent(
         torrent_hash = magnet_btih_hex(magnet)
     if not torrent_hash:
         raise ValueError("Torrent must include a valid btih info hash")
+    if blocked_hashes and torrent_hash in blocked_hashes:
+        raise SuppressedTorrentRelease
     client = QbtClient(
         values["qbittorrent_url"], values["qbittorrent_username"], values["qbittorrent_password"]
     )
@@ -650,9 +657,9 @@ async def submit_torrent(
 
 async def enqueue_torrent(
     session: AsyncSession, series: Series | None, magnet: str, title: str, values: dict[str, str],
-    source_name: str = "manual", issue: Issue | None = None,
+    source_name: str = "manual", issue: Issue | None = None, *, blocked_hashes: set[str] | None = None,
 ) -> Download:
-    torrent_hash = await submit_torrent(magnet, values)
+    torrent_hash = await submit_torrent(magnet, values, blocked_hashes=blocked_hashes)
     dl = Download(
         series_id=series.id if series else None,
         issue_id=issue.id if issue else None,
@@ -1274,6 +1281,12 @@ async def grab_missing_issues(
     now = datetime.now(timezone.utc)
     suppressed = [dl for dl in failed_downloads if failed_release_blocks(dl, now)]
     failed_releases = {(dl.source_name, dl.payload) for dl in suppressed if dl.payload}
+    failed_torrent_hashes = {
+        info_hash
+        for dl in suppressed
+        if dl.kind == DownloadKind.TORRENT
+        and (info_hash := dl.torrent_hash.lower() or magnet_btih_hex(dl.payload))
+    }
 
     links = {sl.source_name: sl for sl in series.source_links}
     wanted_titles = {nt for t in _titles_of(series) if (nt := normalize_title(t))}
@@ -1340,8 +1353,16 @@ async def grab_missing_issues(
                         title = " " + normalize_title(release.title) + " "
                         if not any(" " + normalize_title(q) + " " in title for q in queries):
                             continue
-                        await enqueue_torrent(session, series, release.magnet, release.title, values,
-                                              source_name=release.source_name, issue=issue)
+                        try:
+                            await enqueue_torrent(
+                                session, series, release.magnet, release.title, values,
+                                source_name=release.source_name, issue=issue, blocked_hashes=failed_torrent_hashes,
+                            )
+                        except SuppressedTorrentRelease:
+                            continue
+                        except ValueError:
+                            log.warning("Skipping invalid torrent metadata from %s", indexer.name)
+                            continue
                         remaining.pop(issue.number, None)
                         queued += 1
                         break

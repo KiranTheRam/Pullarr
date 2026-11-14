@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,7 +18,7 @@ from pullarr.api import queue, search, settings
 from pullarr.db import _migrate_sqlite
 from pullarr.download.torrent import fetch_torrent, torrent_info_hash
 from pullarr.jobs import tasks
-from pullarr.models import Base, Download, Issue, Series
+from pullarr.models import Base, Download, DownloadKind, DownloadStatus, Issue, RootFolder, Series
 from pullarr.schemas import GrabIn, SeriesUpdateIn
 from pullarr.sources.queries import search_queries, search_variants, validate_templates
 from pullarr.sources.torznab import TorznabIndexer, configured_indexers, validate_indexers
@@ -28,6 +28,10 @@ MAGNET = f'magnet:?xt=urn:btih:{HASH}'
 CONFIG = dict(id='one', name='Prowlarr', url='http://prowlarr:9696/all/api', api_key='secret', categories='7030', enabled=True)
 INFO = b'd4:name4:test6:lengthi123ee'
 TORRENT = b'd4:info' + INFO + b'e'
+V2_INFO = b'd9:file treede12:meta versioni2e4:name1:x12:piece lengthi16384e'
+V2_TORRENT = b'd4:info' + V2_INFO + b'ee'
+HYBRID_INFO = V2_INFO + b'6:pieces20:abcdefghijklmnopqrste'
+HYBRID_TORRENT = b'd4:info' + HYBRID_INFO + b'e'
 FEED = f'''<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
 <item><title>Batman T03</title><prowlarrindexer>French tracker</prowlarrindexer><comments>https://tracker/item/1</comments><enclosure url="http://prowlarr/download/1" length="123"/><torznab:attr name="seeders" value="7"/><torznab:attr name="peers" value="9"/></item>
 <item><title>Magnet</title><torznab:attr name="magneturl" value="{MAGNET}"/><torznab:attr name="size" value="456"/></item>
@@ -124,6 +128,24 @@ def test_invalid_torrent(data):
         torrent_info_hash(data)
 
 
+def test_hybrid_torrent_keeps_its_v1_info_hash():
+    assert torrent_info_hash(HYBRID_TORRENT) == hashlib.sha1(HYBRID_INFO).hexdigest()
+
+
+@respx.mock
+async def test_v2_only_torrent_is_rejected_before_qbittorrent(session, monkeypatch):
+    await settings_service.set_many(session, {"qbittorrent_enabled": "true"})
+    url = "http://prowlarr/v2"
+    respx.get(url).mock(return_value=httpx.Response(200, content=V2_TORRENT))
+    qbt = AsyncMock()
+    monkeypatch.setattr(tasks, "QbtClient", qbt)
+    with pytest.raises(HTTPException, match="v2-only") as error:
+        await queue.grab(GrabIn(magnet=url, title="v2-only torrent"), session)
+    assert error.value.status_code == 422
+    qbt.assert_not_called()
+    assert (await session.execute(select(Download))).scalars().all() == []
+
+
 @respx.mock
 async def test_file_submission_uses_multipart_and_tracks_hash(monkeypatch):
     from pullarr.download.qbittorrent import QbtClient
@@ -181,6 +203,46 @@ async def test_automatic_search_requires_matching_query_and_avoids_duplicates(se
     assert await tasks.grab_missing_issues(session, series, values) == 0
     row = (await session.execute(select(Download))).scalar_one()
     assert row.title == 'Batman français T03 CBZ' and row.issue_id == issue.id
+
+
+@pytest.mark.parametrize("delivery", ["file", "redirect", "magnet"])
+@pytest.mark.parametrize("failure", ["recent", "blocked", "expired"])
+@respx.mock
+async def test_monitor_matches_torrent_failures_by_hash(session, monkeypatch, tmp_path, delivery, failure):
+    series, issue = await library(session)
+    series.root_folder = RootFolder(path=str(tmp_path))
+    info_hash = hashlib.sha1(INFO).hexdigest()
+    now = datetime.now(timezone.utc)
+    session.add(Download(
+        series_id=series.id, issue_id=issue.id, kind=DownloadKind.TORRENT, status=DownloadStatus.FAILED,
+        source_name="Original indexer name", payload="http://prowlarr/download?token=old",
+        torrent_hash=info_hash.upper(), blocked=failure == "blocked",
+        updated_at=now if failure == "recent" else now - timedelta(days=2),
+    ))
+    await session.commit()
+    repeated_magnet = f"magnet:?xt=urn:btih:{info_hash}"
+    repeated = repeated_magnet
+    if delivery != "magnet":
+        repeated = "http://prowlarr/download?token=new"
+        response = (httpx.Response(200, content=TORRENT) if delivery == "file" else
+                    httpx.Response(302, headers={"Location": repeated_magnet}))
+        respx.get(repeated).mock(return_value=response)
+    indexer = SimpleNamespace(name="Renamed indexer", search=AsyncMock(return_value=[
+        SimpleNamespace(title="Batman français T03 repeated", magnet=repeated, source_name="Renamed indexer", seeders=9),
+        SimpleNamespace(title="Batman français T03 alternate", magnet=MAGNET, source_name="Renamed indexer", seeders=5),
+    ]))
+    monkeypatch.setattr(tasks.registry, "enabled_torrent_indexers", lambda _: [indexer])
+    qbt = AsyncMock()
+    qbt.default_save_path.return_value = "/downloads"
+    monkeypatch.setattr(tasks, "QbtClient", lambda *args: qbt)
+    values = {**settings_service.DEFAULTS, "qbittorrent_enabled": "true", "source_getcomics_enabled": "false"}
+
+    assert await tasks.grab_missing_issues(session, series, values) == 1
+    active = (await session.execute(select(Download).where(Download.status == DownloadStatus.DOWNLOADING))).scalar_one()
+    expected = info_hash if failure == "expired" else HASH
+    assert active.torrent_hash == expected
+    assert active.issue_id == issue.id
+    assert qbt.add_torrent.await_count + qbt.add_magnet.await_count == 1
 
 
 async def test_series_search_settings_persist_and_validate(session):

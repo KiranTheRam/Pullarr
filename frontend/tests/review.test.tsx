@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { api, browserAuthMode, updateBrowserLogin } from "../src/api/client";
 import Activity from "../src/pages/Activity";
 import Settings from "../src/pages/Settings";
@@ -12,10 +12,10 @@ import { Modal } from "../src/components/common";
 vi.mock("../src/api/client", () => ({ browserAuthMode: vi.fn(() => "external"), updateBrowserLogin: vi.fn(), api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() } }));
 
 const clients: QueryClient[] = [];
-function mount(element: React.ReactNode) {
+function mount(element: React.ReactNode, path = "/") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
-  return render(<QueryClientProvider client={client}><MemoryRouter>{element}</MemoryRouter></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}>{element}</MemoryRouter></QueryClientProvider>);
 }
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(api.get).mockResolvedValue([]); });
 afterEach(() => { cleanup(); clients.forEach((client) => client.clear()); clients.length = 0; vi.unstubAllGlobals(); });
@@ -232,4 +232,39 @@ test("unsaved settings disable browser password changes and sign-out", async () 
   expect(screen.getByRole("button", {name: "Sign Out"}).hasAttribute("disabled")).toBe(true);
   await user.click(screen.getByRole("button", {name: "Discard changes"}));
   expect(screen.getByRole("button", {name: "Sign Out"}).hasAttribute("disabled")).toBe(false);
+});
+
+test("an environment-managed login can sign out from Settings", async () => {
+  vi.mocked(browserAuthMode).mockReturnValue("environment");
+  vi.mocked(api.get).mockImplementation(async (path) => path === "/settings" ? {} : []);
+  mount(<Settings />);
+  await screen.findByText(/This login is managed by your deployment/);
+  expect(screen.queryByRole("button", { name: "Change Password" })).toBeNull();
+  await userEvent.setup().click(screen.getByRole("button", { name: "Sign Out" }));
+  expect(updateBrowserLogin).toHaveBeenCalledWith("logout", undefined);
+});
+
+test("series actions show their own errors and clear a previous scan result", async () => {
+  const { default: SeriesDetail } = await import("../src/pages/SeriesDetail");
+  const series = { id: 1, title: "Batman", genres: "", issues: [], monitored: true, source_links: [], extra_folders: [] };
+  const scanResult = { matched_issues: 1, volume_files: 0, cleared: 0, unmatched: [], folder_exists: true };
+  vi.mocked(api.get).mockImplementation(async (path) => path === "/series/1" ? series : []);
+  vi.mocked(api.post)
+    .mockResolvedValueOnce(scanResult)
+    .mockRejectedValueOnce(new Error("Metadata provider unavailable"))
+    .mockRejectedValueOnce(new Error("Library root is missing"));
+  mount(<Routes><Route path="/series/:id" element={<SeriesDetail />} /></Routes>, "/series/1");
+  const user = userEvent.setup();
+  const scan = await screen.findByRole("button", { name: "Scan Disk" });
+  await user.click(scan);
+  await screen.findByText("Scan complete.");
+  await user.click(screen.getByRole("button", { name: "Refresh" }));
+  await screen.findByText("Refresh failed.");
+  await user.click(scan);
+  await screen.findByText("Scan disk failed.");
+  expect(screen.queryByText("Scan complete.")).toBeNull();
+  expect(screen.getAllByRole("alert").map((node) => node.textContent)).toEqual([
+    "Refresh failed. Metadata provider unavailable",
+    "Scan disk failed. Library root is missing",
+  ]);
 });

@@ -18,22 +18,22 @@ test("bootstrap falls back to the status for non-JSON responses", async () => {
 });
 
 
-test("managed browser requests use the session without an integration key", async () => {
+test.each(["managed", "environment"] as const)("%s browser requests use the session without an integration key", async (mode) => {
   const fetchMock = vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "", authMode: "managed", version: "0.2.0" })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "", authMode: mode, version: "0.2.0" })))
     .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
   vi.stubGlobal("fetch", fetchMock);
   await initClient();
-  expect(browserAuthMode()).toBe("managed");
+  expect(browserAuthMode()).toBe(mode);
   await api.put("/settings", {});
   const [url, options] = fetchMock.mock.calls[1];
   expect(url).toBe("/api/v1/settings");
   expect(options.headers).toEqual({ "Content-Type": "application/json" });
 });
 
-test("environment-managed browser requests retain bootstrap API-key compatibility", async () => {
+test("externally authenticated browser requests retain bootstrap API-key compatibility", async () => {
   const fetchMock = vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "fixture", authMode: "environment", version: "0.2.0" })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "fixture", authMode: "external", version: "0.2.0" })))
     .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
   vi.stubGlobal("fetch", fetchMock);
   await initClient();
