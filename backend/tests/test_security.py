@@ -114,6 +114,20 @@ def test_invalid_security_config_stops_startup(env):
         AppConfig(_env_file=None, **env)
 
 
+@pytest.mark.parametrize("origin", [
+    "reader.example", "https://*.example", "https://reader.example/", "https://reader.example#",
+    "https://reader.example?", "https://user@reader.example", "https://reader.example:99999",
+])
+def test_browser_origins_must_be_exact(origin):
+    with pytest.raises(ValidationError, match="PULLARR_BROWSER_ORIGINS"):
+        AppConfig(browser_origins=[origin])
+
+
+def test_browser_origin_configuration_normalizes_case(monkeypatch):
+    monkeypatch.setenv("PULLARR_BROWSER_ORIGINS", '["https://Reader.Example:8443", "http://[::1]"]')
+    assert AppConfig().browser_origins == ["https://reader.example:8443", "http://[::1]"]
+
+
 def test_empty_environment_values_mean_unset(monkeypatch):
     monkeypatch.setenv("PULLARR_ALLOWED_HOSTS", "")
     monkeypatch.setenv("PULLARR_AUTH_USERNAME", "")

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
 from anyio import CapacityLimiter, to_thread
 from fastapi import Request
@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from sqlalchemy.exc import SQLAlchemyError
 
 from .api.deps import get_api_key
-from .config import config
+from .config import config, parse_browser_origin
 from .db import engine
 from .sign_in_throttle import SignInThrottle
 
@@ -243,14 +243,15 @@ pre {{ white-space: pre-wrap; overflow-wrap: anywhere }}
 
 
 def same_origin(request: Request) -> bool:
-    # Match the browser-facing authority even when a proxy terminates TLS.
-    try:
-        origin = urlsplit(request.headers.get("origin", ""))
-    except ValueError:
+    if request.headers.get("sec-fetch-site", "same-origin") != "same-origin":
         return False
-    return (request.headers.get("sec-fetch-site", "same-origin") == "same-origin"
-            and origin.scheme in {"http", "https"}
-            and origin.netloc.lower() == request.headers["host"].lower())
+    origins = request.headers.getlist("origin")
+    origin = parse_browser_origin(origins[0]) if len(origins) == 1 else None
+    if origin is None:
+        return False
+    # A proxy can preserve Host or use an explicitly configured public origin.
+    return (origin.netloc.lower() == request.headers["host"].lower()
+            or origin.geturl().lower() in config.browser_origins)
 
 
 class FormError(ValueError):

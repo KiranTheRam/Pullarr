@@ -2,11 +2,8 @@
 source linking, grabbing, DDL download processing, qBittorrent sync, and the
 monitor loop."""
 
-import base64
 from contextlib import AsyncExitStack
-import binascii
 import logging
-import re
 import shutil
 import time
 from threading import Event
@@ -24,6 +21,7 @@ from ..db import session_scope
 from ..download.coordination import importing_download, _importing_downloads
 from ..download.ddl import DownloadCancelled, download_release
 from ..download.qbittorrent import QbtClient, QbtError
+from ..download.torrent import fetch_torrent, magnet_btih_hex, normalize_btih
 from ..library.importer import import_payload
 from ..library.scanner import (LibraryUnavailableError, library_unavailable, recorded_files_expect_content,
                                require_root_available, resolve_folders, root_unavailable)
@@ -57,8 +55,6 @@ from ..util import (
 )
 
 log = logging.getLogger(__name__)
-
-BTIH_RE = re.compile(r"btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})")
 
 # per-series cap on targeted per-issue searches in one monitor pass, so a
 # freshly added long series doesn't hammer the source
@@ -593,22 +589,6 @@ async def enqueue_direct(
     return dl
 
 
-def magnet_btih_hex(magnet: str) -> str:
-    """The magnet's info-hash in the lowercase hex form qBittorrent reports.
-    Base32 hashes (older magnet links) are converted — matching against
-    qBittorrent by their raw form would never succeed."""
-    m = BTIH_RE.search(magnet)
-    if not m:
-        return ""
-    raw = m.group(1)
-    if len(raw) == 40:
-        return raw.lower()
-    try:
-        return base64.b32decode(raw).hex()
-    except (binascii.Error, ValueError):
-        return ""
-
-
 class SuppressedTorrentRelease(ValueError):
     """The release matches a torrent already blocked by the monitor."""
 
@@ -617,7 +597,7 @@ async def submit_torrent(
     magnet: str, values: dict[str, str], *, keep_existing: bool = False,
     blocked_hashes: set[str] | None = None,
 ) -> str:
-    """Submit a magnet to qBittorrent and return its info hash.
+    """Submit a torrent to qBittorrent and return its v1 info hash.
 
     Kept separate from the database row creation so a failed torrent can be
     submitted again without replacing its Activity entry. With
@@ -626,7 +606,6 @@ async def submit_torrent(
     """
     torrent_data = None
     if magnet.startswith(("http://", "https://")):
-        from ..download.torrent import fetch_torrent
         magnet, torrent_hash, torrent_data = await fetch_torrent(magnet)
     else:
         torrent_hash = magnet_btih_hex(magnet)
@@ -1071,21 +1050,18 @@ async def sync_qbittorrent() -> None:
         )
         try:
             for dl in downloads:
-                # rows saved before base32 hashes were converted hold a hash
-                # qBittorrent never reports; recover it from the magnet
-                torrent_hash = magnet_btih_hex(dl.payload)
-                if torrent_hash and torrent_hash != dl.torrent_hash:
-                    dl.torrent_hash = torrent_hash
-                if not dl.torrent_hash:
+                torrent_hash = normalize_btih(dl.torrent_hash) or magnet_btih_hex(dl.payload)
+                if not torrent_hash:
                     continue
-                torrent = await client.get_torrent(dl.torrent_hash)
+                dl.torrent_hash = torrent_hash
+                torrent = await client.get_torrent(torrent_hash)
                 if torrent is None:
                     continue
                 dl.progress = torrent.progress
                 if torrent.is_complete and torrent.content_path:
                     try:
                         files = _torrent_files(
-                            torrent.save_path, await client.torrent_files(dl.torrent_hash),
+                            torrent.save_path, await client.torrent_files(torrent.hash),
                         )
                     except QbtError as exc:
                         await _update_if_still_synced(
@@ -1285,7 +1261,7 @@ async def grab_missing_issues(
         info_hash
         for dl in suppressed
         if dl.kind == DownloadKind.TORRENT
-        and (info_hash := dl.torrent_hash.lower() or magnet_btih_hex(dl.payload))
+        and (info_hash := normalize_btih(dl.torrent_hash) or magnet_btih_hex(dl.payload))
     }
 
     links = {sl.source_name: sl for sl in series.source_links}

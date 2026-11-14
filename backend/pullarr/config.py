@@ -1,8 +1,23 @@
 import secrets
 from pathlib import Path
+from urllib.parse import SplitResult, urlsplit
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_browser_origin(value: str) -> SplitResult | None:
+    if any(c.isspace() or ord(c) < 32 or c in "\\?#*%" for c in value):
+        return None
+    try:
+        origin = urlsplit(value)
+        port = origin.port
+    except ValueError:
+        return None
+    if (origin.scheme not in {"http", "https"} or not origin.hostname or origin.path
+            or origin.username is not None or port == 0 or origin.netloc.endswith(":")):
+        return None
+    return origin
 
 
 class AppConfig(BaseSettings):
@@ -29,6 +44,8 @@ class AppConfig(BaseSettings):
     # Additional exact DNS names (JSON array); IP literals and localhost work
     # without configuration. Never infer trusted hosts from forwarded headers.
     allowed_hosts: list[str] = []
+    # Exact public origins for proxies that rewrite Host.
+    browser_origins: list[str] = []
 
     @model_validator(mode="after")
     def validate_security(self):
@@ -39,6 +56,13 @@ class AppConfig(BaseSettings):
         for host in self.allowed_hosts:
             if not host or any(c in host for c in "/:*?@#[]\\") or host != host.strip():
                 raise ValueError("PULLARR_ALLOWED_HOSTS must contain exact DNS names without ports or wildcards")
+        origins = []
+        for value in self.browser_origins:
+            origin = parse_browser_origin(value)
+            if origin is None:
+                raise ValueError("PULLARR_BROWSER_ORIGINS must contain exact HTTP(S) origins without paths")
+            origins.append(origin.geturl().lower())
+        self.browser_origins = origins
         return self
 
     @property

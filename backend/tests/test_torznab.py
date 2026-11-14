@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -206,17 +207,19 @@ async def test_automatic_search_requires_matching_query_and_avoids_duplicates(se
 
 
 @pytest.mark.parametrize("delivery", ["file", "redirect", "magnet"])
-@pytest.mark.parametrize("failure", ["recent", "blocked", "expired"])
+@pytest.mark.parametrize("failure", ["recent", "blocked", "legacy-blocked", "expired"])
 @respx.mock
 async def test_monitor_matches_torrent_failures_by_hash(session, monkeypatch, tmp_path, delivery, failure):
     series, issue = await library(session)
     series.root_folder = RootFolder(path=str(tmp_path))
     info_hash = hashlib.sha1(INFO).hexdigest()
     now = datetime.now(timezone.utc)
+    stored_hash = (base64.b32encode(bytes.fromhex(info_hash)).decode().lower()
+                   if failure == "legacy-blocked" else info_hash.upper())
     session.add(Download(
         series_id=series.id, issue_id=issue.id, kind=DownloadKind.TORRENT, status=DownloadStatus.FAILED,
         source_name="Original indexer name", payload="http://prowlarr/download?token=old",
-        torrent_hash=info_hash.upper(), blocked=failure == "blocked",
+        torrent_hash=stored_hash, blocked=failure in {"blocked", "legacy-blocked"},
         updated_at=now if failure == "recent" else now - timedelta(days=2),
     ))
     await session.commit()

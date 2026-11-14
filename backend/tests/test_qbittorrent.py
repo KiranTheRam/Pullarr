@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from pullarr.api import queue
 from pullarr.download.qbittorrent import QbtClient, QbtError
+from pullarr.download.torrent import magnet_btih_hex
 from pullarr.jobs import tasks
 from pullarr.schemas import GrabIn
 
@@ -68,10 +69,13 @@ async def test_add_magnet_sends_category_and_savepath():
 
 @respx.mock
 async def test_delete_torrents_removes_hashes_and_files():
+    respx.get(f"{BASE}/api/v2/torrents/info").respond(json=[{
+        "hash": "c" * 40, "infohash_v1": "a" * 40,
+    }])
     route = respx.post(f"{BASE}/api/v2/torrents/delete").respond(200)
-    await client().delete_torrents(["abc", "def"])
+    await client().delete_torrents(["a" * 40, "b" * 40])
     body = route.calls.last.request.content.decode()
-    assert "hashes=abc%7Cdef" in body
+    assert f"hashes={'c' * 40}%7C{'b' * 40}" in body
     assert "deleteFiles=true" in body
 
 
@@ -84,11 +88,35 @@ BASE32_HASH = base64.b32encode(bytes.fromhex(HEX_HASH)).decode()
     (f"magnet:?xt=urn:btih:{HEX_HASH.upper()}", HEX_HASH),
     # older base32 links must match the hex hash qBittorrent reports
     (f"magnet:?xt=urn:btih:{BASE32_HASH}&dn=x", HEX_HASH),
+    (f"magnet:?xt=urn:btih:{BASE32_HASH.lower()}", HEX_HASH),
+    (f"magnet:?dn=urn:btih:{HEX_HASH}", ""),
     ("magnet:?xt=urn:btih:abc", ""),
     ("magnet:?dn=no-hash", ""),
 ])
 def test_magnet_btih_hex(magnet, expected):
-    assert tasks.magnet_btih_hex(magnet) == expected
+    assert magnet_btih_hex(magnet) == expected
+
+
+@respx.mock
+async def test_hybrid_lookup_falls_back_to_v1_alias_and_reuses_listing():
+    hybrid_id = "c" * 40
+    other_v1 = "d" * 40
+    other_id = "e" * 40
+    for info_hash in (HEX_HASH, other_v1):
+        respx.get(f"{BASE}/api/v2/torrents/info", params={"hashes": info_hash}).respond(json=[])
+    listing = respx.get(f"{BASE}/api/v2/torrents/info").respond(json=[
+        {"hash": hybrid_id, "infohash_v1": HEX_HASH, "progress": 1},
+        {"hash": other_id, "infohash_v1": other_v1, "progress": 0.5},
+    ])
+    qbt = client()
+    try:
+        hybrid = await qbt.get_torrent(HEX_HASH)
+        assert hybrid and hybrid.hash == hybrid_id and hybrid.is_complete
+        other = await qbt.get_torrent(other_v1)
+        assert other and other.hash == other_id and not other.is_complete
+        assert listing.call_count == 1
+    finally:
+        await qbt.close()
 
 
 async def test_submit_torrent_rejects_magnet_without_btih():

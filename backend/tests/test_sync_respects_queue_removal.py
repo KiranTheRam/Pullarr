@@ -28,7 +28,7 @@ class FakeQbt:
         if self.missing:
             return None
         return QbtTorrent(
-            hash=torrent_hash, name="Test Series #1", progress=self.progress,
+            hash=self.api_id or torrent_hash, name="Test Series #1", progress=self.progress,
             state="uploading" if self.progress == 1 else "downloading",
             content_path=str(self.payload), category="pullarr",
             save_path=str(self.payload.parent),
@@ -36,6 +36,8 @@ class FakeQbt:
 
     async def torrent_files(self, torrent_hash):
         await self.hold("torrent_files")
+        if self.api_id:
+            assert torrent_hash == self.api_id
         if self.file_error:
             raise QbtError("qBittorrent request failed: HTTP 503")
         return self.files
@@ -86,6 +88,7 @@ async def env(tmp_path, monkeypatch):
             yield session
 
     client = FakeQbt()
+    client.api_id = None
     client.payload, client.files = payload, [payload.name]
     client.entered, client.release = asyncio.Event(), asyncio.Event()
     client.hold_call = None
@@ -164,13 +167,15 @@ async def test_incomplete_torrent_progress_does_not_change_removal(env):
     await assert_removed(env)
 
 
-async def test_finished_torrent_still_claims_and_imports(env):
-    maker, _, dl_id, library, imports = env
+@pytest.mark.parametrize("api_id", [None, "d" * 40])
+async def test_finished_torrent_still_claims_and_imports(env, api_id):
+    maker, client, dl_id, library, imports = env
+    client.api_id = api_id
     await tasks.sync_qbittorrent()
     assert imports == [(dl_id, DownloadStatus.IMPORTING)]
     async with maker() as session:
         dl = await session.get(Download, dl_id)
-        assert (dl.status, dl.error) == (DownloadStatus.DONE, "")
+        assert (dl.status, dl.error, dl.torrent_hash) == (DownloadStatus.DONE, "", HASH)
         issue = await session.scalar(select(Issue))
         assert issue.downloaded
         assert issue.file_path.startswith(str(library / "Test Series"))

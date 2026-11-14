@@ -34,6 +34,7 @@ async def client(session, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "auth_password", SecretStr(""))
     monkeypatch.setattr(config, "allow_unauthenticated_browser", False)
     monkeypatch.setattr(config, "allowed_hosts", ["reader.example"])
+    monkeypatch.setattr(config, "browser_origins", [])
     monkeypatch.setattr(deps, "_api_key", "bootstrap")
     monkeypatch.setattr(browser_setup, "engine", session.bind)
     monkeypatch.setattr(browser_setup, "_sign_in_throttle", sign_in_throttle.SignInThrottle())
@@ -77,6 +78,34 @@ async def test_browser_bootstrap_and_independent_api_auth(client, session, monke
     await session.commit()
     for key in ("managed", "bootstrap"):
         assert (await client.get("/api/v1/settings", headers={"X-Api-Key": key})).status_code == 200
+
+
+async def test_configured_public_origin_allows_login_through_rewriting_proxy(client, monkeypatch):
+    enable_login(monkeypatch)
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    login = {"username": "reader", "password": "password"}
+    public = "https://reader.example:8443"
+    headers = {"Host": "localhost:6997", "Origin": public, "Sec-Fetch-Site": "same-origin"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=public) as browser:
+        assert (await browser.get("/login", headers={"Host": headers["Host"]})).status_code == 200
+        assert (await browser.post("/login", data=login, headers=headers)).status_code == 403
+        monkeypatch.setattr(config, "browser_origins", [public])
+        for changes in (
+            {"Sec-Fetch-Site": "same-site"}, {"Origin": "https://reader.example"},
+            {"Origin": "http://reader.example:8443"}, {"Origin": public + "/login"},
+            {"Origin": "https://evil.example", "X-Forwarded-Host": "reader.example:8443"},
+        ):
+            denied = await browser.post("/login", data=login, headers={**headers, **changes})
+            assert denied.status_code == 403
+        denied = await browser.post("/login", data=login, headers={**headers, "Host": "evil.example"})
+        assert denied.status_code == 400
+        response = await browser.post("/login", data=login, headers=headers)
+        assert response.status_code == 303
+        assert "Secure" in response.headers["set-cookie"]
+        assert (await browser.put("/api/v1/settings", json={}, headers=headers)).status_code == 200
+        denied = await browser.put("/api/v1/settings", json={}, headers={**headers, "Origin": "https://evil.example"})
+        assert denied.status_code == 403
+        assert (await browser.post("/auth/logout", headers=headers)).status_code == 204
 
 
 async def test_environment_login_uses_form_and_revokes_sessions_on_rotation(client, tmp_path, monkeypatch):

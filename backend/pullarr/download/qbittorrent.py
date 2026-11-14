@@ -13,13 +13,27 @@ class QbtError(RuntimeError):
 
 @dataclass
 class QbtTorrent:
-    hash: str
+    hash: str  # qBittorrent's API torrent ID
     name: str
     progress: float  # 0..1
     state: str
     content_path: str
     category: str
     save_path: str = ""
+    infohash_v1: str = ""
+
+    @classmethod
+    def from_api(cls, data: dict) -> "QbtTorrent":
+        return cls(
+            hash=data.get("hash", ""),
+            name=data.get("name", ""),
+            progress=float(data.get("progress", 0)),
+            state=data.get("state", ""),
+            content_path=data.get("content_path", ""),
+            category=data.get("category", ""),
+            save_path=data.get("save_path", ""),
+            infohash_v1=(data.get("infohash_v1") or "").lower(),
+        )
 
     @property
     def is_complete(self) -> bool:
@@ -43,6 +57,7 @@ class QbtClient:
             timeout=30,
         )
         self._logged_in = False
+        self._v1_aliases: dict[str, QbtTorrent] | None = None
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -132,28 +147,31 @@ class QbtClient:
 
     async def list_torrents(self, category: str) -> list[QbtTorrent]:
         resp = await self._request("GET", "/torrents/info", params={"category": category})
-        return [
-            QbtTorrent(
-                hash=t.get("hash", ""),
-                name=t.get("name", ""),
-                progress=float(t.get("progress", 0)),
-                state=t.get("state", ""),
-                content_path=t.get("content_path", ""),
-                category=t.get("category", ""),
-                save_path=t.get("save_path", ""),
-            )
-            for t in resp.json()
-        ]
+        return [QbtTorrent.from_api(data) for data in resp.json()]
+
+    async def _torrent_v1_aliases(self) -> dict[str, QbtTorrent]:
+        # A client is scoped to one operation or sync pass. Share the fallback
+        # snapshot across lookups so multiple missing IDs only need one list.
+        if self._v1_aliases is None:
+            resp = await self._request("GET", "/torrents/info")
+            torrents = (QbtTorrent.from_api(data) for data in resp.json())
+            self._v1_aliases = {
+                torrent.infohash_v1: torrent for torrent in torrents
+                if torrent.hash and torrent.infohash_v1 and torrent.hash != torrent.infohash_v1
+            }
+        return self._v1_aliases
 
     async def delete_torrents(self, hashes: list[str], delete_files: bool = True) -> None:
         """Remove torrents, including partial data by default."""
         if not hashes:
             return
+        aliases = await self._torrent_v1_aliases()
+        torrent_ids = [aliases[info_hash].hash if info_hash in aliases else info_hash for info_hash in hashes]
         await self._request(
             "POST",
             "/torrents/delete",
             data={
-                "hashes": "|".join(hashes),
+                "hashes": "|".join(torrent_ids),
                 "deleteFiles": "true" if delete_files else "false",
             },
         )
@@ -165,19 +183,10 @@ class QbtClient:
 
     async def get_torrent(self, torrent_hash: str) -> QbtTorrent | None:
         resp = await self._request("GET", "/torrents/info", params={"hashes": torrent_hash})
-        torrents = resp.json()
-        if not torrents:
-            return None
-        t = torrents[0]
-        return QbtTorrent(
-            hash=t.get("hash", ""),
-            name=t.get("name", ""),
-            progress=float(t.get("progress", 0)),
-            state=t.get("state", ""),
-            content_path=t.get("content_path", ""),
-            category=t.get("category", ""),
-            save_path=t.get("save_path", ""),
-        )
+        if torrents := resp.json():
+            return QbtTorrent.from_api(torrents[0])
+        # libtorrent 2 can expose hybrids under a truncated v2 API ID.
+        return (await self._torrent_v1_aliases()).get(torrent_hash)
 
 
 async def test_connection(base_url: str, username: str, password: str) -> str:

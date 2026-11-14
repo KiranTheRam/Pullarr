@@ -8,14 +8,13 @@ from sqlalchemy.orm import selectinload
 from ..download.coordination import queue_mutation
 from ..db import get_session
 from ..download.qbittorrent import QbtClient
-from ..download.torrent import UnsupportedTorrentVersion
+from ..download.torrent import UnsupportedTorrentVersion, magnet_btih_hex, normalize_btih
 from ..jobs.tasks import (
     cancel_downloads,
     download_is_active,
     download_is_importing,
     enqueue_direct,
     enqueue_torrent,
-    magnet_btih_hex,
     submit_torrent,
 )
 from ..models import Download, DownloadKind, DownloadStatus, HistoryEvent, Issue, Series
@@ -159,8 +158,9 @@ async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
         if any(download_is_importing(dl.id) for dl in downloads):
             raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
         hashes = [
-            dl.torrent_hash for dl in downloads
-            if dl.kind == DownloadKind.TORRENT and dl.torrent_hash and dl.status in ACTIVE
+            info_hash for dl in downloads
+            if dl.kind == DownloadKind.TORRENT and dl.status in ACTIVE
+            and (info_hash := normalize_btih(dl.torrent_hash) or magnet_btih_hex(dl.payload))
         ]
         for dl in downloads:
             dl.status = DownloadStatus.FAILED

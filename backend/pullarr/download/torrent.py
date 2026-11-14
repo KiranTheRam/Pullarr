@@ -1,11 +1,33 @@
 """Fetch torrent metadata and hash the original bencoded info dictionary."""
+import base64
 import hashlib
+import re
+from urllib.parse import parse_qsl
 
 import httpx
 
 from ..util import raise_for_status_redacted
 
 MAX_TORRENT_SIZE = 10_000_000
+
+
+def normalize_btih(value: str) -> str:
+    """Normalize a v1 info hash from hexadecimal or legacy base32."""
+    if re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        return value.lower()
+    if re.fullmatch(r"[A-Za-z2-7]{32}", value):
+        return base64.b32decode(value.upper()).hex()
+    return ""
+
+
+def magnet_btih_hex(magnet: str) -> str:
+    if not magnet.lower().startswith("magnet:?"):
+        return ""
+    for key, value in parse_qsl(magnet[8:].partition("#")[0]):
+        if key == "xt" and value.lower().startswith("urn:btih:"):
+            if info_hash := normalize_btih(value[9:]):
+                return info_hash
+    return ""
 
 
 class UnsupportedTorrentVersion(ValueError):
@@ -59,8 +81,8 @@ def torrent_info_hash(data: bytes) -> str:
             elif field == b'pieces':
                 pieces = value
         pos += 1
-        # qBittorrent sync and cancellation use v1 hashes. Hybrids retain
-        # v1 pieces, so their original info dictionary still has that identity.
+        # Pullarr stores the v1 info hash for release identity. qBittorrent
+        # can expose a different API ID for hybrids, resolved by its client.
         if version == 2 and (not isinstance(pieces, bytes) or not pieces or len(pieces) % 20):
             raise UnsupportedTorrentVersion("BitTorrent v2-only metadata is unsupported; choose a v1 or hybrid torrent")
         info = data[start:pos]
@@ -71,8 +93,6 @@ def torrent_info_hash(data: bytes) -> str:
 
 async def fetch_torrent(url: str) -> tuple[str, str, bytes | None]:
     # Follow HTTP redirects explicitly: Prowlarr can redirect to a magnet URI.
-    from ..jobs.tasks import magnet_btih_hex
-
     async with httpx.AsyncClient(timeout=30) as client:
         for _ in range(6):
             if url.startswith("magnet:"):

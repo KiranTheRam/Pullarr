@@ -307,6 +307,7 @@ Environment variables (all optional):
 | `PULLARR_AUTH_PASSWORD` | *(empty)* | Browser login password; set together with the username |
 | `PULLARR_ALLOW_UNAUTHENTICATED_BROWSER` | `false` | Explicitly disable first-run login for an externally authenticated deployment |
 | `PULLARR_ALLOWED_HOSTS` | `[]` | Additional exact DNS names as a JSON array (no scheme, port or wildcard) |
+| `PULLARR_BROWSER_ORIGINS` | `[]` | Public HTTP(S) origins for browser requests through proxies that rewrite Host |
 
 **Database storage and backups.** SQLite uses WAL so reads can continue while
 another connection writes, with a 30-second busy timeout for competing writers.
@@ -386,8 +387,12 @@ browsers, reverse proxies and integrations (such as NextPanel reaching Pullarr b
 its container name) to `PULLARR_ALLOWED_HOSTS`, for example
 `'["pullarr", "comics.example.com"]'`. Names match exactly, ignoring case. An
 unknown Host gets HTTP 400 with instructions, and direct IP access stays available
-for recovery. Proxies must preserve an allowed Host or set one explicitly.
-Host validation limits DNS rebinding; it is not a login.
+for recovery. For browser access, preserve the public Host or set
+`PULLARR_BROWSER_ORIGINS` to a JSON array of the exact public origins when the
+proxy rewrites Host. For example, use `'["https://comics.example.com"]'`. Include
+the public port if it is non-default and omit trailing slashes and paths. The
+proxy's upstream Host still has to pass Host validation. API-key integrations
+can use their existing Host and do not need a browser origin.
 
 `X-Api-Key` clients and named API keys keep working without browser credentials.
 Browser sessions authenticate API requests with same-origin checks for writes.
