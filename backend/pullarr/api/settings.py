@@ -4,6 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import kavita, notifications, settings_service
 from ..db import get_session
 from ..download.qbittorrent import QbtError, test_connection
+from ..download.torrent import TorrentClientError
+from ..download.transmission import TransmissionClient
 from ..metadata.comicvine import ComicVineError, provider as comicvine
 from ..metadata.metron import MetronError, provider as metron
 from ..schemas import (
@@ -12,7 +14,7 @@ from ..schemas import (
     KavitaTestIn,
     KavitaTestOut,
     MetronTestIn,
-    QbtTestIn,
+    TorrentClientTestIn,
     WebhookTestIn,
 )
 
@@ -27,6 +29,7 @@ SECRET_DESTINATIONS = {
     "webhook_secret": ("webhook_url",),
     "kavita_api_key": ("kavita_url",),
     "qbittorrent_password": ("qbittorrent_url", "qbittorrent_username"),
+    "transmission_password": ("transmission_url", "transmission_username"),
 }
 
 
@@ -95,7 +98,7 @@ async def webhook_test(body: WebhookTestIn, session: AsyncSession = Depends(get_
 
 
 @router.post("/qbittorrent/test")
-async def qbt_test(body: QbtTestIn, session: AsyncSession = Depends(get_session)):
+async def qbt_test(body: TorrentClientTestIn, session: AsyncSession = Depends(get_session)):
     password = body.password
     if password == MASK:
         password = retained_secret(
@@ -105,6 +108,25 @@ async def qbt_test(body: QbtTestIn, session: AsyncSession = Depends(get_session)
     try:
         version = await test_connection(body.url, body.username, password)
     except QbtError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "version": version}
+
+
+@router.post("/transmission/test")
+async def transmission_test(body: TorrentClientTestIn, session: AsyncSession = Depends(get_session)):
+    password = body.password
+    if password == MASK:
+        password = retained_secret(
+            await settings_service.get_all(session), "transmission_password",
+            {"transmission_url": body.url, "transmission_username": body.username},
+        )
+    try:
+        client = TransmissionClient(body.url, body.username, password)
+        try:
+            version = await client.version()
+        finally:
+            await client.close()
+    except TorrentClientError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "version": version}
 

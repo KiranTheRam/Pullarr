@@ -16,7 +16,7 @@ from pullarr.download.qbittorrent import QbtClient, QbtError, test_connection as
 from pullarr.download.torrent import fetch_torrent
 from pullarr.library.matcher import _comicinfo_identity
 from pullarr.metadata.comicvine import ComicVineError, ComicVineProvider
-from pullarr.schemas import KavitaTestIn, QbtTestIn, WebhookTestIn
+from pullarr.schemas import KavitaTestIn, TorrentClientTestIn, WebhookTestIn
 from pullarr.settings_service import get_all
 from pullarr.sources.torznab import MASK, TorznabIndexer, restore_keys
 
@@ -179,8 +179,8 @@ async def test_webhook_test_keeps_secret_home(session, monkeypatch):
 
 
 @pytest.mark.parametrize("body", [
-    QbtTestIn(url="https://evil.example", username="admin", password="••••••••"),
-    QbtTestIn(url="http://qbt.local", username="other", password="••••••••"),
+    TorrentClientTestIn(url="https://evil.example", username="admin", password="••••••••"),
+    TorrentClientTestIn(url="http://qbt.local", username="other", password="••••••••"),
 ])
 async def test_qbittorrent_test_refuses_changed_destination(session, monkeypatch, body):
     async def fail(*args):

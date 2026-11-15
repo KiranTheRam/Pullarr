@@ -268,3 +268,27 @@ test("series actions show their own errors and clear a previous scan result", as
     "Scan disk failed. Library root is missing",
   ]);
 });
+
+test("Transmission can be tested and selected for new torrent grabs", async () => {
+  const saved = {
+    qbittorrent_enabled: "true", transmission_enabled: "false", torrent_download_client: "qbittorrent",
+    transmission_url: "http://transmission:9091/transmission/rpc", transmission_username: "reader",
+    transmission_password: "••••••••",
+  };
+  vi.mocked(api.get).mockImplementation(async (path) => path === "/settings" ? saved : []);
+  vi.mocked(api.post).mockResolvedValue({ version: "4.1.3" });
+  vi.mocked(api.put).mockImplementation(async (_, body) => body);
+  mount(<Settings />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("switch", { name: "Enable Transmission" }));
+  await user.click(screen.getByRole("button", { name: "Test Transmission" }));
+  await screen.findByText("Connected to Transmission 4.1.3");
+  expect(api.post).toHaveBeenCalledWith("/settings/transmission/test", {
+    url: saved.transmission_url, username: saved.transmission_username, password: saved.transmission_password,
+  });
+  await user.selectOptions(screen.getByLabelText("Client for new torrent grabs"), "transmission");
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  await waitFor(() => expect(api.put).toHaveBeenCalledWith("/settings", {
+    ...saved, transmission_enabled: "true", torrent_download_client: "transmission",
+  }));
+});

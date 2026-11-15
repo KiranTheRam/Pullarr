@@ -4,7 +4,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ..db import session_scope
 from .. import settings_service
-from .tasks import monitor_all, process_direct_queue, sync_qbittorrent
+from .tasks import monitor_all, process_direct_queue, sync_torrent_clients
 from .service import recover_interrupted_downloads, recover_interrupted_jobs
 
 log = logging.getLogger(__name__)
@@ -34,8 +34,8 @@ async def start() -> None:
         id="direct_queue", max_instances=1, coalesce=True,
     )
     scheduler.add_job(
-        sync_qbittorrent, "interval", seconds=20,
-        id="qbt_sync", max_instances=1, coalesce=True,
+        sync_torrent_clients, "interval", seconds=20,
+        id="torrent_sync", max_instances=1, coalesce=True,
     )
     scheduler.add_job(
         monitor_all, "interval", minutes=interval,

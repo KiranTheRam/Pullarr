@@ -18,6 +18,7 @@ from pullarr import settings_service
 from pullarr.api import queue, search, settings
 from pullarr.db import _migrate_sqlite
 from pullarr.download.torrent import fetch_torrent, torrent_info_hash
+from pullarr.download import clients
 from pullarr.jobs import tasks
 from pullarr.models import Base, Download, DownloadKind, DownloadStatus, Issue, RootFolder, Series
 from pullarr.schemas import GrabIn, SeriesUpdateIn
@@ -139,7 +140,7 @@ async def test_v2_only_torrent_is_rejected_before_qbittorrent(session, monkeypat
     url = "http://prowlarr/v2"
     respx.get(url).mock(return_value=httpx.Response(200, content=V2_TORRENT))
     qbt = AsyncMock()
-    monkeypatch.setattr(tasks, "QbtClient", qbt)
+    monkeypatch.setattr(clients, "QbtClient", qbt)
     with pytest.raises(HTTPException, match="v2-only") as error:
         await queue.grab(GrabIn(magnet=url, title="v2-only torrent"), session)
     assert error.value.status_code == 422
@@ -152,7 +153,7 @@ async def test_file_submission_uses_multipart_and_tracks_hash(monkeypatch):
     from pullarr.download.qbittorrent import QbtClient
     respx.get('http://prowlarr/download').mock(return_value=httpx.Response(200, content=TORRENT))
     client = QbtClient('http://qbt', 'admin', 'password')
-    monkeypatch.setattr(tasks, 'QbtClient', lambda *args: client)
+    monkeypatch.setattr(clients, 'QbtClient', lambda *args: client)
     respx.post('http://qbt/api/v2/auth/login').mock(return_value=httpx.Response(200, text='Ok.'))
     respx.get('http://qbt/api/v2/app/preferences').mock(return_value=httpx.Response(200, json={'save_path': '/downloads'}))
     respx.post('http://qbt/api/v2/torrents/createCategory').mock(return_value=httpx.Response(200))
@@ -237,7 +238,7 @@ async def test_monitor_matches_torrent_failures_by_hash(session, monkeypatch, tm
     monkeypatch.setattr(tasks.registry, "enabled_torrent_indexers", lambda _: [indexer])
     qbt = AsyncMock()
     qbt.default_save_path.return_value = "/downloads"
-    monkeypatch.setattr(tasks, "QbtClient", lambda *args: qbt)
+    monkeypatch.setattr(clients, "QbtClient", lambda *args: qbt)
     values = {**settings_service.DEFAULTS, "qbittorrent_enabled": "true", "source_getcomics_enabled": "false"}
 
     assert await tasks.grab_missing_issues(session, series, values) == 1

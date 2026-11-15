@@ -130,7 +130,7 @@ function Queue() {
               <td>{item.source_name}</td>
               <td>
                 <span className={`pill ${item.kind === "torrent" ? "orange" : "blue"}`}>
-                  {item.kind}
+                  {item.kind === "torrent" && item.torrent_client === "transmission" ? "Transmission" : item.kind}
                 </span>
               </td>
               <td>

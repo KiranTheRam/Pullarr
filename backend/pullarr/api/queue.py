@@ -5,9 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ..download.coordination import queue_mutation
 from ..db import get_session
-from ..download.qbittorrent import QbtClient
+from ..download.clients import CLIENT_NAMES, client_enabled, create_client, selected_client
+from ..download.coordination import queue_mutation
 from ..download.torrent import UnsupportedTorrentVersion, magnet_btih_hex, normalize_btih
 from ..jobs.tasks import (
     cancel_downloads,
@@ -75,14 +75,16 @@ async def retry_download(download_id: int, session: AsyncSession = Depends(get_s
         raise HTTPException(409, "This download is still stopping. Retry in a moment.")
     if dl.kind == DownloadKind.TORRENT:
         values = await registry.apply_settings(session)
-        if values["qbittorrent_enabled"] != "true":
-            raise HTTPException(400, "qBittorrent is not enabled in settings")
+        client_name = dl.torrent_client
+        label = CLIENT_NAMES.get(client_name, "The original torrent client")
+        if not client_enabled(values, client_name):
+            raise HTTPException(400, f"{label} is not enabled in settings")
         try:
-            dl.torrent_hash = await submit_torrent(dl.payload, values, keep_existing=True)
+            dl.torrent_hash = await submit_torrent(dl.payload, values, keep_existing=True, client_name=client_name)
         except UnsupportedTorrentVersion as exc:
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(502, "Torrent submission failed; check the indexer and qBittorrent settings") from exc
+            raise HTTPException(502, f"Torrent submission failed; check the indexer and {label} settings") from exc
         dl.status = DownloadStatus.DOWNLOADING
     else:
         dl.status = DownloadStatus.QUEUED
@@ -149,7 +151,7 @@ async def resolve_download(download_id: int, session: AsyncSession = Depends(get
 
 
 async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
-    """Mark downloads as removed and stop matching qBittorrent transfers."""
+    """Mark downloads as removed and stop transfers on their original client."""
     if any(download_is_importing(download_id) for download_id in ids):
         raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
     async with queue_mutation(ids):
@@ -157,11 +159,11 @@ async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
         downloads = result.scalars().all()
         if any(download_is_importing(dl.id) for dl in downloads):
             raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
-        hashes = [
-            info_hash for dl in downloads
-            if dl.kind == DownloadKind.TORRENT and dl.status in ACTIVE
-            and (info_hash := normalize_btih(dl.torrent_hash) or magnet_btih_hex(dl.payload))
-        ]
+        client_hashes: dict[str, list[str]] = {}
+        for dl in downloads:
+            if dl.kind == DownloadKind.TORRENT and dl.status in ACTIVE:
+                if info_hash := normalize_btih(dl.torrent_hash) or magnet_btih_hex(dl.payload):
+                    client_hashes.setdefault(dl.torrent_client, []).append(info_hash)
         for dl in downloads:
             dl.status = DownloadStatus.FAILED
             dl.error = "removed by user"
@@ -180,20 +182,20 @@ async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
         dl.id for dl in downloads
         if dl.kind == DownloadKind.DIRECT and dl.status == DownloadStatus.FAILED
     ])
-    if hashes:
+    if client_hashes:
         values = await registry.apply_settings(session)
-        if values["qbittorrent_enabled"] == "true":
-            client = QbtClient(
-                values["qbittorrent_url"], values["qbittorrent_username"],
-                values["qbittorrent_password"],
-            )
+        for client_name, hashes in client_hashes.items():
+            if not client_enabled(values, client_name):
+                continue
             try:
-                await client.delete_torrents(hashes)
+                client = create_client(values, client_name)
+                try:
+                    await client.delete_torrents(hashes)
+                finally:
+                    await client.close()
             except Exception as exc:
-                log.warning("failed to delete %d torrent(s) from qBittorrent: %s",
-                            len(hashes), exc)
-            finally:
-                await client.close()
+                log.warning("failed to delete %d torrent(s) from %s: %s",
+                            len(hashes), CLIENT_NAMES[client_name], type(exc).__name__)
     return len(downloads)
 
 
@@ -241,8 +243,9 @@ async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
             body.title or "",
         )
     elif body.magnet:
-        if values["qbittorrent_enabled"] != "true":
-            raise HTTPException(400, "qBittorrent is not enabled in settings")
+        client_name = selected_client(values)
+        if client_name is None:
+            raise HTTPException(400, "No torrent download client is enabled in settings")
         if not magnet_btih_hex(body.magnet) and not body.magnet.startswith(("http://", "https://")):
             raise HTTPException(422, "Magnet link must include a valid btih info hash")
         series = await session.get(Series, body.series_id) if body.series_id else None
@@ -259,7 +262,7 @@ async def grab(body: GrabIn, session: AsyncSession = Depends(get_session)):
         except UnsupportedTorrentVersion as exc:
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(502, "Torrent submission failed; check the indexer and qBittorrent settings") from exc
+            raise HTTPException(502, f"Torrent submission failed; check the indexer and {CLIENT_NAMES[client_name]} settings") from exc
     else:
         raise HTTPException(422, "Provide source_name+external_id or magnet")
 

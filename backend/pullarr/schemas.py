@@ -245,6 +245,7 @@ class QueueItemOut(BaseModel):
     status: str
     title: str
     source_name: str
+    torrent_client: str = "qbittorrent"
     progress: float
     error: str
     error_code: str
@@ -294,11 +295,10 @@ class ApiKeyCreateIn(BaseModel):
     name: str
 
 
-class QbtTestIn(BaseModel):
+class TorrentClientTestIn(BaseModel):
     url: str
     username: str
     password: str
-
 
 class WebhookTestIn(BaseModel):
     url: str

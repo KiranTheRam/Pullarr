@@ -21,7 +21,7 @@ function TorznabSettings({ form, setForm }: { form: SettingsType; setForm: (valu
   const update = (next: TorznabConfig[]) => setForm({ ...form, torznab_indexers: JSON.stringify(next) });
   return <div className="settings-section">
     <h3>Torznab indexers</h3>
-    <p className="section-hint">Add a Torznab API URL from Prowlarr or another torrent indexer. Enable qBittorrent below to search and download releases. Re-enter an indexer's API key after changing its URL.</p>
+    <p className="section-hint">Add a Torznab API URL from Prowlarr or another torrent indexer. Enable a torrent download client below to search and download releases. Re-enter an indexer's API key after changing its URL.</p>
     {entries.map((entry, index) => {
       const set = (patch: Partial<TorznabConfig>) => update(entries.map((item, i) => i === index ? { ...item, ...patch } : item));
       return <fieldset key={entry.id} style={{ marginBottom: 16 }}>
@@ -525,6 +525,14 @@ export default function Settings() {
     onError: (e) => setQbtTest(`✖ ${(e as Error).message}`),
   });
 
+  const testTransmission = useMutation({
+    mutationFn: () => api.post<{ version: string }>("/settings/transmission/test", {
+      url: form.transmission_url ?? "",
+      username: form.transmission_username ?? "",
+      password: form.transmission_password ?? "",
+    }),
+  });
+
   const [cvTest, setCvTest] = useState<string | null>(null);
   const testCv = useMutation({
     mutationFn: () =>
@@ -570,7 +578,7 @@ export default function Settings() {
   const setBool = (key: string) => (v: boolean) => setForm({ ...form, [key]: v ? "true" : "false" });
 
   const text = (key: string, secret = false) => (
-    <input type={secret ? "password" : "text"} value={form[key] ?? ""} onChange={set(key)} />
+    <input id={key} type={secret ? "password" : "text"} value={form[key] ?? ""} onChange={set(key)} />
   );
 
   return (
@@ -688,12 +696,22 @@ export default function Settings() {
 
         <TorznabSettings form={form} setForm={setForm} />
 
+        {form.qbittorrent_enabled === "true" && form.transmission_enabled === "true" && (
+          <div className="settings-section">
+            <div className="form-row">
+              <label htmlFor="torrent_download_client">Client for new torrent grabs</label>
+              <select id="torrent_download_client" value={form.torrent_download_client ?? "qbittorrent"} onChange={set("torrent_download_client")}>
+                <option value="qbittorrent">qBittorrent</option>
+                <option value="transmission">Transmission</option>
+              </select>
+            </div>
+          </div>
+        )}
+
         <div className="settings-section">
           <h3>Download Client — qBittorrent (optional)</h3>
           <p className="section-hint">
-            Torrent releases are sent to qBittorrent and imported when complete. Not needed
-            for GetComics direct downloads. Re-enter the password after changing the URL or
-            username, before testing or saving.
+            Re-enter the password after changing the URL or username, before testing or saving.
           </p>
           <div className="form-row">
             <label>Enabled</label>
@@ -725,6 +743,37 @@ export default function Settings() {
                 <Icon name={qbtTest.startsWith("✔") ? "check" : "close"} /> {qbtTest.replace(/^[✔✖]\s*/, "")}
               </span>
             )}
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <h3>Download Client — Transmission (optional)</h3>
+          <div className="form-row">
+            <Toggle label="Enable Transmission" on={form.transmission_enabled === "true"} onChange={setBool("transmission_enabled")} />
+          </div>
+          <div className="form-row">
+            <label htmlFor="transmission_url">Transmission RPC URL</label>
+            {text("transmission_url")}
+          </div>
+          <div className="form-row">
+            <label htmlFor="transmission_username">Transmission username</label>
+            {text("transmission_username")}
+          </div>
+          <div className="form-row">
+            <label htmlFor="transmission_password">Transmission password</label>
+            {text("transmission_password", true)}
+          </div>
+          <div className="form-row">
+            <label htmlFor="transmission_download_dir">Transmission download directory</label>
+            {text("transmission_download_dir")}
+            <span className="section-hint">Leave blank to use the daemon default. The path must be accessible in both apps.</span>
+          </div>
+          <div className="form-row">
+            <button className="btn" onClick={() => testTransmission.mutate()} disabled={testTransmission.isPending}>
+              Test Transmission
+            </button>
+            {testTransmission.isSuccess && <span role="status">Connected to Transmission {testTransmission.data.version}</span>}
+            {testTransmission.isError && <span role="alert">{testTransmission.error.message}</span>}
           </div>
         </div>
 

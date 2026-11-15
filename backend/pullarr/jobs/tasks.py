@@ -20,8 +20,8 @@ from ..config import config
 from ..db import session_scope
 from ..download.coordination import importing_download, _importing_downloads
 from ..download.ddl import DownloadCancelled, download_release
-from ..download.qbittorrent import QbtClient, QbtError
-from ..download.torrent import fetch_torrent, magnet_btih_hex, normalize_btih
+from ..download.clients import CLIENT_NAMES, client_enabled, create_client, selected_client
+from ..download.torrent import TorrentClientError, fetch_torrent, magnet_btih_hex, normalize_btih
 from ..library.importer import import_payload
 from ..library.scanner import (LibraryUnavailableError, library_unavailable, recorded_files_expect_content,
                                require_root_available, resolve_folders, root_unavailable)
@@ -595,14 +595,14 @@ class SuppressedTorrentRelease(ValueError):
 
 async def submit_torrent(
     magnet: str, values: dict[str, str], *, keep_existing: bool = False,
-    blocked_hashes: set[str] | None = None,
+    blocked_hashes: set[str] | None = None, client_name: str = "qbittorrent",
 ) -> str:
-    """Submit a torrent to qBittorrent and return its v1 info hash.
+    """Submit a torrent to its download client and return its v1 info hash.
 
     Kept separate from the database row creation so a failed torrent can be
     submitted again without replacing its Activity entry. With
-    ``keep_existing``, a torrent qBittorrent still has (e.g. one whose import
-    failed) is tracked again instead of re-added, which qBittorrent rejects.
+    ``keep_existing``, a torrent the client still has (e.g. one whose import
+    failed) is tracked again instead of being submitted twice.
     """
     torrent_data = None
     if magnet.startswith(("http://", "https://")):
@@ -613,22 +613,24 @@ async def submit_torrent(
         raise ValueError("Torrent must include a valid btih info hash")
     if blocked_hashes and torrent_hash in blocked_hashes:
         raise SuppressedTorrentRelease
-    client = QbtClient(
-        values["qbittorrent_url"], values["qbittorrent_username"], values["qbittorrent_password"]
-    )
+    client = create_client(values, client_name)
     try:
         if keep_existing and await client.get_torrent(torrent_hash):
             return torrent_hash
-        category = values["qbittorrent_category"]
-        # put grabs in a category subfolder so they stay organized and separate
-        # from other qBittorrent downloads, regardless of its auto-management
-        base = await client.default_save_path()
-        save_path = f"{base.rstrip('/')}/{category}" if base else None
-        await client.ensure_category(category, save_path)
-        if torrent_data is not None:
-            await client.add_torrent(torrent_data, category=category, save_path=save_path)
+        if client_name == "transmission":
+            await client.add_release(
+                magnet, torrent_data, torrent_hash, values["transmission_download_dir"],
+                keep_existing=keep_existing,
+            )
         else:
-            await client.add_magnet(magnet, category=category, save_path=save_path)
+            category = values["qbittorrent_category"]
+            base = await client.default_save_path()
+            save_path = f"{base.rstrip('/')}/{category}" if base else None
+            await client.ensure_category(category, save_path)
+            if torrent_data is not None:
+                await client.add_torrent(torrent_data, category=category, save_path=save_path)
+            else:
+                await client.add_magnet(magnet, category=category, save_path=save_path)
     finally:
         await client.close()
     return torrent_hash
@@ -638,7 +640,10 @@ async def enqueue_torrent(
     session: AsyncSession, series: Series | None, magnet: str, title: str, values: dict[str, str],
     source_name: str = "manual", issue: Issue | None = None, *, blocked_hashes: set[str] | None = None,
 ) -> Download:
-    torrent_hash = await submit_torrent(magnet, values, blocked_hashes=blocked_hashes)
+    client_name = selected_client(values)
+    if client_name is None:
+        raise TorrentClientError("No torrent download client is enabled")
+    torrent_hash = await submit_torrent(magnet, values, blocked_hashes=blocked_hashes, client_name=client_name)
     dl = Download(
         series_id=series.id if series else None,
         issue_id=issue.id if issue else None,
@@ -647,6 +652,7 @@ async def enqueue_torrent(
         title=title,
         source_name=source_name,
         payload=magnet,
+        torrent_client=client_name,
         torrent_hash=torrent_hash,
     )
     session.add(dl)
@@ -982,7 +988,7 @@ def _mark_imported(series: Series, imported: list, download: Download | None = N
     return len(marked)
 
 
-# --------------------------------------------------------------- qbt sync
+# --------------------------------------------------------------- torrent sync
 
 SYNCED_TORRENT_STATUSES = (
     DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING, DownloadStatus.IMPORTING,
@@ -1011,7 +1017,7 @@ async def _update_if_still_synced(session: AsyncSession, dl: Download, **values)
 
 
 def _torrent_files(save_path: str, names: list[str]) -> list[Path]:
-    """Resolve qBittorrent's relative file names without escaping its save path."""
+    """Resolve the client's relative file names without escaping its save path."""
     if not names:
         raise ValueError("torrent has no files selected for import")
     if not save_path or not Path(save_path).is_absolute():
@@ -1030,24 +1036,30 @@ def _torrent_files(save_path: str, names: list[str]) -> list[Path]:
     return files
 
 
-async def sync_qbittorrent() -> None:
+async def sync_torrent_clients() -> None:
+    for name, label in CLIENT_NAMES.items():
+        try:
+            await sync_torrents(name)
+        except TorrentClientError as exc:
+            log.warning("Could not sync %s torrents: %s", label, exc)
+
+
+async def sync_torrents(client_name: str) -> None:
     async with session_scope() as session:
         values = await registry.apply_settings(session)
-        if values["qbittorrent_enabled"] != "true":
+        if not client_enabled(values, client_name):
             return
         result = await session.execute(
             select(Download).where(
                 Download.kind == DownloadKind.TORRENT,
+                Download.torrent_client == client_name,
                 Download.status.in_(SYNCED_TORRENT_STATUSES),
             )
         )
         downloads = result.scalars().all()
         if not downloads:
             return
-        client = QbtClient(
-            values["qbittorrent_url"], values["qbittorrent_username"],
-            values["qbittorrent_password"],
-        )
+        client = create_client(values, client_name)
         try:
             for dl in downloads:
                 torrent_hash = normalize_btih(dl.torrent_hash) or magnet_btih_hex(dl.payload)
@@ -1063,7 +1075,7 @@ async def sync_qbittorrent() -> None:
                         files = _torrent_files(
                             torrent.save_path, await client.torrent_files(torrent.hash),
                         )
-                    except QbtError as exc:
+                    except TorrentClientError as exc:
                         await _update_if_still_synced(
                             session, dl, status=DownloadStatus.DOWNLOADING,
                             error=f"waiting for torrent file list: {exc}",
@@ -1303,7 +1315,7 @@ async def grab_missing_issues(
                 continue
             queued += await _grab_matches(session, series, src.name, results,
                                           remaining, wanted_titles, failed_releases)
-    if values.get("qbittorrent_enabled") == "true":
+    if selected_client(values) is not None:
         from ..sources.queries import search_queries, search_variants
         for indexer in registry.enabled_torrent_indexers(values):
             if source_cooldown_remaining(indexer.name):

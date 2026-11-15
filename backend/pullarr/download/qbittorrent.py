@@ -5,9 +5,10 @@ from dataclasses import dataclass
 import httpx
 
 from .. import USER_AGENT
+from .torrent import TorrentClientError
 
 
-class QbtError(RuntimeError):
+class QbtError(TorrentClientError):
     pass
 
 

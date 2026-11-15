@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..download.clients import selected_client
 from ..db import get_session
 from ..metadata.comicvine import ComicVineError, provider as comicvine
 from ..models import Issue, Series
@@ -134,7 +135,7 @@ async def search_releases(
                 posted_at=r.posted_at,
             ))
 
-    if values["qbittorrent_enabled"] == "true":
+    if selected_client(values) is not None:
         for indexer in registry.enabled_torrent_indexers(values):
             attempted += 1
             try:

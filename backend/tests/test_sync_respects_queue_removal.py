@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from pullarr import settings_service
 from pullarr.api import queue
 from pullarr.download.qbittorrent import QbtError, QbtTorrent
+from pullarr.download import clients
 from pullarr.jobs import tasks
 from pullarr.models import (
     Base, Download, DownloadKind, DownloadStatus, HistoryEvent, Issue, RootFolder, Series,
@@ -103,8 +104,7 @@ async def env(tmp_path, monkeypatch):
         await real_import(session, dl, *args, **kwargs)
 
     monkeypatch.setattr(tasks, "session_scope", scope)
-    monkeypatch.setattr(tasks, "QbtClient", lambda *args: client)
-    monkeypatch.setattr(queue, "QbtClient", lambda *args: client)
+    monkeypatch.setattr(clients, "QbtClient", lambda *args: client)
     monkeypatch.setattr(tasks, "_import_torrent", record_import)
     monkeypatch.setattr(tasks.notifications, "notify_import", lambda *args: None)
     monkeypatch.setattr(tasks, "_notify_kavita", lambda *args: None)
@@ -114,7 +114,7 @@ async def env(tmp_path, monkeypatch):
 
 async def remove_during_sync(env):
     maker, client, dl_id, _, _ = env
-    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    sync = asyncio.create_task(tasks.sync_torrents("qbittorrent"))
     try:
         await asyncio.wait_for(client.entered.wait(), timeout=5)
         async with maker() as session:
@@ -138,7 +138,7 @@ async def assert_removed(env):
     assert imports == []
     assert list(library.rglob("*.cbz")) == []
     # Future sync passes must leave the removed row and payload alone.
-    await tasks.sync_qbittorrent()
+    await tasks.sync_torrents("qbittorrent")
     assert imports == []
 
 
@@ -171,7 +171,7 @@ async def test_incomplete_torrent_progress_does_not_change_removal(env):
 async def test_finished_torrent_still_claims_and_imports(env, api_id):
     maker, client, dl_id, library, imports = env
     client.api_id = api_id
-    await tasks.sync_qbittorrent()
+    await tasks.sync_torrents("qbittorrent")
     assert imports == [(dl_id, DownloadStatus.IMPORTING)]
     async with maker() as session:
         dl = await session.get(Download, dl_id)
@@ -185,7 +185,7 @@ async def test_finished_torrent_still_claims_and_imports(env, api_id):
 async def test_missing_torrent_stays_queued_without_import(env):
     maker, client, dl_id, _, imports = env
     client.missing = True
-    await tasks.sync_qbittorrent()
+    await tasks.sync_torrents("qbittorrent")
     async with maker() as session:
         assert (await session.get(Download, dl_id)).status == DownloadStatus.DOWNLOADING
     assert imports == []
@@ -221,7 +221,7 @@ async def test_removal_is_rejected_through_claim_and_completion(env, monkeypatch
             return await original(session)
 
         monkeypatch.setattr(AsyncSession, "commit", paused_commit)
-    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    sync = asyncio.create_task(tasks.sync_torrents("qbittorrent"))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         async with maker() as session:
@@ -274,7 +274,7 @@ async def test_removal_transaction_finishes_before_import_claim(env, monkeypatch
     monkeypatch.setattr(tasks, "importing_download", attempted_claim)
     removal = asyncio.create_task(remove())
     await asyncio.wait_for(entered.wait(), 5)
-    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    sync = asyncio.create_task(tasks.sync_torrents("qbittorrent"))
     try:
         # Sync has finished qBittorrent calls and is trying to acquire the
         # same download's lock while the removal transaction still owns it.

@@ -233,6 +233,7 @@ class Download(Base):
     title: Mapped[str] = mapped_column(String, default="")  # human-readable release title
     source_name: Mapped[str] = mapped_column(String, default="")
     payload: Mapped[str] = mapped_column(Text, default="")  # source-specific: post URL / magnet
+    torrent_client: Mapped[str] = mapped_column(String, default="qbittorrent", server_default="qbittorrent")
     torrent_hash: Mapped[str] = mapped_column(String, default="")
     progress: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1
     error: Mapped[str] = mapped_column(Text, default="")

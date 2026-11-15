@@ -33,8 +33,8 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
   with per-file matching. An optional **HTTP proxy setting** routes all
   GetComics traffic (searches *and* file downloads) through e.g. a VPN-side
   Privoxy.
-- **qBittorrent (optional)** — manual magnet grabs go to qBittorrent under a
-  `pullarr` category and are imported when complete.
+- **Torrent download clients (optional)** — send magnets or torrent files to
+  qBittorrent or Transmission and import completed downloads.
 - **Existing libraries** — point a series at a folder you already have: scan
   adopts files in place (never re-downloads), rename previews/applies the
   naming convention format-preservingly, cleanup finds duplicate files, and
@@ -111,7 +111,7 @@ special files and nested mounts are skipped; symlinked appdata and system/media
 paths are refused. No library or external download folder is automatically chowned.
 For an existing installation, stop Pullarr, back up appdata, and give the selected
 user access to the specific library and download folders on the host yourself.
-Use compatible ownership and group permissions for qBittorrent and shared mounts.
+Use compatible ownership and group permissions for the download client and shared mounts.
 
 PUID/PGID require root at startup; the command then runs with the chosen numeric
 IDs, no supplementary groups or Linux capabilities, and no privilege escalation.
@@ -332,7 +332,7 @@ the database to network storage or running an older image. Rolling back this
 change leaves the existing schema and download records intact.
 
 Everything else (ComicVine key, GetComics base URL/proxy, naming template,
-qBittorrent, monitor interval) lives in the UI under Settings and is stored
+torrent download clients, monitor interval) lives in the UI under Settings and is stored
 in the DB.
 
 In the issue naming template, `{year}` uses the issue's release year and falls
@@ -400,7 +400,7 @@ Scripts that used HTTP Basic for browser routes can use `X-Api-Key` on
 `/api/v1` instead. API keys do not unlock the browser UI.
 
 Saved integration secrets are bound to the exact saved URL, including scheme, port
-and path, and the qBittorrent password also to the username. The Metron password
+and path, and torrent-client passwords also to the username. The Metron password
 is bound to the saved Metron username. After changing one of those, re-enter the secret before **Test** or **Save**. Torznab API keys are bound
 to their indexer's URL the same way. HTTP client request logs are suppressed, even
 at `DEBUG`, and integration errors omit URLs and response bodies so they cannot
@@ -410,8 +410,7 @@ on import; the archive's filename matching still applies.
 
 When VPN routing is required, keep the GetComics proxy configured for both
 searches and downloads. Mirror fallback uses the same proxy-aware client; proxy
-failures never trigger a direct-connection retry. qBittorrent's VPN and kill switch
-remain the responsibility of its container/network configuration.
+failures never trigger a direct-connection retry. VPN routing for torrents is configured in the download client's network.
 
 Please be a good citizen: keep the honest User-Agent and don't lower the
 rate limits — GetComics is a small site and ComicVine caps free keys at 200
@@ -432,11 +431,23 @@ such as `http://prowlarr:9696/all/api`. The default category is comics (`7030`);
 you can enter other category IDs separated by commas. Use `search`, or `book` if
 supported by your indexer. API keys are masked after saving.
 
-Enable and configure qBittorrent to search and grab torrents. Search Releases
-combines GetComics and torrent results, with source labels, size, and seeder/leecher
-counts. Both magnets and torrent-file links are supported. Completed downloads use
-the existing library importer; qBittorrent's completed paths must be accessible to
-Pullarr. Torrent data is copied on import so qBittorrent can keep seeding.
+Enable and configure qBittorrent or Transmission to search and grab torrents.
+Search Releases combines GetComics and torrent results, with source labels, size,
+and seeder/leecher counts. Both magnets and torrent-file links are supported.
+Pullarr copies completed files into the library so the download client can keep
+seeding. Mount the download directory at the same path in both services.
+
+Under **Settings → Download Client — Transmission**, enter the full RPC URL
+(for example, `http://transmission:9091/transmission/rpc`) and RPC credentials
+if required. Test the connection, then enable Transmission and save. Set a
+download directory if you want to override the daemon default. Use the path
+as seen by Transmission and Pullarr. Re-enter saved credentials when changing the
+RPC URL or username. Pullarr supports BitTorrent v1 identities. Transmission
+must also accept the torrent format.
+
+When both clients are enabled, **Client for new torrent grabs** sets where new
+downloads go. Existing queue entries stay with their original client. Keep that
+client enabled while its downloads are active, so Pullarr can import or remove them.
 
 Default torrent query templates live in Settings. Under **Torrent search options**
 on a series page, override the search title (for example, a French title) and/or

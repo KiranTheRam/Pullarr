@@ -30,6 +30,10 @@ def magnet_btih_hex(magnet: str) -> str:
     return ""
 
 
+class TorrentClientError(RuntimeError):
+    """A handled download-client error safe to report."""
+
+
 class UnsupportedTorrentVersion(ValueError):
     """Torrent metadata does not provide a v1 identity for tracking."""
 
