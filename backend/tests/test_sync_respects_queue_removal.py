@@ -5,13 +5,14 @@ import zipfile
 from contextlib import asynccontextmanager
 
 import pytest
+import respx
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullarr import settings_service
 from pullarr.api import queue
-from pullarr.download.qbittorrent import QbtError, QbtTorrent
+from pullarr.download.qbittorrent import QbtClient, QbtError, QbtTorrent
 from pullarr.download import clients
 from pullarr.jobs import tasks
 from pullarr.models import (
@@ -160,6 +161,31 @@ async def test_failed_torrent_removal_stays_visible_and_can_be_retried(env):
     async with maker() as session:
         assert await queue._remove_downloads(session, [dl_id]) == 1
     await assert_removed(env)
+
+
+@respx.mock
+async def test_malformed_qbt_alias_leaves_transfer_in_queue_until_valid_removal(env, monkeypatch):
+    maker, _, dl_id, _, _ = env
+    base = settings_service.DEFAULTS["qbittorrent_url"]
+    monkeypatch.setattr(clients, "QbtClient", QbtClient)
+    respx.post(f"{base}/api/v2/auth/login").respond(text="Ok.")
+    listing = respx.get(f"{base}/api/v2/torrents/info")
+    listing.respond(json=[{"hash": "all", "infohash_v1": HASH}])
+    delete = respx.post(f"{base}/api/v2/torrents/delete").respond(200)
+
+    async with maker() as session:
+        with pytest.raises(HTTPException) as exc:
+            await queue._remove_downloads(session, [dl_id])
+        assert exc.value.status_code == 502
+        assert not delete.called
+        assert (await session.get(Download, dl_id)).status == DownloadStatus.DOWNLOADING
+        assert not (await session.scalars(select(HistoryEvent))).all()
+
+        listing.respond(json=[{"hash": "d" * 40, "infohash_v1": HASH}])
+        assert await queue._remove_downloads(session, [dl_id]) == 1
+        assert delete.call_count == 1
+        assert delete.calls.last.request.content == f"hashes={'d' * 40}&deleteFiles=true".encode()
+        assert (await session.get(Download, dl_id)).status == DownloadStatus.FAILED
 
 
 async def test_batch_removes_direct_download_and_reports_disabled_torrent_client(env):

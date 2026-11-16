@@ -69,14 +69,38 @@ async def test_add_magnet_sends_category_and_savepath():
 
 @respx.mock
 async def test_delete_torrents_removes_hashes_and_files():
-    respx.get(f"{BASE}/api/v2/torrents/info").respond(json=[{
-        "hash": "c" * 40, "infohash_v1": "a" * 40,
-    }])
+    respx.get(f"{BASE}/api/v2/torrents/info").respond(json=[
+        {"hash": "C" * 40, "infohash_v1": "A" * 40},
+        {"hash": "b" * 40},  # Older qBittorrent has no separate v1 hash.
+    ])
     route = respx.post(f"{BASE}/api/v2/torrents/delete").respond(200)
-    await client().delete_torrents(["a" * 40, "b" * 40])
+    qbt = client()
+    try:
+        await qbt.delete_torrents(["a" * 40, "B" * 40])
+    finally:
+        await qbt.close()
     body = route.calls.last.request.content.decode()
     assert f"hashes={'c' * 40}%7C{'b' * 40}" in body
     assert "deleteFiles=true" in body
+
+
+@pytest.mark.parametrize("invalid_id", ["all", "a" * 40 + "|" + "b" * 40, "g" * 40, "a" * 64])
+@pytest.mark.parametrize("source", ["alias", "caller"])
+@respx.mock
+async def test_delete_torrents_rejects_invalid_ids_without_sending_delete(invalid_id, source):
+    listing = respx.get(f"{BASE}/api/v2/torrents/info").respond(json=[
+        {"hash": invalid_id, "infohash_v1": "a" * 40},
+    ])
+    delete = respx.post(f"{BASE}/api/v2/torrents/delete").respond(200)
+    qbt = client()
+    try:
+        requested = ["a" * 40] if source == "alias" else ["b" * 40, invalid_id]
+        with pytest.raises(QbtError, match="Invalid qBittorrent torrent ID"):
+            await qbt.delete_torrents(requested)
+    finally:
+        await qbt.close()
+    assert listing.called == (source == "alias")
+    assert not delete.called
 
 
 HEX_HASH = "0123456789abcdef0123456789abcdef01234567"

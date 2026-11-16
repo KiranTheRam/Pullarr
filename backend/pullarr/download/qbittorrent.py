@@ -1,5 +1,6 @@
 """qBittorrent Web API v2 client (login, add magnet, poll status)."""
 
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -10,6 +11,16 @@ from .torrent import TorrentClientError
 
 class QbtError(TorrentClientError):
     pass
+
+
+# Web API IDs are 160-bit hex digests, including truncated v2 IDs for hybrids.
+_TORRENT_ID = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def _validate_torrent_id(value: object) -> str:
+    if not isinstance(value, str) or not _TORRENT_ID.fullmatch(value):
+        raise QbtError("Invalid qBittorrent torrent ID")
+    return value.lower()
 
 
 @dataclass
@@ -26,18 +37,17 @@ class QbtTorrent:
     @classmethod
     def from_api(cls, data: dict) -> "QbtTorrent":
         strings = {key: data.get(key, "") for key in
-                   ("hash", "name", "state", "content_path", "category", "save_path")}
+                   ("name", "state", "content_path", "category", "save_path")}
         v1_hash = data.get("infohash_v1")
         try:
             progress = float(data.get("progress", 0))
         except (TypeError, ValueError, OverflowError):
             raise QbtError("qBittorrent returned invalid torrent status") from None
-        if (not all(isinstance(value, str) for value in strings.values()) or not strings["hash"]
-                or (v1_hash is not None and not isinstance(v1_hash, str))
-                or not 0 <= progress <= 1):
+        if not all(isinstance(value, str) for value in strings.values()) or not 0 <= progress <= 1:
             raise QbtError("qBittorrent returned invalid torrent status")
         return cls(
-            **strings, progress=progress, infohash_v1=(v1_hash or "").lower(),
+            hash=_validate_torrent_id(data.get("hash")), **strings, progress=progress,
+            infohash_v1="" if v1_hash in (None, "") else _validate_torrent_id(v1_hash),
         )
 
     @property
@@ -175,7 +185,7 @@ class QbtClient:
             torrents = (QbtTorrent.from_api(data) for data in entries)
             self._v1_aliases = {
                 torrent.infohash_v1: torrent for torrent in torrents
-                if torrent.hash and torrent.infohash_v1 and torrent.hash != torrent.infohash_v1
+                if torrent.infohash_v1 and torrent.hash != torrent.infohash_v1
             }
         return self._v1_aliases
 
@@ -183,8 +193,13 @@ class QbtClient:
         """Remove torrents, including partial data by default."""
         if not hashes:
             return
+        requested = [_validate_torrent_id(info_hash) for info_hash in hashes]
         aliases = await self._torrent_v1_aliases()
-        torrent_ids = [aliases[info_hash].hash if info_hash in aliases else info_hash for info_hash in hashes]
+        # The daemon interprets "all" and "|" in the request as selectors.
+        torrent_ids = [
+            _validate_torrent_id(aliases[info_hash].hash) if info_hash in aliases else info_hash
+            for info_hash in requested
+        ]
         await self._request(
             "POST",
             "/torrents/delete",
@@ -196,17 +211,18 @@ class QbtClient:
 
     async def torrent_files(self, torrent_hash: str) -> list[str]:
         """Wanted files, with names relative to the torrent's save_path."""
-        entries = await self._entries("/torrents/files", params={"hash": torrent_hash})
+        entries = await self._entries("/torrents/files", params={"hash": _validate_torrent_id(torrent_hash)})
         if any(not isinstance(entry.get("name"), str) or not isinstance(entry.get("priority", 1), int)
                for entry in entries):
             raise QbtError("qBittorrent returned an invalid file list")
         return [entry["name"] for entry in entries if entry.get("priority", 1) != 0]
 
     async def get_torrent(self, torrent_hash: str) -> QbtTorrent | None:
+        torrent_hash = _validate_torrent_id(torrent_hash)
         entries = await self._entries("/torrents/info", params={"hashes": torrent_hash})
         if entries:
             torrent = QbtTorrent.from_api(entries[0])
-            if len(entries) != 1 or torrent_hash not in {torrent.hash.lower(), torrent.infohash_v1}:
+            if len(entries) != 1 or torrent_hash not in {torrent.hash, torrent.infohash_v1}:
                 raise QbtError("qBittorrent returned an unexpected torrent")
             return torrent
         # libtorrent 2 can expose hybrids under a truncated v2 API ID.
