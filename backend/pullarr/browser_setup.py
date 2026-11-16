@@ -25,6 +25,7 @@ from .sign_in_throttle import SignInThrottle
 
 LOGIN_FILE = "browser_login.json"
 ENVIRONMENT_LOGIN_FILE = "environment_login.json"
+INSTANCE_FILE = "browser_instance"
 MAX_FORM_BYTES = 8192
 SESSION_SECONDS = 7 * 24 * 60 * 60
 _password_workers = CapacityLimiter(2)
@@ -33,12 +34,13 @@ log = logging.getLogger(__name__)
 
 
 def session_cookie_name(request: Request) -> str:
-    # Cookies are shared across ports, so include the validated public
-    # authority and mount path in the name.
+    # Cookies are shared across ports. The instance ID distinguishes
+    # installations even when their proxies send the same validated Host.
+    instance = request.app.state.browser_instance
     authority = request.headers["host"].lower()
     mount = request.scope.get("root_path", "").rstrip("/")
-    scope = hashlib.sha256(f"{authority}\0{mount}".encode()).hexdigest()[:16]
-    return f"pullarr_session_{scope}"
+    scope = hashlib.sha256(f"{instance}\0{authority}\0{mount}".encode()).hexdigest()[:32]
+    return f"pullarr_session_v2_{scope}"
 
 
 def _write_private_file(path: Path, value: str) -> None:
@@ -55,28 +57,43 @@ def _write_private_file(path: Path, value: str) -> None:
         Path(temp.name).unlink(missing_ok=True)
 
 
+async def prepare_browser_instance() -> str:
+    """Share a stable instance identifier across restarts and server workers."""
+    path = config.data_dir / INSTANCE_FILE
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            return path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            instance = secrets.token_hex(16)
+            _write_private_file(path, instance)
+            return instance
+
+
 @dataclass(frozen=True)
 class BrowserSession:
     username: str
     digest: bytes
 
-    def session_token(self) -> str:
+    def session_token(self, request: Request) -> str:
         payload = f"{int(time.time()) + SESSION_SECONDS}.{secrets.token_hex(16)}"
-        signature = self._session_signature(payload)
+        signature = self._session_signature(session_cookie_name(request), payload)
         return f"{payload}.{signature}"
 
     def has_session(self, request: Request) -> bool:
-        token = request.cookies.get(session_cookie_name(request), "")
+        cookie_name = session_cookie_name(request)
+        token = request.cookies.get(cookie_name, "")
         if len(token) > 128 or not token.isascii():
             return False
         payload, _, signature = token.rpartition(".")
         expires, _, nonce = payload.partition(".")
         return (expires.isdecimal() and len(nonce) == 32
                 and int(expires) > time.time()
-                and secrets.compare_digest(signature, self._session_signature(payload)))
+                and secrets.compare_digest(signature, self._session_signature(cookie_name, payload)))
 
-    def _session_signature(self, payload: str) -> str:
-        return hmac.digest(self.digest, b"pullarr-browser-session:" + payload.encode(), "sha256").hex()
+    def _session_signature(self, cookie_name: str, payload: str) -> str:
+        message = f"pullarr-browser-session:{cookie_name}:{payload}".encode()
+        return hmac.digest(self.digest, message, "sha256").hex()
 
 
 @dataclass(frozen=True)
@@ -352,7 +369,7 @@ async def submit_sign_in(request: Request, login: BrowserLogin | EnvironmentLogi
 def signed_in_response(request: Request, login: BrowserSession, home: str) -> Response:
     response = RedirectResponse(home, status_code=303, headers={"Cache-Control": "no-store"})
     response.set_cookie(
-        session_cookie_name(request), login.session_token(), max_age=SESSION_SECONDS, path=home,
+        session_cookie_name(request), login.session_token(request), max_age=SESSION_SECONDS, path=home,
         httponly=True, samesite="lax", secure=request.headers["origin"].startswith("https://"),
     )
     return response

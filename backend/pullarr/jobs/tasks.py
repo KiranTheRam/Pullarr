@@ -21,7 +21,9 @@ from ..db import session_scope
 from ..download.coordination import importing_download, _importing_downloads
 from ..download.ddl import DownloadCancelled, download_release
 from ..download.clients import CLIENT_NAMES, client_enabled, create_client, selected_client
-from ..download.torrent import TorrentClientError, fetch_torrent, magnet_btih_hex, normalize_btih
+from ..download.torrent import (
+    TorrentAlreadyExists, TorrentClientError, fetch_torrent, magnet_btih_hex, normalize_btih,
+)
 from ..library.importer import import_payload
 from ..library.scanner import (LibraryUnavailableError, library_unavailable, recorded_files_expect_content,
                                require_root_available, resolve_folders, root_unavailable)
@@ -1043,6 +1045,10 @@ async def sync_torrent_clients() -> None:
             await sync_torrents(name)
         except TorrentClientError as exc:
             log.warning("Could not sync %s torrents: %s", label, exc)
+        except Exception as exc:
+            # Unexpected failures can contain daemon responses or credentials.
+            # Each backend uses a separate DB session and can retry next pass.
+            log.error("Could not sync %s torrents (%s)", label, type(exc).__name__)
 
 
 async def sync_torrents(client_name: str) -> None:
@@ -1349,7 +1355,7 @@ async def grab_missing_issues(
                                 session, series, release.magnet, release.title, values,
                                 source_name=release.source_name, issue=issue, blocked_hashes=failed_torrent_hashes,
                             )
-                        except SuppressedTorrentRelease:
+                        except (SuppressedTorrentRelease, TorrentAlreadyExists):
                             continue
                         except ValueError:
                             log.warning("Skipping invalid torrent metadata from %s", indexer.name)

@@ -26,6 +26,7 @@ SECRET = "SECRETKEY123"
 @pytest.fixture
 def browser_app():
     app = FastAPI()
+    app.state.browser_instance = "test-instance"
     app.middleware("http")(security.access_boundary)
     api = FastAPI()
 

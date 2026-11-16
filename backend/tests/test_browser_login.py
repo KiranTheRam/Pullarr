@@ -1,20 +1,23 @@
 import asyncio
 import errno
+import hmac
 import stat
 from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from pullarr import browser_setup, reset_password, sign_in_throttle
+from pullarr import browser_setup, main, reset_password, sign_in_throttle
 from pullarr.api import deps
 from pullarr.browser_setup import LOGIN_FILE
 from pullarr.config import config
 from pullarr.db import get_session
 from pullarr.main import api, app
 from pullarr.models import ApiKey, Base
+from pullarr.security import access_boundary
 
 
 @pytest.fixture
@@ -39,6 +42,7 @@ async def client(session, monkeypatch, tmp_path):
     monkeypatch.setattr(browser_setup, "engine", session.bind)
     monkeypatch.setattr(browser_setup, "_sign_in_throttle", sign_in_throttle.SignInThrottle())
     monkeypatch.setattr(app.state, "environment_login", None, raising=False)
+    monkeypatch.setattr(app.state, "browser_instance", await browser_setup.prepare_browser_instance(), raising=False)
 
     async def override():
         yield session
@@ -53,6 +57,31 @@ async def client(session, monkeypatch, tmp_path):
 def enable_login(monkeypatch):
     monkeypatch.setattr(config, "auth_username", "reader")
     monkeypatch.setattr(config, "auth_password", SecretStr("password"))
+
+
+@pytest.mark.parametrize("environment_login", [False, True])
+async def test_startup_preserves_browser_instance_and_sessions(client, monkeypatch, tmp_path, environment_login):
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main.scheduler, "start", AsyncMock())
+    monkeypatch.setattr(main.scheduler, "shutdown", Mock())
+    if environment_login:
+        enable_login(monkeypatch)
+    else:
+        monkeypatch.setattr(config, "allow_unauthenticated_browser", True)
+
+    async with main.lifespan(app):
+        if environment_login:
+            signed_in = await client.post("/login", data={"username": "reader", "password": "password"},
+                                          headers={"Origin": "http://localhost"})
+            assert signed_in.status_code == 303
+        instance = app.state.browser_instance
+        assert instance == (tmp_path / browser_setup.INSTANCE_FILE).read_text()
+    app.state.browser_instance = "stale"
+    async with main.lifespan(app):
+        assert app.state.browser_instance == instance
+        response = await client.get("/initialize.json")
+        assert response.status_code == 200
+        assert response.json()["authMode"] == ("environment" if environment_login else "external")
 
 
 async def test_browser_bootstrap_and_independent_api_auth(client, session, monkeypatch):
@@ -168,6 +197,72 @@ async def test_browser_sessions_on_different_ports_do_not_overwrite_each_other(c
     assert (await client.post(f"{second}/auth/logout", headers={"Origin": second})).status_code == 204
     assert (await client.get(f"{first}/initialize.json")).status_code == 200
     assert (await client.get(f"{second}/initialize.json")).status_code == 401
+
+
+async def test_rewriting_proxies_keep_independent_sessions_on_the_same_hostname(client, monkeypatch, tmp_path):
+    origins = ("https://reader.example:8443", "https://reader.example:9443")
+    monkeypatch.setattr(config, "browser_origins", list(origins))
+    monkeypatch.setattr(config, "allowed_hosts", ["pullarr"])
+    enable_login(monkeypatch)
+    login = await browser_setup.prepare_environment_login()
+    browser_login = {"username": "reader", "password": "password"}
+    proxies = []
+    for i in range(len(origins)):
+        instance = FastAPI()
+        instance.middleware("http")(access_boundary)
+        instance.add_api_route("/initialize.json", lambda: {"signed_in": True})
+        monkeypatch.setattr(config, "data_dir", tmp_path / f"instance-{i}")
+        instance.state.browser_instance = await browser_setup.prepare_browser_instance()
+        # Use the same signing key on both instances to verify the cookie
+        # scope itself is signed, even if credential state is copied.
+        instance.state.environment_login = login
+        proxies.append(instance)
+
+    mounts = {origin: httpx.ASGITransport(app=proxy) for origin, proxy in zip(origins, proxies)}
+    async with httpx.AsyncClient(mounts=mounts) as browser:
+        host = {"Host": "pullarr:6997"}
+        headers = [{**host, "Origin": origin} for origin in origins]
+        cookies = []
+        for origin, request_headers in zip(origins, headers):
+            response = await browser.post(f"{origin}/login", data=browser_login, headers=request_headers)
+            assert response.status_code == 303
+            assert "Secure" in response.headers["set-cookie"]
+            cookies.append(next(iter(response.cookies.items())))
+        assert len(browser.cookies) == 2
+
+        first, second = [f"{origin}/initialize.json" for origin in origins]
+        for endpoint in (first, second):
+            assert (await browser.get(endpoint, headers=host)).status_code == 200
+
+        first_name, first_token = cookies[0]
+        second_name, _ = cookies[1]
+        copied = await browser.get(second, headers={**host, "Cookie": f"{second_name}={first_token}"})
+        assert copied.status_code == 401
+        payload = first_token.rpartition(".")[0]
+        signature = hmac.digest(login.digest, b"pullarr-browser-session:" + payload.encode(), "sha256").hex()
+        legacy = f"{payload}.{signature}"
+        old = await browser.get(second, headers={
+            **host, "Cookie": f"pullarr_session={legacy}; {second_name}={legacy}",
+        })
+        assert old.status_code == 401
+        proxies[1].state.browser_instance = await browser_setup.prepare_browser_instance()
+        assert (await browser.get(second, headers=host)).status_code == 200
+        assert (await browser.post(f"{origins[1]}/auth/logout", headers=headers[1])).status_code == 204
+        assert (await browser.get(first, headers=host)).status_code == 200
+        assert (await browser.get(second, headers=host)).status_code == 401
+        assert dict(browser.cookies) == {first_name: first_token}
+
+
+async def test_settings_api_accepts_escaped_naming_fields_and_rejects_malformed_specs(client):
+    headers = {"X-Api-Key": "bootstrap"}
+    escaped = "{{issue:03d}} {issue}"
+    response = await client.put("/api/v1/settings", json={"naming_template": escaped}, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["naming_template"] == escaped
+    for malformed in ("{{issue:03d}}", "{issue", "{series:03d} {issue}", "{issue:{year}}"):
+        response = await client.put("/api/v1/settings", json={"naming_template": malformed}, headers=headers)
+        assert response.status_code == 422
+        assert "Invalid naming template" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("host", ["localhost", "LOCALHOST:6996", "192.0.2.1:6996", "[::1]:6996", "reader.example:443"])
@@ -397,11 +492,11 @@ async def test_expired_tampered_and_wrong_revision_sessions_are_rejected(client,
     from pullarr.browser_setup import BrowserLogin, session_cookie_name
 
     login = BrowserLogin("reader", b"fixture-digest", b"fixture-salt")
-    token = login.session_token()
+    scope = {"type": "http", "app": app, "headers": [(b"host", b"localhost")]}
+    token = login.session_token(Request(scope))
     def request(value):
-        headers = [(b"host", b"localhost")]
-        cookie_name = session_cookie_name(Request({"type": "http", "headers": headers}))
-        return Request({"type": "http", "headers": [*headers, (b"cookie", f"{cookie_name}={value}".encode())]})
+        cookie_name = session_cookie_name(Request(scope))
+        return Request({**scope, "headers": [*scope["headers"], (b"cookie", f"{cookie_name}={value}".encode())]})
     assert login.has_session(request(token))
     assert not login.has_session(request(token + "x"))
     assert not BrowserLogin("reader", b"new-digest", b"new-salt").has_session(request(token))

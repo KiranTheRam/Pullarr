@@ -34,6 +34,10 @@ class TorrentClientError(RuntimeError):
     """A handled download-client error safe to report."""
 
 
+class TorrentAlreadyExists(TorrentClientError):
+    """The client already has the submitted transfer."""
+
+
 class UnsupportedTorrentVersion(ValueError):
     """Torrent metadata does not provide a v1 identity for tracking."""
 

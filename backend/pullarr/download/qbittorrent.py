@@ -25,15 +25,19 @@ class QbtTorrent:
 
     @classmethod
     def from_api(cls, data: dict) -> "QbtTorrent":
+        strings = {key: data.get(key, "") for key in
+                   ("hash", "name", "state", "content_path", "category", "save_path")}
+        v1_hash = data.get("infohash_v1")
+        try:
+            progress = float(data.get("progress", 0))
+        except (TypeError, ValueError, OverflowError):
+            raise QbtError("qBittorrent returned invalid torrent status") from None
+        if (not all(isinstance(value, str) for value in strings.values()) or not strings["hash"]
+                or (v1_hash is not None and not isinstance(v1_hash, str))
+                or not 0 <= progress <= 1):
+            raise QbtError("qBittorrent returned invalid torrent status")
         return cls(
-            hash=data.get("hash", ""),
-            name=data.get("name", ""),
-            progress=float(data.get("progress", 0)),
-            state=data.get("state", ""),
-            content_path=data.get("content_path", ""),
-            category=data.get("category", ""),
-            save_path=data.get("save_path", ""),
-            infohash_v1=(data.get("infohash_v1") or "").lower(),
+            **strings, progress=progress, infohash_v1=(v1_hash or "").lower(),
         )
 
     @property
@@ -66,7 +70,7 @@ class QbtClient:
     async def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         try:
             return await self._client.request(method, url, **kwargs)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx.InvalidURL):
             # Transport exceptions can include credential-bearing URLs. This
             # client is also used by background jobs that log error messages.
             raise QbtError("Cannot reach qBittorrent") from None
@@ -110,9 +114,12 @@ class QbtClient:
         """qBittorrent's configured default download directory."""
         try:
             resp = await self._request("GET", "/app/preferences")
-            return (resp.json() or {}).get("save_path", "") or ""
+            data = resp.json()
+            if isinstance(data, dict) and isinstance(path := data.get("save_path"), str):
+                return path
         except (QbtError, ValueError):
-            return ""
+            pass
+        return ""
 
     async def ensure_category(self, name: str, save_path: str | None = None) -> None:
         """Create the category (idempotent) so torrents land in its subfolder."""
@@ -146,16 +153,26 @@ class QbtClient:
         if resp.text.strip() == "Fails.":
             raise QbtError("qBittorrent rejected the torrent")
 
+    async def _entries(self, path: str, **kwargs) -> list[dict]:
+        resp = await self._request("GET", path, **kwargs)
+        try:
+            entries = resp.json()
+        except ValueError:
+            raise QbtError("qBittorrent returned invalid JSON") from None
+        if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+            raise QbtError("qBittorrent returned an invalid list")
+        return entries
+
     async def list_torrents(self, category: str) -> list[QbtTorrent]:
-        resp = await self._request("GET", "/torrents/info", params={"category": category})
-        return [QbtTorrent.from_api(data) for data in resp.json()]
+        entries = await self._entries("/torrents/info", params={"category": category})
+        return [QbtTorrent.from_api(data) for data in entries]
 
     async def _torrent_v1_aliases(self) -> dict[str, QbtTorrent]:
         # A client is scoped to one operation or sync pass. Share the fallback
         # snapshot across lookups so multiple missing IDs only need one list.
         if self._v1_aliases is None:
-            resp = await self._request("GET", "/torrents/info")
-            torrents = (QbtTorrent.from_api(data) for data in resp.json())
+            entries = await self._entries("/torrents/info")
+            torrents = (QbtTorrent.from_api(data) for data in entries)
             self._v1_aliases = {
                 torrent.infohash_v1: torrent for torrent in torrents
                 if torrent.hash and torrent.infohash_v1 and torrent.hash != torrent.infohash_v1
@@ -179,13 +196,19 @@ class QbtClient:
 
     async def torrent_files(self, torrent_hash: str) -> list[str]:
         """Wanted files, with names relative to the torrent's save_path."""
-        resp = await self._request("GET", "/torrents/files", params={"hash": torrent_hash})
-        return [entry["name"] for entry in resp.json() if entry.get("priority", 1) != 0]
+        entries = await self._entries("/torrents/files", params={"hash": torrent_hash})
+        if any(not isinstance(entry.get("name"), str) or not isinstance(entry.get("priority", 1), int)
+               for entry in entries):
+            raise QbtError("qBittorrent returned an invalid file list")
+        return [entry["name"] for entry in entries if entry.get("priority", 1) != 0]
 
     async def get_torrent(self, torrent_hash: str) -> QbtTorrent | None:
-        resp = await self._request("GET", "/torrents/info", params={"hashes": torrent_hash})
-        if torrents := resp.json():
-            return QbtTorrent.from_api(torrents[0])
+        entries = await self._entries("/torrents/info", params={"hashes": torrent_hash})
+        if entries:
+            torrent = QbtTorrent.from_api(entries[0])
+            if len(entries) != 1 or torrent_hash not in {torrent.hash.lower(), torrent.infohash_v1}:
+                raise QbtError("qBittorrent returned an unexpected torrent")
+            return torrent
         # libtorrent 2 can expose hybrids under a truncated v2 API ID.
         return (await self._torrent_v1_aliases()).get(torrent_hash)
 

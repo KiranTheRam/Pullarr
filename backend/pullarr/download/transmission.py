@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .. import USER_AGENT
-from .torrent import TorrentClientError, normalize_btih
+from .torrent import TorrentAlreadyExists, TorrentClientError, normalize_btih
 
 SESSION_HEADER = "X-Transmission-Session-Id"
 
@@ -96,13 +96,15 @@ class TransmissionClient:
         if download_dir:
             arguments["download-dir"] = download_dir
         result = await self._rpc("torrent-add", arguments)
-        added = result.get("torrent-added")
-        duplicate = result.get("torrent-duplicate")
-        if duplicate is not None and not keep_existing:
-            raise TorrentClientError("Transmission already has this torrent")
-        transfer = added if added is not None else duplicate
-        if not isinstance(transfer, dict) or str(transfer.get("hashString", "")).lower() != info_hash:
+        added, duplicate = "torrent-added" in result, "torrent-duplicate" in result
+        if added == duplicate:
+            raise TorrentClientError("Transmission returned an invalid torrent-add result")
+        transfer = result["torrent-added" if added else "torrent-duplicate"]
+        returned_hash = transfer.get("hashString") if isinstance(transfer, dict) else None
+        if not isinstance(returned_hash, str) or returned_hash.lower() != info_hash:
             raise TorrentClientError("Transmission returned an unexpected torrent hash")
+        if duplicate and not keep_existing:
+            raise TorrentAlreadyExists("Transmission already has this torrent")
 
     async def _get(self, info_hash: str, fields: list[str]) -> dict | None:
         info_hash = normalize_btih(info_hash)
@@ -124,7 +126,7 @@ class TransmissionClient:
             save_path = transfer["downloadDir"]
             metadata_ready = float(transfer["metadataPercentComplete"]) >= 1
             status = int(transfer["status"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, OverflowError, TypeError, ValueError):
             raise TorrentClientError("Transmission returned invalid torrent status") from None
         if not isinstance(save_path, str) or not 0 <= progress <= 1:
             raise TorrentClientError("Transmission returned invalid torrent status")

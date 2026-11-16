@@ -363,6 +363,11 @@ bounded. Forwarded client addresses are ignored by default; configure
 `FORWARDED_ALLOW_IPS` only for a trusted reverse proxy. Clients behind that proxy
 share a limit unless trusted forwarding is configured.
 
+Each installation stores a session identifier in `<data dir>/browser_instance`
+so instances on different ports can keep separate browser sessions even when
+their proxies send the same Host. Keep this file with the config volume across
+restarts. Sign in again once after upgrading from the previous cookie format.
+
 For forgotten credentials, the sign-in page shows local recovery instructions.
 Run `docker compose exec pullarr python -m pullarr.reset_password`, or in the
 Unraid container console run `python -m pullarr.reset_password`. For a direct

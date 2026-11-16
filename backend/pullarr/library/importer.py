@@ -377,7 +377,15 @@ def import_payload(
         planned.append((mf.media, mf.issue, mf.volume, mf.covered_issues,
                         destination(mf.media, mf.issue, mf.volume)))
     for media in unmatched:
-        planned.append((media, None, None, [], destination(media, None, None)))
+        # A rejected archive can carry edition or conflicting coverage labels
+        # that the next library scan needs to see.
+        stem = media.path.name if media.is_dir else media.path.stem
+        coverage = media.coverage
+        name = unmatched_filename(
+            series.title, stem, series.year, _dest_ext(media),
+            preserve_identity=bool(media.editions or (coverage and (coverage.is_range or coverage.ambiguous))),
+        )
+        planned.append((media, None, None, [], folder / name))
     _preflight_destinations(planned, issues, files)
     for plan in planned:
         place(*plan)

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -10,6 +11,7 @@ import httpx
 import pytest
 import respx
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullarr import settings_service
@@ -125,7 +127,7 @@ async def test_existing_torrents_are_migrated_to_qbittorrent():
 async def library(session, tmp_path):
     root = tmp_path / "library"
     root.mkdir()
-    series = Series(title="Test Series", root_folder=RootFolder(path=str(root)))
+    series = Series(title="Test Series", root_folder=RootFolder(path=str(root)), source_links=[])
     series.issues = [Issue(number=1, display_number="1"), Issue(number=2, display_number="2")]
     session.add(series)
     await session.commit()
@@ -148,6 +150,91 @@ async def test_torznab_search_and_monitor_work_with_transmission_only(session, m
     values = await settings_service.get_all(session)
     assert await tasks.grab_missing_issues(session, series, values) == 1
     assert json.loads(route.calls.last.request.content)["arguments"] == {"filename": MAGNET}
+
+
+@pytest.mark.parametrize("result", ["duplicate", "malformed", "outage"])
+@respx.mock
+async def test_monitor_falls_back_only_for_a_confirmed_transmission_duplicate(
+    result, session, monkeypatch, tmp_path,
+):
+    series = await library(session, tmp_path)
+    await settings_service.set_many(session, {"transmission_enabled": "true", "transmission_url": RPC,
+                                              "source_getcomics_enabled": "false"})
+    alternate_hash = "f" * 40
+    alternate = f"magnet:?xt=urn:btih:{alternate_hash}"
+    indexer = SimpleNamespace(name="Indexer", search=AsyncMock(return_value=[
+        TorrentRelease(source_name="Indexer", title="Test Series 1 Scanned", magnet=MAGNET, seeders=50,
+                       url="", size_bytes=123, leechers=0),
+        TorrentRelease(source_name="Indexer", title="Test Series 1 Digital", magnet=alternate, seeders=5,
+                       url="", size_bytes=234, leechers=0),
+    ]))
+    monkeypatch.setattr(tasks.registry, "enabled_torrent_indexers", lambda _: [indexer])
+    responses = {
+        "duplicate": rpc_result(**{"torrent-duplicate": {"hashString": HASH}}),
+        "malformed": rpc_result(**{"torrent-duplicate": {"hashString": alternate_hash}}),
+        "outage": httpx.Response(503, text="private upstream error"),
+    }
+    route = respx.post(RPC).mock(side_effect=[
+        responses[result], rpc_result(**{"torrent-added": {"hashString": alternate_hash}}),
+    ])
+
+    queued = await tasks.grab_missing_issues(session, series, await settings_service.get_all(session))
+    downloads = (await session.scalars(select(Download))).all()
+
+    if result == "duplicate":
+        assert queued == 1
+        assert [(row.torrent_hash, row.torrent_client) for row in downloads] == [(alternate_hash, "transmission")]
+        assert [json.loads(call.request.content)["arguments"]["filename"] for call in route.calls] == [MAGNET, alternate]
+    else:
+        assert queued == 0 and not downloads and route.call_count == 1
+
+
+@respx.mock
+async def test_sync_retries_qbittorrent_and_polls_transmission_after_malformed_response(
+    session, monkeypatch, caplog,
+):
+    qbt_base = "http://qbittorrent:8080"
+    await settings_service.set_many(session, {
+        "qbittorrent_enabled": "true", "qbittorrent_url": qbt_base,
+        "transmission_enabled": "true", "transmission_url": RPC,
+    })
+    rows = [Download(kind=DownloadKind.TORRENT, status=DownloadStatus.DOWNLOADING,
+                     title=name, torrent_client=name, payload=MAGNET, torrent_hash=HASH)
+            for name in ("qbittorrent", "transmission")]
+    session.add_all(rows)
+    await session.commit()
+    monkeypatch.setattr(tasks, "session_scope", async_sessionmaker(session.bind, expire_on_commit=False))
+    respx.post(f"{qbt_base}/api/v2/auth/login").respond(text="Ok.")
+    respx.get(f"{qbt_base}/api/v2/torrents/info", params={"hashes": HASH}).mock(side_effect=[
+        httpx.Response(200, html="<html>private upstream error</html>"),
+        httpx.Response(200, json=[{"hash": HASH, "progress": 0.25}]),
+    ])
+    respx.post(RPC).mock(return_value=rpc_result(torrents=[{
+        "hashString": HASH, "downloadDir": "/downloads", "percentDone": 0.5,
+        "metadataPercentComplete": 1, "status": 4,
+    }]))
+
+    await tasks.sync_torrent_clients()
+    for row in rows:
+        await session.refresh(row)
+    assert [row.progress for row in rows] == [0, 0.5]
+    assert all(row.status == DownloadStatus.DOWNLOADING for row in rows)
+    assert "qBittorrent returned invalid JSON" in caplog.text
+    assert "private upstream error" not in caplog.text
+
+    await tasks.sync_torrent_clients()
+    await session.refresh(rows[0])
+    assert rows[0].progress == 0.25
+
+
+async def test_cancelled_sync_propagates_and_does_not_poll_next_client(monkeypatch):
+    sync = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(tasks, "sync_torrents", sync)
+
+    with pytest.raises(asyncio.CancelledError):
+        await tasks.sync_torrent_clients()
+
+    sync.assert_awaited_once_with("qbittorrent")
 
 
 @respx.mock
