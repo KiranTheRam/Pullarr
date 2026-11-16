@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const backend = "http://127.0.0.1:6997";
+// Pullarr compares the browser's Origin with the original request Host.
+const backend = { target: "http://127.0.0.1:6997", changeOrigin: false };
 
 export default defineConfig({
   plugins: [react()],
