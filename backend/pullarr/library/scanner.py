@@ -203,7 +203,7 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
     media: list[MediaFile] = []
     for folder in existing:
         media.extend(find_media_files(folder))
-    match = match_files(media, issues)
+    match = match_files(media, issues, series)
 
     owned_now: set[int] = set()
 
@@ -262,7 +262,8 @@ async def scan_series_async(
 ) -> ScanResult:
     """Scan detached values in a worker; update session-owned rows on its loop."""
     copies = copy_issues(issues)
-    result = await run_library_work(scan_series, Series(title=series.title), copies, folders, root, expect_content)
+    identity = Series(title=series.title, alt_titles=series.alt_titles, status=series.status)
+    result = await run_library_work(scan_series, identity, copies, folders, root, expect_content)
     apply_file_state(issues, copies)
     return result
 

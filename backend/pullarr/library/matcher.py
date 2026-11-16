@@ -1,8 +1,8 @@
 """Shared, read-only matching of on-disk files to tracked issues.
 
 Used both by the importer (copying completed downloads into the library) and
-the scanner (adopting an existing library in place). Filename-based only — it
-never opens or writes files."""
+the scanner (adopting an existing library in place). Uses filenames and
+available ComicInfo metadata."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,14 +11,24 @@ from xml.etree.ElementTree import ParseError
 
 from ..download.cbz import parse_comicinfo, read_comicinfo_bytes
 from ..filename import FilenameCoverage, normalize_issue_label, parse_filename
-from ..models import Issue
+from ..models import Issue, Series
 from ..util import (
+    COLLECTED_EDITION,
+    additional_editions,
+    declared_issue_editions,
+    edition_markers,
+    filename_edition_markers,
+    issue_has_editions,
     normalize_title,
     parse_issue_number,
 )
 
 ARCHIVE_EXTS = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"}
+SIDECAR_IMAGE_STEMS = {
+    "backdrop", "background", "banner", "cover", "fanart", "folder", "logo", "poster",
+    "series", "thumb", "thumbnail",
+}
 
 
 @dataclass
@@ -34,6 +44,7 @@ class MediaFile:
     metadata_volume: int | None = None
     coverage: FilenameCoverage | None = None
     volume_range: tuple[int, int] | None = None
+    editions: frozenset[str] = frozenset()
 
     @property
     def label(self) -> str:
@@ -83,7 +94,7 @@ def find_media_files(content_path: Path, files: list[Path] | None = None) -> lis
         suffix = p.suffix.lower()
         if suffix in ARCHIVE_EXTS:
             media.append(_media_of(p, is_dir=False))
-        elif suffix in IMAGE_EXTS:
+        elif suffix in IMAGE_EXTS and p.stem.casefold() not in SIDECAR_IMAGE_STEMS:
             image_dirs.add(p.parent)
 
     for d in sorted(image_dirs):
@@ -93,7 +104,7 @@ def find_media_files(content_path: Path, files: list[Path] | None = None) -> lis
 
 def _media_of(path: Path, is_dir: bool) -> MediaFile:
     text = _name_source(path, is_dir)
-    metadata_series, metadata_number, metadata_volume = _comicinfo_identity(path, is_dir)
+    metadata_series, metadata_number, metadata_volume, metadata_editions = _comicinfo_identity(path, is_dir)
     coverage = parse_filename(text)
     volume = coverage.volume_number
     issue = coverage.issue_number
@@ -118,26 +129,30 @@ def _media_of(path: Path, is_dir: bool) -> MediaFile:
         volume_number=volume, issue_range=issue_range,
         metadata_series=metadata_series, metadata_number=metadata_number,
         metadata_volume=metadata_volume, coverage=coverage, volume_range=volume_range,
+        editions=frozenset(filename_edition_markers(text) | metadata_editions),
     )
 
 
-def _comicinfo_identity(path: Path, is_dir: bool) -> tuple[str, str, int | None]:
+def _comicinfo_identity(path: Path, is_dir: bool) -> tuple[str, str, int | None, set[str]]:
     if is_dir or path.suffix.lower() not in {".cbz", ".zip"}:
-        return "", "", None
+        return "", "", None, set()
     data = read_comicinfo_bytes(path)
     if data is None:
-        return "", "", None
+        return "", "", None, set()
     try:
         root = parse_comicinfo(data)
     except ParseError:
-        return "", "", None
+        return "", "", None, set()
     series = (root.findtext("Series") or "").strip()
     number = (root.findtext("Number") or "").strip()
     try:
         volume = int(root.findtext("Volume") or "")
     except ValueError:
         volume = None
-    return series, number, volume
+    editions = edition_markers(series) | declared_issue_editions(
+        number, root.findtext("Title") or "", root.findtext("Format") or "",
+    )
+    return series, number, volume, editions
 
 
 def _plain_display_number(issue: Issue) -> bool:
@@ -168,7 +183,7 @@ def _pick_issue(mf: MediaFile, candidates: list[Issue]) -> Issue | None:
     return matched[0] if len(matched) == 1 else None
 
 
-def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
+def match_files(media: list[MediaFile], issues: list[Issue], series: Series | None = None) -> MatchResult:
     """Match each media file to a issue (by number) or, for whole-volume
     archives, to every issue assigned to that volume."""
     by_number: dict[float, list[Issue]] = {}
@@ -187,6 +202,10 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
         if mf.coverage and mf.coverage.ambiguous:
             unmatched.append(mf)
             continue
+        editions = additional_editions(mf.editions, series, len(issues))
+        if mf.issue_range or (mf.coverage and mf.coverage.volume and not mf.coverage.issue):
+            # A collected archive with explicit coverage can provide regular issues.
+            editions.discard(COLLECTED_EDITION)
         # Display labels are identities, not numeric sort keys. ComicVine can
         # assign 1A a synthetic number when plain #1 also exists. Resolve the
         # exact label across all rows before considering numeric candidates,
@@ -200,7 +219,7 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
                 label = normalize_issue_label(mf.metadata_number)
             elif filename_label and re.fullmatch(r"\d+(?:\.\d+)?", filename_label) is None:
                 label = filename_label
-        exact = by_label.get(label, [])
+        exact = [i for i in by_label.get(label, []) if issue_has_editions(i, editions)]
         if len(exact) == 1:
             issue = exact[0]
         elif exact or (label and re.fullmatch(r"\d+(?:\.\d+)?", label) is None):
@@ -209,10 +228,13 @@ def match_files(media: list[MediaFile], issues: list[Issue]) -> MatchResult:
             unmatched.append(mf)
             continue
         else:
-            issue = _pick_issue(mf, by_number.get(mf.issue_number, [])) if mf.issue_number is not None else None
+            candidates = [i for i in by_number.get(mf.issue_number, []) if issue_has_editions(i, editions)]
+            issue = _pick_issue(mf, candidates)
         if issue is not None:
             matched.append(MatchedFile(media=mf, issue=issue, volume=None,
                                        covered_issues=[issue]))
+        elif editions:
+            unmatched.append(mf)
         elif mf.issue_range is not None:
             # a multi-issue bundle covers every tracked issue in its span
             lo, hi = mf.issue_range

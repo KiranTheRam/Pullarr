@@ -599,7 +599,7 @@ export default function Settings() {
         <div className="settings-section">
           <h3>Media Management</h3>
           <p className="section-hint">
-            Naming uses {"{series}"}, {"{year}"}, {"{issue:03d}"} and {"{title}"} placeholders.
+            Include {"{issue}"} or {"{issue:03d}"} in issue names. Add {"{series}"}, {"{year}"} or {"{title}"} as needed.
             Output is Komga/Kavita-friendly (CBZ/CBR kept as downloaded, ComicInfo.xml added to CBZ).
           </p>
           <div className="form-row">

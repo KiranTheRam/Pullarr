@@ -196,6 +196,7 @@ async def test_automatic_search_requires_matching_query_and_avoids_duplicates(se
     await session.commit()
     indexer = SimpleNamespace(name='Prowlarr', search=AsyncMock(return_value=[
         SimpleNamespace(title='Batman français T030', magnet=MAGNET, source_name='Prowlarr', seeders=10),
+        SimpleNamespace(title='Batman français T03 (Annual)', magnet=MAGNET, source_name='Prowlarr', seeders=9),
         SimpleNamespace(title='Batman français T03 CBZ', magnet=MAGNET, source_name='Prowlarr', seeders=5),
     ]))
     monkeypatch.setattr(tasks.registry, 'enabled_torrent_indexers', lambda _: [indexer])

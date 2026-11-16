@@ -21,7 +21,7 @@ from ..download.archive import (ArchiveBudget, ImportValidationError, MAX_ARCHIV
                                 check_container_size, checked_zip_infos, copy_zip_member, expansion_limit,
                                 open_zip, validate_archive, zip_member_blocks)
 from ..models import Issue, Series
-from ..util import normalize_title, strip_issue_suffix
+from ..util import additional_editions, issue_has_editions, natural_key, normalize_title, strip_issue_suffix
 from .matcher import ARCHIVE_EXTS, IMAGE_EXTS, MediaFile, find_media_files, match_files
 from .naming import (filename_for_issue, range_filename, series_folder, unmatched_filename,
                      volume_filename, volume_range_filename)
@@ -272,7 +272,7 @@ def import_payload(
                     check_library=check_library, _archive_budget=archive_budget,
                 )
 
-    result = match_files(media_files, issues)
+    result = match_files(media_files, issues, series)
 
     def destination(media: MediaFile, issue: Issue | None, volume: int | None) -> Path:
         ext = _dest_ext(media)
@@ -328,7 +328,10 @@ def import_payload(
                 tmp.unlink(missing_ok=True)
             raise
         check_library()
-        _stamp_comicinfo(dest, series, issue, volume)
+        # Unmatched editions can be identified by their original ComicInfo
+        # alone. Keep it available for the next scan.
+        if covered or issue is not None or volume is not None or not media.editions:
+            _stamp_comicinfo(dest, series, issue, volume)
         imported.append(ImportedFile(dest=dest, issue=issue,
                                      volume=volume if issue is None else None,
                                      covered=covered or ([issue] if issue else []),
@@ -356,6 +359,7 @@ def import_payload(
     if (
         force_issue is not None
         and len(media_files) == 1
+        and issue_has_editions(force_issue, additional_editions(media_files[0].editions, series, len(issues)))
         and not (media_files[0].coverage and (
             media_files[0].coverage.ambiguous or media_files[0].coverage.is_range
             or media_files[0].coverage.volume
@@ -423,8 +427,9 @@ def _stamp_comicinfo(dest: Path, series: Series, issue: Issue | None, volume: in
 
 def _pack_images(img_dir: Path, dest: Path, files: list[Path] | None = None) -> None:
     images = sorted(
-        p for p in (files if files is not None else img_dir.iterdir())
-        if p.parent == img_dir and p.is_file() and p.suffix.lower() in IMAGE_EXTS
+        (p for p in (files if files is not None else img_dir.iterdir())
+         if p.parent == img_dir and p.is_file() and p.suffix.lower() in IMAGE_EXTS),
+        key=lambda p: natural_key(p.name),
     )
     if len(images) >= MAX_ARCHIVE_ENTRIES:
         raise ImportValidationError("too many loose comic pages")

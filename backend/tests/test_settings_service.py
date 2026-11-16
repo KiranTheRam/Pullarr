@@ -1,9 +1,13 @@
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from pullarr.models import Base, Setting
 from pullarr.settings_service import (
     DEFAULTS,
     SECRET_KEYS,
+    get_all,
     parse_monitor_interval,
+    set_many,
     validate_updates,
 )
 
@@ -21,6 +25,37 @@ def test_parse_monitor_interval_rejects_bad_values(value):
 def test_validate_updates_rejects_bad_naming_template():
     with pytest.raises(ValueError, match="Invalid naming template"):
         validate_updates({"naming_template": "{missing}"})
+
+
+@pytest.mark.parametrize("value", [
+    "{series} #{issue:.1f}", "{series} - {title}", "{issue:09999d}",
+    "{series} #{issue}" + "x" * 260,
+])
+def test_naming_template_requires_distinct_issue_labels_that_fit(value):
+    with pytest.raises(ValueError, match="Invalid naming template"):
+        validate_updates({"naming_template": value})
+
+
+@pytest.mark.parametrize("value", [DEFAULTS["naming_template"], "{series} {year} #{issue} - {title}"])
+def test_naming_template_accepts_plain_and_padded_labels(value):
+    assert validate_updates({"naming_template": value}) == {"naming_template": value}
+
+
+async def test_saving_other_settings_preserves_an_unchanged_legacy_template(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'settings.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_sessionmaker(engine)() as session:
+            legacy = "{series} #{issue:.1f}"
+            session.add(Setting(key="naming_template", value=legacy))
+            await session.commit()
+            await set_many(session, {"naming_template": legacy, "monitor_interval_minutes": "30"})
+            values = await get_all(session)
+            assert values["naming_template"] == legacy
+            assert values["monitor_interval_minutes"] == "30"
+    finally:
+        await engine.dispose()
 
 
 def test_validate_updates_ignores_unknown_keys():

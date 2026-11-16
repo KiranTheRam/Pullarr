@@ -50,6 +50,7 @@ from ..util import (
     normalize_title,
     parse_issue_range,
     release_covers_issue,
+    release_matches_edition,
     strip_issue_suffix,
     standalone_issue_for_release,
 )
@@ -1340,6 +1341,8 @@ async def grab_missing_issues(
                             continue
                         title = " " + normalize_title(release.title) + " "
                         if not any(" " + normalize_title(q) + " " in title for q in queries):
+                            continue
+                        if not release_matches_edition(release.title, issue, series):
                             continue
                         try:
                             await enqueue_torrent(

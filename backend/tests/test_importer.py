@@ -192,7 +192,7 @@ class TestImportPayload:
     def test_force_issue_for_unparseable_single_file(self, tmp_path, series, issues):
         payload = tmp_path / "payload"
         payload.mkdir()
-        make_cbz(payload / "AbsBat-FCBD-Special.cbz")
+        make_cbz(payload / "AbsBat-digital.cbz")
 
         imported = run_import(payload, series, issues, tmp_path / "lib",
                               force_issue=issues[4])

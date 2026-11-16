@@ -87,7 +87,7 @@ def parse_monitor_interval(value: str) -> int:
 
 
 def validate_updates(values: dict[str, str]) -> dict[str, str]:
-    from .library.naming import issue_filename
+    from .library.naming import validate_template
 
     cleaned: dict[str, str] = {}
     for key, value in values.items():
@@ -112,8 +112,8 @@ def validate_updates(values: dict[str, str]) -> dict[str, str]:
             value = str(days)
         elif key == "naming_template":
             try:
-                issue_filename(value, "Series", 1.0, "Issue Title", 2024)
-            except Exception as exc:
+                validate_template(value)
+            except ValueError as exc:
                 raise ValueError(f"Invalid naming template: {exc}") from exc
         elif key == "torrent_download_client":
             from .download.clients import CLIENT_NAMES
@@ -165,6 +165,10 @@ async def get(session: AsyncSession, key: str) -> str:
 
 
 async def set_many(session: AsyncSession, values: dict[str, str]) -> None:
+    # Older installations can keep saving other settings until they edit
+    # their existing template, even if it fails the newer validation.
+    if "naming_template" in values and values["naming_template"] == await get(session, "naming_template"):
+        values = {key: value for key, value in values.items() if key != "naming_template"}
     cleaned = validate_updates(values)
     if any(key.startswith("kavita_") for key in cleaned):
         # "enabled needs a URL and key" spans several settings, and the page

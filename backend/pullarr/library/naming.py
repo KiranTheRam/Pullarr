@@ -4,6 +4,7 @@ Templates use Python format-spec style with {series}, {year}, {issue}, {title}."
 
 import logging
 import re
+from string import Formatter
 from collections.abc import Callable
 from functools import lru_cache
 from decimal import Decimal, InvalidOperation
@@ -90,6 +91,33 @@ def _issue_render(template: str, issue: float | str, year: int | None) -> Callab
     return lambda series, title: chosen.format(
         series=series, issue=issue, title=title, year=year if year is not None else "",
     )
+
+
+def validate_template(template: str) -> None:
+    fields = set()
+    for _, field, spec, conversion in Formatter().parse(template):
+        if field is None:
+            continue
+        if field not in {"series", "issue", "title", "year"}:
+            raise ValueError("Use only {series}, {issue}, {title} and {year} placeholders")
+        fields.add(field)
+        if "{" in spec or "}" in spec or any(int(n) > NAME_MAX_BYTES for n in re.findall(r"\d+", spec)):
+            raise ValueError("Invalid or oversized format specifier")
+        if field == "issue" and (conversion or (spec and not re.fullmatch(r"0\d+d?", spec))):
+            raise ValueError("Use {issue} or zero-padding such as {issue:03d} for issue labels")
+    if "issue" not in fields:
+        raise ValueError("Include {issue} so each issue has its own filename")
+
+    labels = ("1", "12", "12.5", "12.21", "12.25", "78.BEY", "78.BAT", "Annual 1", "½")
+    for year in (2024, None):
+        for title in ("Issue Title", ""):
+            names = [_finish(_issue_render(template, label, year), "Series", title, ".cbz")
+                     for label in labels]
+            if None in names or any(_finish(_issue_render(template, n, year), "Series", title, ".cbz") is None
+                                    for n in (12.0, 12.5)):
+                raise ValueError("Rendered filenames must fit within the filename length limit")
+            if len(set(names)) != len(labels):
+                raise ValueError("Different issue labels must produce different filenames")
 
 
 def _numbered_filename(render: Callable[[str, str], str], series: str, ext: str) -> str:

@@ -362,7 +362,7 @@ def archive(path, info: bytes | str, method=zipfile.ZIP_DEFLATED):
 def test_normal_comicinfo_is_read(tmp_path):
     path = archive(tmp_path / "a.cbz", GOOD)
     assert read_comicinfo(path) == GOOD
-    assert _comicinfo_identity(path, False) == ("Batman", "7", None)
+    assert _comicinfo_identity(path, False) == ("Batman", "7", None, set())
 
 
 @pytest.mark.parametrize("info,method", [
@@ -373,7 +373,7 @@ def test_normal_comicinfo_is_read(tmp_path):
 def test_unsafe_comicinfo_is_ignored(tmp_path, info, method):
     path = archive(tmp_path / "a.cbz", info, method)
     assert read_comicinfo(path) is None
-    assert _comicinfo_identity(path, False) == ("", "", None)
+    assert _comicinfo_identity(path, False) == ("", "", None, set())
 
 
 def test_comicinfo_read_is_bounded_when_the_header_understates_size(tmp_path):

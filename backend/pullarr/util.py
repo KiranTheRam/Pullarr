@@ -226,6 +226,98 @@ def parse_issue_label(text: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
+_EDITION = (
+    r"annual|special|one ?shot|preview|free comic book day|fcbd|halloween comicfest"
+    r"|giant size|king size|director(?:s| s)? cut|facsimile|sketchbook|ashcan"
+    r"|tpb|hc|hardcover|trade paperback|omnibus|compendium|gn|graphic novel"
+)
+_EDITION_WORD = re.compile(rf"\b({_EDITION})s?\b")
+_EDITION_TAG = re.compile(rf"(?:{_EDITION})s?(?: (?:edition|issue|book))?(?: \d+)?")
+_ISSUE_SPAN_TAIL = re.compile(r"\s*[-–—]\s*#?\s*\d+(?:\.\d+)?\b")
+_ISSUE_TITLE_SEPARATOR = re.compile(r"[\s_.]*[-–—:]")
+COLLECTED_EDITION = "collected"
+_EDITION_ALIASES = dict.fromkeys(
+    ("tpb", "hc", "hardcover", "trade paperback", "omnibus", "compendium", "gn", "graphic novel"),
+    COLLECTED_EDITION,
+)
+_EDITION_ALIASES.update({"fcbd": "freecomicbookday", "director cut": "directorscut"})
+
+
+def edition_markers(text: str) -> set[str]:
+    return {_EDITION_ALIASES.get(word, word.replace(" ", ""))
+            for word in _EDITION_WORD.findall(normalize_title(text))}
+
+
+def filename_edition_markers(name: str) -> set[str]:
+    """Identify edition labels while leaving release groups and story titles alone."""
+    found = set()
+    for tag in BRACKET_GROUPS.findall(name):
+        if _EDITION_TAG.fullmatch(normalize_title(tag)):
+            found.update(edition_markers(tag))
+    text = BRACKET_GROUPS.sub(" ", name)
+    issue = ISSUE_PREFIX_PATTERN.search(text)
+    if issue:
+        suffix = text[issue.end():]
+        if span := _ISSUE_SPAN_TAIL.match(suffix):
+            suffix = suffix[span.end():]
+        if suffix.lstrip().startswith(("+", "&")):
+            suffix = ""  # A bundle can include an annual alongside its regular issues.
+        elif separator := _ISSUE_TITLE_SEPARATOR.match(suffix):
+            suffix = suffix[separator.end():]
+            if not _EDITION_TAG.fullmatch(normalize_title(suffix)):
+                suffix = ""
+        text = f"{text[:issue.start()]} {suffix}"
+    return found | edition_markers(text)
+
+
+def additional_editions(markers: set[str] | frozenset[str], series, issue_count: int) -> set[str]:
+    if not markers:
+        return set()
+    series_markers = edition_markers(f"{series.title or ''}\n{series.alt_titles or ''}") if series else set()
+    extra = set(markers) - series_markers
+    if issue_count == 1:
+        extra.discard("oneshot")
+        if series is not None and series.status == "finished":
+            extra.discard(COLLECTED_EDITION)
+    return extra
+
+
+def declared_issue_editions(label: str, title: str, format_name: str) -> set[str]:
+    carried = edition_markers(f"{label} {format_name}")
+    if _EDITION_TAG.fullmatch(normalize_title(title)):
+        carried.update(edition_markers(title))
+    return carried
+
+
+def issue_has_editions(issue, markers: set[str]) -> bool:
+    if not markers:
+        return True
+    title = issue.title or ""
+    carried = declared_issue_editions(issue.display_number or "", title, issue.format or "")
+    if re.match(r"^\s*(?:vol(?:ume)?|book)\b", title, re.I):
+        carried.add(COLLECTED_EDITION)
+    return markers <= carried
+
+
+def release_matches_edition(title: str, issue, series=None) -> bool:
+    issue_count = series.total_issues if series is not None else 0
+    markers = additional_editions(filename_edition_markers(title), series, issue_count)
+    if parse_issue_range(title) is not None:
+        markers.discard(COLLECTED_EDITION)
+    return issue_has_editions(issue, markers)
+
+
+_DIGIT_RUNS = re.compile(r"(\d+)")
+
+
+def natural_key(text: str) -> tuple[tuple[int | str, ...], str]:
+    # The split retains empty text between consecutive positions, so every
+    # numeric component is compared to a number at the same tuple position.
+    parts = tuple(int(part) if i % 2 else part.casefold()
+                  for i, part in enumerate(_DIGIT_RUNS.split(text)))
+    return parts, text
+
+
 def standalone_issue_for_release(series, title: str):
     """Resolve an unnumbered book only against a complete, single-book series.
 
@@ -276,6 +368,8 @@ def release_covers_issue(release, issue, series=None) -> bool:
         and issue.released_at is not None
         and abs(release.year - issue.released_at.year) > 1
     ):
+        return False
+    if not release_matches_edition(release.title, issue, series):
         return False
     display = (issue.display_number or "").strip().lower()
     label = parse_issue_label(release.title)
