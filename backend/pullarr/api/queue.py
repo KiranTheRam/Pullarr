@@ -154,17 +154,45 @@ async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
     """Mark downloads as removed and stop transfers on their original client."""
     if any(download_is_importing(download_id) for download_id in ids):
         raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
+    errors: list[str] = []
+    unavailable = False
     async with queue_mutation(ids):
-        result = await session.execute(select(Download).where(Download.id.in_(ids)))
-        downloads = result.scalars().all()
+        downloads = (await session.scalars(select(Download).where(Download.id.in_(ids)))).all()
         if any(download_is_importing(dl.id) for dl in downloads):
             raise HTTPException(409, "An import is writing library files. Wait for it to finish before removing it.")
-        client_hashes: dict[str, list[str]] = {}
+        transfers: dict[str, list[tuple[Download, str]]] = {}
+        removed: list[Download] = []
         for dl in downloads:
             if dl.kind == DownloadKind.TORRENT and dl.status in ACTIVE:
                 if info_hash := normalize_btih(dl.torrent_hash) or magnet_btih_hex(dl.payload):
-                    client_hashes.setdefault(dl.torrent_client, []).append(info_hash)
-        for dl in downloads:
+                    transfers.setdefault(dl.torrent_client, []).append((dl, info_hash))
+                    continue
+            removed.append(dl)
+
+        if transfers:
+            values = await registry.apply_settings(session)
+            # Release the SQLite transaction during RPC. The per-download
+            # locks still prevent a completed transfer starting an import.
+            await session.commit()
+            for client_name, items in transfers.items():
+                label = CLIENT_NAMES.get(client_name, "The original torrent client")
+                if not client_enabled(values, client_name):
+                    errors.append(f"{label} is disabled. Enable it and retry removal.")
+                    continue
+                try:
+                    client = create_client(values, client_name)
+                    try:
+                        await client.delete_torrents([info_hash for _, info_hash in items])
+                    finally:
+                        await client.close()
+                except Exception as exc:
+                    log.warning("failed to delete %d torrent(s) from %s: %s", len(items), label, type(exc).__name__)
+                    errors.append(f"{label} did not confirm removal. The downloads are still in the queue.")
+                    unavailable = True
+                else:
+                    removed.extend(dl for dl, _ in items)
+
+        for dl in removed:
             dl.status = DownloadStatus.FAILED
             dl.error = "removed by user"
             dl.error_code = "cancelled"
@@ -178,25 +206,11 @@ async def _remove_downloads(session: AsyncSession, ids: list[int]) -> int:
                 detail=dl.title or "Download removed by user",
             ))
         await session.commit()
-    cancel_downloads([
-        dl.id for dl in downloads
-        if dl.kind == DownloadKind.DIRECT and dl.status == DownloadStatus.FAILED
-    ])
-    if client_hashes:
-        values = await registry.apply_settings(session)
-        for client_name, hashes in client_hashes.items():
-            if not client_enabled(values, client_name):
-                continue
-            try:
-                client = create_client(values, client_name)
-                try:
-                    await client.delete_torrents(hashes)
-                finally:
-                    await client.close()
-            except Exception as exc:
-                log.warning("failed to delete %d torrent(s) from %s: %s",
-                            len(hashes), CLIENT_NAMES[client_name], type(exc).__name__)
-    return len(downloads)
+    cancel_downloads([dl.id for dl in removed if dl.kind == DownloadKind.DIRECT])
+    if errors:
+        progress = f"Removed {len(removed)} download(s). " if removed else ""
+        raise HTTPException(502 if unavailable else 409, progress + " ".join(errors))
+    return len(removed)
 
 
 @router.delete("/queue/{download_id}", status_code=204)

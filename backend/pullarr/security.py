@@ -104,15 +104,17 @@ async def access_boundary(request: Request, call_next):
             if request.method == "GET" and path != "/initialize.json":
                 return RedirectResponse(f"{home}setup", headers={"Cache-Control": "no-store"})
             return JSONResponse(
-                {"detail": "Set up your Pullarr login at /setup first."},
+                {"detail": "Set up your Pullarr login at /setup first.", "authPath": f"{home}setup"},
                 status_code=403,
                 headers={"Cache-Control": "no-store"},
             )
         if login is not None and not signed_in:
             if request.method == "GET" and path != "/initialize.json":
                 return RedirectResponse(f"{home}login", headers={"Cache-Control": "no-store"})
-            return JSONResponse({"detail": "Sign in to Pullarr."}, status_code=401,
-                                headers={"Cache-Control": "no-store"})
+            return JSONResponse(
+                {"detail": "Sign in to Pullarr.", "authPath": f"{home}login"}, status_code=401,
+                headers={"Cache-Control": "no-store"},
+            )
     response = await call_next(request)
     if path == "/initialize.json" or signed_in:
         response.headers["Cache-Control"] = "no-store"

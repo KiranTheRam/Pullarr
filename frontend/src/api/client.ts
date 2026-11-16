@@ -2,12 +2,17 @@ let apiKey = "";
 let version = "";
 let authMode: "managed" | "environment" | "external" = "external";
 
-export async function initClient(): Promise<void> {
+export async function initClient(): Promise<boolean> {
   const resp = await fetch("/initialize.json", { cache: "no-store" });
   if (!resp.ok) {
     let message = `Cannot initialize Pullarr (HTTP ${resp.status})`;
     try {
       const data = await resp.json();
+      if ((resp.status === 401 && data.authPath === "/login") ||
+          (resp.status === 403 && data.authPath === "/setup")) {
+        window.location.assign(data.authPath);
+        return false;
+      }
       if (typeof data.detail === "string") message = data.detail;
     } catch { /* response may come from a reverse proxy */ }
     throw new Error(message);
@@ -16,6 +21,7 @@ export async function initClient(): Promise<void> {
   apiKey = data.apiKey;
   authMode = data.authMode ?? "external";
   version = data.version;
+  return true;
 }
 
 export function appVersion(): string {

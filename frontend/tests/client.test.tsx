@@ -17,6 +17,21 @@ test("bootstrap falls back to the status for non-JSON responses", async () => {
   await expect(initClient()).rejects.toThrow("HTTP 502");
 });
 
+test.each([[401, "/login"], [403, "/setup"]] as const)("bootstrap sends HTTP %s to %s", async (status, authPath) => {
+  const assign = vi.fn();
+  vi.stubGlobal("window", { location: { assign } });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ authPath }), { status })));
+  await expect(initClient()).resolves.toBe(false);
+  expect(assign).toHaveBeenCalledWith(authPath);
+});
+
+test("bootstrap shows unrelated proxy authentication failures", async () => {
+  const assign = vi.fn();
+  vi.stubGlobal("window", { location: { assign } });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "Proxy access denied" }), { status: 401 })));
+  await expect(initClient()).rejects.toThrow("Proxy access denied");
+  expect(assign).not.toHaveBeenCalled();
+});
 
 test.each(["managed", "environment"] as const)("%s browser requests use the session without an integration key", async (mode) => {
   const fetchMock = vi.fn()

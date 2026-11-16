@@ -71,6 +71,7 @@ async def test_browser_bootstrap_and_independent_api_auth(client, session, monke
     assert (await client.get("/ping")).status_code == 200
     response = await client.get("/initialize.json", auth=("reader", "password"))
     assert response.status_code == 401
+    assert response.json()["authPath"] == "/login"
     assert "www-authenticate" not in response.headers and "bootstrap" not in response.text
     assert (await client.get("/api/v1/settings", auth=httpx.BasicAuth("reader", "password"))).status_code == 401
     assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "wrong"})).status_code == 401
@@ -216,7 +217,8 @@ async def test_browser_setup_keeps_existing_api_and_accepts_one_login(client, tm
     assert page.headers["cache-control"] == "no-store"
     assert 'name="code"' not in page.text
     assert page.text.count('type="password" required maxlength="256"') == 2
-    assert (await client.get("/initialize.json")).status_code == 403
+    bootstrap = await client.get("/initialize.json")
+    assert bootstrap.status_code == 403 and bootstrap.json()["authPath"] == "/setup"
     assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "bootstrap"})).status_code == 200
     password = "abcdefgh"
     data = {"username": "reader", "password": password, "confirmation": password}

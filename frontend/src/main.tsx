@@ -13,7 +13,8 @@ const queryClient = new QueryClient({
 });
 
 initClient()
-  .then(() => {
+  .then((initialized) => {
+    if (!initialized) return;
     ReactDOM.createRoot(document.getElementById("root")!).render(
       <React.StrictMode>
         <QueryClientProvider client={queryClient}>

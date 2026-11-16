@@ -1,13 +1,18 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const backend = "http://127.0.0.1:6997";
+
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:6997",
-      "/initialize.json": "http://localhost:6997",
+      "/api": backend,
+      "/initialize.json": backend,
+      "/login": backend,
+      "/setup": backend,
+      "/auth": backend,
     },
   },
   build: {

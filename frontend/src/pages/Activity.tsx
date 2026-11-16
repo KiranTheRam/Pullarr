@@ -52,7 +52,10 @@ function Queue() {
     mutationFn: (ids: number[]) => api.post("/queue/remove", { ids }),
     onSuccess: () => {
       setSelected(new Set());
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["queue"] });
+      queryClient.invalidateQueries({ queryKey: ["history"] });
     },
   });
 
