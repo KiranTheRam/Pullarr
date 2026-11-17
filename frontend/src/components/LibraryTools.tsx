@@ -144,6 +144,7 @@ export function SourcesModal({
     mutationFn: () => api.post<{ issues: number; matched_issues: number }>(
       `/series/${seriesId}/resync`,
     ),
+    onMutate: () => setResyncMsg(""),
     onSuccess: (r) => {
       setResyncMsg(`Rebuilt: ${r.issues} issues, ${r.matched_issues} adopted from disk.`);
       invalidate();
@@ -218,6 +219,7 @@ export function SourcesModal({
         </button>
         {resyncMsg && <span style={{ fontSize: 13, color: "var(--success)" }}>{resyncMsg}</span>}
       </div>
+      {resync.isError && <div className="error-banner" role="alert">{resync.error.message}</div>}
     </Modal>
   );
 }

@@ -203,10 +203,13 @@ async def test_filesystem_workers_are_serialized_without_blocking_loop(monkeypat
         await first_task
 
 
-async def test_scan_applies_detached_worker_results_on_the_loop(monkeypatch, tmp_path):
+async def test_scan_applies_detached_worker_results_on_the_loop(monkeypatch, tmp_path, session):
     import threading
     from pullarr.library import scanner
     original = Issue(id=1, number=1, downloaded=False, file_path="")
+    series = Series(title="Test", issues=[original])
+    session.add(series)
+    await session.commit()
     loop_thread = threading.get_ident()
     def scan(series, copies, folders, root=None, expect_content=None):
         assert threading.get_ident() != loop_thread
@@ -216,7 +219,7 @@ async def test_scan_applies_detached_worker_results_on_the_loop(monkeypatch, tmp
         assert original.downloaded is False
         return scanner.ScanResult(matched_issues=1)
     monkeypatch.setattr(scanner, "scan_series", scan)
-    result = await scanner.scan_series_async(Series(title="Test"), [original], [tmp_path])
+    result = await scanner.scan_series_async(session, series, [original], [tmp_path])
     assert result.matched_issues == 1
     assert original.downloaded
 

@@ -330,3 +330,16 @@ async def test_transfer_completion_requires_metadata_and_finished_verification(m
         assert transfer is not None and transfer.progress == progress and transfer.is_complete is done
     finally:
         await client.close()
+
+
+@respx.mock
+async def test_completed_transfer_can_temporarily_omit_its_download_directory():
+    respx.post(RPC).mock(return_value=rpc_result(torrents=[{
+        "hashString": HASH, "percentDone": 1, "metadataPercentComplete": 1, "status": 6,
+    }]))
+    client = TransmissionClient(RPC, "", "")
+    try:
+        transfer = await client.get_torrent(HASH)
+        assert transfer is not None and transfer.is_complete and not transfer.save_path
+    finally:
+        await client.close()

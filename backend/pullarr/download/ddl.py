@@ -132,12 +132,13 @@ async def _fetch_file(
 
 
 def _unique_dir(staging_dir: Path, seed: str) -> Path:
-    slug = sanitize_filename(Path(urlparse(seed).path).name or "release")[:80]
-    candidate = staging_dir / slug
+    name = Path(urlparse(seed).path).name or "release"
+    candidate = staging_dir / sanitize_filename(name, 80)
     n = 1
     while candidate.exists() and any(candidate.iterdir()):
         n += 1
-        candidate = staging_dir / f"{slug}-{n}"
+        suffix = f"-{n}"
+        candidate = staging_dir / (sanitize_filename(name, 80 - len(suffix)) + suffix)
     return candidate
 
 

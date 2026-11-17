@@ -8,6 +8,7 @@ import { api, browserAuthMode, updateBrowserLogin } from "../src/api/client";
 import Activity from "../src/pages/Activity";
 import Settings from "../src/pages/Settings";
 import { Modal } from "../src/components/common";
+import { SourcesModal } from "../src/components/LibraryTools";
 
 vi.mock("../src/api/client", () => ({ browserAuthMode: vi.fn(() => "external"), updateBrowserLogin: vi.fn(), api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() } }));
 
@@ -19,6 +20,20 @@ function mount(element: React.ReactNode, path = "/") {
 }
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(api.get).mockResolvedValue([]); });
 afterEach(() => { cleanup(); clients.forEach((client) => client.clear()); clients.length = 0; vi.unstubAllGlobals(); });
+
+test("source re-sync shows the latest error and clears an earlier success", async () => {
+  vi.mocked(api.post)
+    .mockResolvedValueOnce({ issues: 2, matched_issues: 1 })
+    .mockRejectedValueOnce(new Error("Library root is empty. Is it mounted?"));
+  mount(<SourcesModal seriesId={7} links={[]} onClose={() => {}} onChanged={() => {}} />);
+  const user = userEvent.setup();
+  const resync = () => screen.getByRole("button", { name: "Re-sync issues from links" });
+  await user.click(resync());
+  await screen.findByText("Rebuilt: 2 issues, 1 adopted from disk.");
+  await user.click(resync());
+  expect((await screen.findByRole("alert")).textContent).toBe("Library root is empty. Is it mounted?");
+  expect(screen.queryByText(/Rebuilt:/)).toBeNull();
+});
 
 const event = { id: 1, event: "grabbed", series_title: "Test", detail: "Found a release", source_name: "getcomics", created_at: "2026-09-26T12:00:00Z" };
 

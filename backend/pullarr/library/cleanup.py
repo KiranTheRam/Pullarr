@@ -246,6 +246,7 @@ def apply_cleanup(
             issue.file_path = replacements[issue.id]
             issue.file_source = ""
             issue.file_download_id = None
+            issue.file_mapped = False
         result.repointed += len(referencing)
         result.deleted += 1
         result.freed_bytes += size

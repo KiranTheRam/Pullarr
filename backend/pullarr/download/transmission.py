@@ -123,7 +123,7 @@ class TransmissionClient:
             return None
         try:
             progress = float(transfer["percentDone"])
-            save_path = transfer["downloadDir"]
+            save_path = transfer.get("downloadDir", "")
             metadata_ready = float(transfer["metadataPercentComplete"]) >= 1
             status = int(transfer["status"])
         except (KeyError, OverflowError, TypeError, ValueError):
