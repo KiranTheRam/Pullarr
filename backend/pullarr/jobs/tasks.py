@@ -993,7 +993,9 @@ async def _mark_imported(session: AsyncSession, series: Series, imported: list, 
             elif not was_same_file:
                 # The existing file was not written by this download.
                 state.update(file_source="", file_download_id=None)
-            if await update_file_state(session, issue, **state):
+            updated = await update_file_state(session, issue, **state)
+            # A concurrent scan can already have adopted this same archive.
+            if updated or (issue.downloaded and issue.file_path == state["file_path"]):
                 marked.add(issue.id)
     return len(marked)
 

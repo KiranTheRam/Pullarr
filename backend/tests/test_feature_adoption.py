@@ -89,18 +89,20 @@ async def test_a_late_download_does_not_replace_a_valid_manual_mapping(tmp_path,
     assert issue.file_path == str(dest) and not issue.file_mapped
 
 
-async def test_mapping_saved_after_a_download_loads_the_issue_wins(tmp_path, ownership_session):
+@pytest.mark.parametrize("same_file", [False, True])
+async def test_mapping_saved_after_a_download_loads_the_issue_wins(tmp_path, ownership_session, same_file):
     session = ownership_session
     issue = Issue(number=1)
     series = Series(title="Batman", issues=[issue])
     session.add(series)
     await session.commit()
-    preferred = tmp_path / "My issue.cbz"
+    dest = tmp_path / "Batman #001.cbz"
+    preferred = dest if same_file else tmp_path / "My issue.cbz"
     preferred.touch()
     async with async_sessionmaker(session.bind, expire_on_commit=False)() as other:
         await map_file(series.id, FileMapIn(file_path=str(preferred), issue_id=issue.id), other)
-    imported = [ImportedFile(dest=tmp_path / "Batman #001.cbz", issue=issue, volume=None, covered=[issue])]
-    assert await _mark_imported(session, series, imported) == 0
+    imported = [ImportedFile(dest=dest, issue=issue, volume=None, covered=[issue])]
+    assert await _mark_imported(session, series, imported) == int(same_file)
     await session.commit()
     await session.refresh(issue)
     assert issue.file_path == str(preferred) and issue.file_mapped
