@@ -106,7 +106,7 @@ async def scan(series_id: int, session: AsyncSession = Depends(get_session)):
     from ..jobs.tasks import root_expects_content
 
     result = await scan_series_async(
-        series, list(series.issues), folders, root=root,
+        session, series, list(series.issues), folders, root=root,
         expect_content=await root_expects_content(session, series),
     )
     if result.root_unavailable:
@@ -435,7 +435,7 @@ async def _scan_now(session: AsyncSession, series: Series) -> int:
     from ..jobs.tasks import root_expects_content
 
     result = await scan_series_async(
-        series, list(series.issues), _folders_of(series), root=_root_of(series),
+        session, series, list(series.issues), _folders_of(series), root=_root_of(series),
         expect_content=await root_expects_content(session, series),
     )
     if result.root_unavailable:

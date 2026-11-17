@@ -1,7 +1,8 @@
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullarr.jobs.tasks import reconcile_downloaded_files
-from pullarr.models import Issue, Series
+from pullarr.models import Base, Issue, Series
 
 
 class FakeSession:
@@ -24,17 +25,22 @@ async def test_reconcile_clears_downloaded_when_file_missing(tmp_path):
         Issue(id=3, series_id=1, number=3, downloaded=False, file_path=""),
     ]
     series.issues = issues
-    session = FakeSession()
-
-    changed = await reconcile_downloaded_files(session, series)
-
-    assert changed == 1
-    assert session.commits == 1
-    assert issues[0].downloaded is True
-    assert issues[0].file_path == str(present)
-    assert issues[1].downloaded is False
-    assert issues[1].file_path == ""
-    assert issues[2].downloaded is False
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            session.add(series)
+            await session.commit()
+            assert await reconcile_downloaded_files(session, series) == 1
+        async with maker() as session:
+            existing, gone, pending = [await session.get(Issue, issue.id) for issue in issues]
+            assert existing.downloaded and existing.file_path == str(present)
+            assert not gone.downloaded and gone.file_path == ""
+            assert not pending.downloaded
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

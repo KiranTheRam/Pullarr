@@ -27,7 +27,7 @@ from ..download.torrent import (
 from ..library.importer import import_payload
 from ..library.scanner import (LibraryUnavailableError, library_unavailable, recorded_files_expect_content,
                                require_root_available, resolve_folders, root_unavailable)
-from ..library.work import run_library_work
+from ..library.work import run_library_work, update_file_state
 from ..metadata.comicvine import derive_status, provider as comicvine
 from ..metadata.metron import provider as metron
 from ..models import (
@@ -343,14 +343,12 @@ async def reconcile_downloaded_files(session: AsyncSession, series: Series) -> i
         return 0
     missing = 0
     for issue in missing_issues:
-        issue.downloaded = False
-        issue.file_path = ""
-        issue.file_source = ""
-        issue.file_download_id = None
-        issue.file_mapped = False
-        missing += 1
-    if missing:
+        if await update_file_state(session, issue, downloaded=False, file_path="", file_source="",
+                                   file_download_id=None, file_mapped=False):
+            missing += 1
+    if missing_issues:
         await session.commit()
+    if missing:
         log.info("Marked %d missing file(s) for %r", missing, series.title)
     return missing
 
@@ -373,7 +371,7 @@ async def scan_series_folder(session: AsyncSession, series: Series) -> None:
             series.folder_name = found
             folders = resolve_folders(root, series, extras)
     result = await scan_series_async(
-        series, list(series.issues), folders, root=root,
+        session, series, list(series.issues), folders, root=root,
         expect_content=await root_expects_content(session, series),
     )
     if result.root_unavailable:
@@ -955,7 +953,7 @@ async def _run_direct_attempt(
         if payload_dir is not None:
             await run_in_threadpool(shutil.rmtree, payload_dir, ignore_errors=True)
 
-    covered_count = _mark_imported(series, imported, dl)
+    covered_count = await _mark_imported(session, series, imported, dl)
     needs_attention = covered_count == 0
     dl.status = DownloadStatus.NEEDS_ATTENTION if needs_attention else DownloadStatus.DONE
     dl.progress = 1.0
@@ -975,7 +973,7 @@ async def _run_direct_attempt(
         _notify_kavita(values, series)
 
 
-def _mark_imported(series: Series, imported: list, download: Download | None = None) -> int:
+async def _mark_imported(session: AsyncSession, series: Series, imported: list, download: Download | None = None) -> int:
     marked: set[int] = set()
     for item in imported:
         covered = list(item.covered)
@@ -988,17 +986,15 @@ def _mark_imported(series: Series, imported: list, download: Download | None = N
                 if was_same_file:
                     marked.add(issue.id)
                 continue
-            issue.downloaded = True
-            issue.file_path = str(item.dest)
-            issue.file_mapped = False
+            state = {"downloaded": True, "file_path": str(item.dest), "file_mapped": False}
             if item.status != "duplicate":
-                issue.file_source = download.source_name if download else ""
-                issue.file_download_id = download.id if download else None
+                state.update(file_source=download.source_name if download else "",
+                             file_download_id=download.id if download else None)
             elif not was_same_file:
                 # The existing file was not written by this download.
-                issue.file_source = ""
-                issue.file_download_id = None
-            marked.add(issue.id)
+                state.update(file_source="", file_download_id=None)
+            if await update_file_state(session, issue, **state):
+                marked.add(issue.id)
     return len(marked)
 
 
@@ -1188,7 +1184,7 @@ async def _import_torrent(
         dl.error_code = _download_error_code(exc)
         await session.commit()
         return
-    covered_count = _mark_imported(series, imported, dl)
+    covered_count = await _mark_imported(session, series, imported, dl)
     dl.status = DownloadStatus.DONE if covered_count else DownloadStatus.NEEDS_ATTENTION
     dl.error = ""
     dl.error_code = ""

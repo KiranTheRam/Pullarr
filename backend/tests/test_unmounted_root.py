@@ -1,5 +1,6 @@
 """Unavailable libraries must retain ownership and never become download targets."""
 
+import asyncio
 import io
 import shutil
 import zipfile
@@ -177,6 +178,40 @@ async def test_explicit_mapping_survives_scan_and_releases_on_file_loss(session,
     await library.scan(series.id, session)
     await session.refresh(issue)
     assert issue.file_path == str(automatic) and not issue.file_mapped
+
+
+async def test_mapping_saved_while_scan_is_running_wins(session, tmp_path, monkeypatch):
+    folder = tmp_path / "Series"
+    folder.mkdir()
+    preferred = folder / "My issue.cbz"
+    preferred.write_bytes(comic_bytes())
+    (folder / "Series #001.cbz").write_bytes(comic_bytes())
+    series = Series(title="Series", folder_name="Series", root_folder=RootFolder(path=str(tmp_path)))
+    issue = Issue(number=1, display_number="1")
+    series.issues = [issue]
+    session.add(series)
+    await session.commit()
+
+    scanned, resume = asyncio.Event(), asyncio.Event()
+    run = scanner.run_library_work
+
+    async def pause_before_applying(*args, **kwargs):
+        result = await run(*args, **kwargs)
+        scanned.set()
+        await resume.wait()
+        return result
+
+    monkeypatch.setattr(scanner, "run_library_work", pause_before_applying)
+    running = asyncio.create_task(library.scan(series.id, session))
+    try:
+        await asyncio.wait_for(scanned.wait(), timeout=5)
+        async with async_sessionmaker(session.bind, expire_on_commit=False)() as other:
+            await library.map_file(series.id, FileMapIn(file_path=str(preferred), issue_id=issue.id), other)
+    finally:
+        resume.set()
+        await running
+    await session.refresh(issue)
+    assert issue.file_path == str(preferred) and issue.file_mapped
 
 
 @pytest.mark.parametrize("state", ["missing", "empty"])

@@ -16,11 +16,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ..models import Issue, Series
 from ..util import normalize_title
 from .matcher import MediaFile, find_media_files, match_files
 from .naming import series_folder
-from .work import apply_file_state, copy_issues, run_library_work
+from .work import apply_file_state, copy_issues, file_state, run_library_work, update_file_state
 
 log = logging.getLogger(__name__)
 
@@ -260,14 +262,18 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
 
 
 async def scan_series_async(
-    series: Series, issues: list[Issue], folders: list[Path],
+    session: AsyncSession, series: Series, issues: list[Issue], folders: list[Path],
     root: Path | None = None, expect_content: bool | None = None,
 ) -> ScanResult:
     """Scan detached values in a worker; update session-owned rows on its loop."""
     copies = copy_issues(issues)
     identity = Series(title=series.title, alt_titles=series.alt_titles, status=series.status)
     result = await run_library_work(scan_series, identity, copies, folders, root, expect_content)
-    apply_file_state(issues, copies)
+    for issue, copied in zip(issues, copies):
+        was_downloaded = issue.downloaded
+        if not await update_file_state(session, issue, **file_state(copied)):
+            result.matched_issues -= int(not was_downloaded and copied.downloaded)
+            result.cleared -= int(was_downloaded and not copied.downloaded)
     return result
 
 

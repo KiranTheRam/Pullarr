@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullarr.api import library_import as import_api
+from pullarr.api.library import map_file
 from pullarr.api.library_editor import _change_root, _load
 from pullarr.api.series import update_series
 from pullarr.api.library_import import _candidate_dirs, _conflicts, _identity
@@ -19,7 +20,17 @@ from pullarr.library.move import MoveError
 from pullarr.library.scanner import scan_series
 from pullarr.models import Base, Download, DownloadKind, Issue, RootFolder, Series
 from pullarr.monitoring import apply_mode, issue_wanted, resolve_initial_future
-from pullarr.schemas import ImportItemIn, LibraryImportIn, SeriesUpdateIn
+from pullarr.schemas import FileMapIn, ImportItemIn, LibraryImportIn, SeriesUpdateIn
+
+
+@pytest.fixture
+async def ownership_session(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'ownership.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        yield session
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -60,22 +71,43 @@ def test_future_mode_resolves_once_and_keeps_manual_issue_choices():
     assert [issue.monitored for issue in series.issues] == [False, True]
 
 
-def test_a_late_download_does_not_replace_a_valid_manual_mapping(tmp_path):
+async def test_a_late_download_does_not_replace_a_valid_manual_mapping(tmp_path, ownership_session):
+    session = ownership_session
     preferred = tmp_path / "My issue.cbz"
     preferred.touch()
     issue = Issue(id=1, number=1, downloaded=True, file_mapped=True, file_path=str(preferred))
     series = Series(title="Batman", issues=[issue])
+    session.add(series)
+    await session.commit()
     dest = tmp_path / "Batman #001.cbz"
     imported = [ImportedFile(dest=dest, issue=issue, volume=None, covered=[issue])]
-    assert _mark_imported(series, imported) == 0
+    assert await _mark_imported(session, series, imported) == 0
     assert issue.file_path == str(preferred) and issue.file_mapped
 
     preferred.unlink()
-    assert _mark_imported(series, imported) == 1
+    assert await _mark_imported(session, series, imported) == 1
     assert issue.file_path == str(dest) and not issue.file_mapped
 
 
-def test_provenance_tracks_import_and_clears_on_disk_replacement(tmp_path):
+async def test_mapping_saved_after_a_download_loads_the_issue_wins(tmp_path, ownership_session):
+    session = ownership_session
+    issue = Issue(number=1)
+    series = Series(title="Batman", issues=[issue])
+    session.add(series)
+    await session.commit()
+    preferred = tmp_path / "My issue.cbz"
+    preferred.touch()
+    async with async_sessionmaker(session.bind, expire_on_commit=False)() as other:
+        await map_file(series.id, FileMapIn(file_path=str(preferred), issue_id=issue.id), other)
+    imported = [ImportedFile(dest=tmp_path / "Batman #001.cbz", issue=issue, volume=None, covered=[issue])]
+    assert await _mark_imported(session, series, imported) == 0
+    await session.commit()
+    await session.refresh(issue)
+    assert issue.file_path == str(preferred) and issue.file_mapped
+
+
+async def test_provenance_tracks_import_and_clears_on_disk_replacement(tmp_path, ownership_session):
+    session = ownership_session
     folder = tmp_path / "Batman"
     folder.mkdir()
     first = folder / "Batman #001.cbz"
@@ -83,12 +115,14 @@ def test_provenance_tracks_import_and_clears_on_disk_replacement(tmp_path):
         archive.writestr("001.png", b"image")
     issue = Issue(id=1, series_id=1, number=1, display_number="1")
     series = Series(id=1, title="Batman", alt_titles="", issues=[issue])
+    session.add(series)
+    await session.commit()
     download = Download(id=7, kind=DownloadKind.DIRECT, source_name="getcomics")
-    _mark_imported(series, [ImportedFile(dest=first, issue=issue, volume=None, covered=[issue])], download)
+    await _mark_imported(session, series, [ImportedFile(dest=first, issue=issue, volume=None, covered=[issue])], download)
     assert (issue.file_source, issue.file_download_id) == ("getcomics", 7)
     later = Download(id=8, kind=DownloadKind.DIRECT, source_name="another")
-    _mark_imported(series, [ImportedFile(dest=first, issue=issue, volume=None,
-                                         covered=[issue], status="duplicate")], later)
+    await _mark_imported(session, series, [ImportedFile(dest=first, issue=issue, volume=None,
+                                                       covered=[issue], status="duplicate")], later)
     assert (issue.file_source, issue.file_download_id) == ("getcomics", 7)
     scan_series(series, [issue], [folder])
     assert issue.file_source == "getcomics"  # same file
