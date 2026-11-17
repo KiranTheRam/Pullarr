@@ -76,7 +76,7 @@ async def sync(env, content_path, save_path, files, *, files_status=200):
         qbt.get("/torrents/files", params={"hash": HASH}).respond(files_status, json=[
             {"name": name, "priority": priority} for name, priority in files
         ])
-        await tasks.sync_qbittorrent()
+        await tasks.sync_torrents("qbittorrent")
     await session.refresh(dl)
     await session.refresh(series, ["issues"])
     return {issue.number for issue in series.issues if issue.downloaded}

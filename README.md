@@ -33,8 +33,8 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
   with per-file matching. An optional **HTTP proxy setting** routes all
   GetComics traffic (searches *and* file downloads) through e.g. a VPN-side
   Privoxy.
-- **qBittorrent (optional)** — manual magnet grabs go to qBittorrent under a
-  `pullarr` category and are imported when complete.
+- **Torrent download clients (optional)** — send magnets or torrent files to
+  qBittorrent or Transmission and import completed downloads.
 - **Existing libraries** — point a series at a folder you already have: scan
   adopts files in place (never re-downloads), rename previews/applies the
   naming convention format-preservingly, cleanup finds duplicate files, and
@@ -111,7 +111,7 @@ special files and nested mounts are skipped; symlinked appdata and system/media
 paths are refused. No library or external download folder is automatically chowned.
 For an existing installation, stop Pullarr, back up appdata, and give the selected
 user access to the specific library and download folders on the host yourself.
-Use compatible ownership and group permissions for qBittorrent and shared mounts.
+Use compatible ownership and group permissions for the download client and shared mounts.
 
 PUID/PGID require root at startup; the command then runs with the chosen numeric
 IDs, no supplementary groups or Linux capabilities, and no privilege escalation.
@@ -303,10 +303,11 @@ Environment variables (all optional):
 | `PULLARR_PORT`      | `6997`  | HTTP port                            |
 | `PULLARR_DATA_DIR`  | `data`  | SQLite DB, API key, DDL staging      |
 | `PULLARR_SQLITE_WAL` | `true` | Use WAL on local database storage; see below |
-| `PULLARR_AUTH_USERNAME` | *(empty)* | Optional environment-managed HTTP Basic login username |
+| `PULLARR_AUTH_USERNAME` | *(empty)* | Optional environment-managed browser login username |
 | `PULLARR_AUTH_PASSWORD` | *(empty)* | Browser login password; set together with the username |
 | `PULLARR_ALLOW_UNAUTHENTICATED_BROWSER` | `false` | Explicitly disable first-run login for an externally authenticated deployment |
 | `PULLARR_ALLOWED_HOSTS` | `[]` | Additional exact DNS names as a JSON array (no scheme, port or wildcard) |
+| `PULLARR_BROWSER_ORIGINS` | `[]` | Public HTTP(S) origins for browser requests through proxies that rewrite Host |
 
 **Database storage and backups.** SQLite uses WAL so reads can continue while
 another connection writes, with a 30-second busy timeout for competing writers.
@@ -331,7 +332,7 @@ the database to network storage or running an older image. Rolling back this
 change leaves the existing schema and download records intact.
 
 Everything else (ComicVine key, GetComics base URL/proxy, naming template,
-qBittorrent, monitor interval) lives in the UI under Settings and is stored
+torrent download clients, monitor interval) lives in the UI under Settings and is stored
 in the DB.
 
 In the issue naming template, `{year}` uses the issue's release year and falls
@@ -362,6 +363,11 @@ bounded. Forwarded client addresses are ignored by default; configure
 `FORWARDED_ALLOW_IPS` only for a trusted reverse proxy. Clients behind that proxy
 share a limit unless trusted forwarding is configured.
 
+Each installation stores a session identifier in `<data dir>/browser_instance`
+so instances on different ports can keep separate browser sessions even when
+their proxies send the same Host. Keep this file with the config volume across
+restarts. Sign in again once after upgrading from the previous cookie format.
+
 For forgotten credentials, the sign-in page shows local recovery instructions.
 Run `docker compose exec pullarr python -m pullarr.reset_password`, or in the
 Unraid container console run `python -m pullarr.reset_password`. For a direct
@@ -370,11 +376,12 @@ directory. The interactive command displays the retained username and prompts
 for a new password without echoing it. Do not delete the login file to reset a
 password: deletion reopens first-visitor setup.
 
-Existing environment-managed logins remain supported: set both
-`PULLARR_AUTH_USERNAME` and `PULLARR_AUTH_PASSWORD`, then restart. Setting only
-one stops startup. Recover those credentials by updating the environment and
-restarting. Use HTTPS on a trusted reverse proxy when credentials cross the
-network. An externally authenticated deployment can explicitly set
+Set both `PULLARR_AUTH_USERNAME` and `PULLARR_AUTH_PASSWORD` to manage the
+browser login through your deployment. Sign in on the Pullarr login page.
+Changing either credential and restarting invalidates previous browser sessions.
+Keep `environment_login.json` in the config volume to preserve sessions across
+ordinary restarts. Setting only one credential stops startup. Use HTTPS on a
+trusted reverse proxy when credentials cross the network. An externally authenticated deployment can explicitly set
 `PULLARR_ALLOW_UNAUTHENTICATED_BROWSER=true` to skip setup when no login exists;
 anyone who reaches such an instance can obtain API access, and startup warns.
 This option does not override an existing app-managed or environment login.
@@ -385,16 +392,20 @@ browsers, reverse proxies and integrations (such as NextPanel reaching Pullarr b
 its container name) to `PULLARR_ALLOWED_HOSTS`, for example
 `'["pullarr", "comics.example.com"]'`. Names match exactly, ignoring case. An
 unknown Host gets HTTP 400 with instructions, and direct IP access stays available
-for recovery. Proxies must preserve an allowed Host or set one explicitly.
-Host validation limits DNS rebinding; it is not a login.
+for recovery. For browser access, preserve the public Host or set
+`PULLARR_BROWSER_ORIGINS` to a JSON array of the exact public origins when the
+proxy rewrites Host. For example, use `'["https://comics.example.com"]'`. Include
+the public port if it is non-default and omit trailing slashes and paths. The
+proxy's upstream Host still has to pass Host validation. API-key integrations
+can use their existing Host and do not need a browser origin.
 
 `X-Api-Key` clients and named API keys keep working without browser credentials.
-App-managed browser sessions authenticate API requests with same-origin checks
-for writes. Environment-managed Basic credentials alone do not authenticate API
-calls. API keys do not unlock the browser UI.
+Browser sessions authenticate API requests with same-origin checks for writes.
+Scripts that used HTTP Basic for browser routes can use `X-Api-Key` on
+`/api/v1` instead. API keys do not unlock the browser UI.
 
 Saved integration secrets are bound to the exact saved URL, including scheme, port
-and path, and the qBittorrent password also to the username. The Metron password
+and path, and torrent-client passwords also to the username. The Metron password
 is bound to the saved Metron username. After changing one of those, re-enter the secret before **Test** or **Save**. Torznab API keys are bound
 to their indexer's URL the same way. HTTP client request logs are suppressed, even
 at `DEBUG`, and integration errors omit URLs and response bodies so they cannot
@@ -404,8 +415,7 @@ on import; the archive's filename matching still applies.
 
 When VPN routing is required, keep the GetComics proxy configured for both
 searches and downloads. Mirror fallback uses the same proxy-aware client; proxy
-failures never trigger a direct-connection retry. qBittorrent's VPN and kill switch
-remain the responsibility of its container/network configuration.
+failures never trigger a direct-connection retry. VPN routing for torrents is configured in the download client's network.
 
 Please be a good citizen: keep the honest User-Agent and don't lower the
 rate limits — GetComics is a small site and ComicVine caps free keys at 200
@@ -426,11 +436,23 @@ such as `http://prowlarr:9696/all/api`. The default category is comics (`7030`);
 you can enter other category IDs separated by commas. Use `search`, or `book` if
 supported by your indexer. API keys are masked after saving.
 
-Enable and configure qBittorrent to search and grab torrents. Search Releases
-combines GetComics and torrent results, with source labels, size, and seeder/leecher
-counts. Both magnets and torrent-file links are supported. Completed downloads use
-the existing library importer; qBittorrent's completed paths must be accessible to
-Pullarr. Torrent data is copied on import so qBittorrent can keep seeding.
+Enable and configure qBittorrent or Transmission to search and grab torrents.
+Search Releases combines GetComics and torrent results, with source labels, size,
+and seeder/leecher counts. Both magnets and torrent-file links are supported.
+Pullarr copies completed files into the library so the download client can keep
+seeding. Mount the download directory at the same path in both services.
+
+Under **Settings → Download Client — Transmission**, enter the full RPC URL
+(for example, `http://transmission:9091/transmission/rpc`) and RPC credentials
+if required. Test the connection, then enable Transmission and save. Set a
+download directory if you want to override the daemon default. Use the path
+as seen by Transmission and Pullarr. Re-enter saved credentials when changing the
+RPC URL or username. Pullarr supports BitTorrent v1 identities. Transmission
+must also accept the torrent format.
+
+When both clients are enabled, **Client for new torrent grabs** sets where new
+downloads go. Existing queue entries stay with their original client. Keep that
+client enabled while its downloads are active, so Pullarr can import or remove them.
 
 Default torrent query templates live in Settings. Under **Torrent search options**
 on a series page, override the search title (for example, a French title) and/or

@@ -10,6 +10,7 @@ from decimal import Decimal
 from functools import lru_cache
 
 BRACKET_GROUPS = re.compile(r"\([^)]*\)|\[[^\]]*\]")
+UNMATCHED_FILENAME_PREFIX = "[Pullarr unmatched]"
 _NUMBER = r"\d+(?:\.\d+)?"
 _ISSUE = r"(?:#\s*|(?<![a-z])(?:no|issue)[ ._]{0,2})"
 _VOLUME = r"(?<![a-z0-9])v(?:ol(?:ume)?)?[ ._]{0,2}"
@@ -60,6 +61,9 @@ class FilenameCoverage:
 
 @lru_cache(maxsize=4096)
 def parse_filename(text: str) -> FilenameCoverage:
+    if text.startswith(UNMATCHED_FILENAME_PREFIX):
+        # Import had to shorten an unresolved archive's original identity.
+        return FilenameCoverage(ambiguous=True)
     untagged = BRACKET_GROUPS.sub(" ", text)
     # Underscores delimit tokens in scene filenames, including trailing numbers.
     untagged = re.sub(r"[_\s]+", " ", untagged).strip()

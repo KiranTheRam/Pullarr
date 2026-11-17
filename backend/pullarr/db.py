@@ -118,6 +118,7 @@ async def _migrate_sqlite(conn) -> None:
         "file_download_id": "INTEGER",
     })
     await _ensure_columns(conn, "downloads", {
+        "torrent_client": "VARCHAR NOT NULL DEFAULT 'qbittorrent'",
         "error_code": "VARCHAR NOT NULL DEFAULT ''",
         "attempt_count": "INTEGER NOT NULL DEFAULT 0",
         "transient_error": "BOOLEAN NOT NULL DEFAULT 0",

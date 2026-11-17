@@ -203,19 +203,20 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
     media: list[MediaFile] = []
     for folder in existing:
         media.extend(find_media_files(folder))
-    match = match_files(media, issues)
+    match = match_files(media, issues, series)
 
     owned_now: set[int] = set()
 
-    # exact issue files first — they take precedence over volume coverage
-    for mf in match.matched:
-        if mf.issue is None:
-            continue
+    # Exact issue files take precedence over volume coverage. Prefer a
+    # still-matching recorded file to preserve its ownership and provenance.
+    exact = [mf for mf in match.matched if mf.issue is not None]
+    exact.sort(key=lambda mf: mf.issue.file_path != str(mf.media.path))
+    for mf in exact:
         issue = mf.issue
+        if issue.id in owned_now:
+            continue
         path_str = str(mf.media.path)
-        if issue.id not in owned_now and (
-            not issue.downloaded or issue.file_path != path_str
-        ):
+        if not issue.downloaded or issue.file_path != path_str:
             if not issue.downloaded:
                 result.matched_issues += 1
             if issue.file_path != path_str:
@@ -261,7 +262,8 @@ async def scan_series_async(
 ) -> ScanResult:
     """Scan detached values in a worker; update session-owned rows on its loop."""
     copies = copy_issues(issues)
-    result = await run_library_work(scan_series, Series(title=series.title), copies, folders, root, expect_content)
+    identity = Series(title=series.title, alt_titles=series.alt_titles, status=series.status)
+    result = await run_library_work(scan_series, identity, copies, folders, root, expect_content)
     apply_file_state(issues, copies)
     return result
 

@@ -1,19 +1,23 @@
 import asyncio
+import errno
+import hmac
 import stat
 from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from pullarr import browser_setup, reset_password, sign_in_throttle
+from pullarr import browser_setup, main, reset_password, sign_in_throttle
 from pullarr.api import deps
 from pullarr.browser_setup import LOGIN_FILE
 from pullarr.config import config
 from pullarr.db import get_session
 from pullarr.main import api, app
 from pullarr.models import ApiKey, Base
+from pullarr.security import access_boundary
 
 
 @pytest.fixture
@@ -33,8 +37,12 @@ async def client(session, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "auth_password", SecretStr(""))
     monkeypatch.setattr(config, "allow_unauthenticated_browser", False)
     monkeypatch.setattr(config, "allowed_hosts", ["reader.example"])
+    monkeypatch.setattr(config, "browser_origins", [])
     monkeypatch.setattr(deps, "_api_key", "bootstrap")
+    monkeypatch.setattr(browser_setup, "engine", session.bind)
     monkeypatch.setattr(browser_setup, "_sign_in_throttle", sign_in_throttle.SignInThrottle())
+    monkeypatch.setattr(app.state, "environment_login", None, raising=False)
+    monkeypatch.setattr(app.state, "browser_instance", await browser_setup.prepare_browser_instance(), raising=False)
 
     async def override():
         yield session
@@ -51,6 +59,31 @@ def enable_login(monkeypatch):
     monkeypatch.setattr(config, "auth_password", SecretStr("password"))
 
 
+@pytest.mark.parametrize("environment_login", [False, True])
+async def test_startup_preserves_browser_instance_and_sessions(client, monkeypatch, tmp_path, environment_login):
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main.scheduler, "start", AsyncMock())
+    monkeypatch.setattr(main.scheduler, "shutdown", Mock())
+    if environment_login:
+        enable_login(monkeypatch)
+    else:
+        monkeypatch.setattr(config, "allow_unauthenticated_browser", True)
+
+    async with main.lifespan(app):
+        if environment_login:
+            signed_in = await client.post("/login", data={"username": "reader", "password": "password"},
+                                          headers={"Origin": "http://localhost"})
+            assert signed_in.status_code == 303
+        instance = app.state.browser_instance
+        assert instance == (tmp_path / browser_setup.INSTANCE_FILE).read_text()
+    app.state.browser_instance = "stale"
+    async with main.lifespan(app):
+        assert app.state.browser_instance == instance
+        response = await client.get("/initialize.json")
+        assert response.status_code == 200
+        assert response.json()["authMode"] == ("environment" if environment_login else "external")
+
+
 async def test_browser_bootstrap_and_independent_api_auth(client, session, monkeypatch):
     response = await client.get("/initialize.json", headers={"X-Forwarded-For": "127.0.0.1"})
     assert response.status_code == 403
@@ -60,24 +93,176 @@ async def test_browser_bootstrap_and_independent_api_auth(client, session, monke
     monkeypatch.setattr(config, "allow_unauthenticated_browser", True)
     assert (await client.get("/initialize.json")).json()["apiKey"] == "bootstrap"
     enable_login(monkeypatch)
-    for path in ("/", "/initialize.json", "/docs", "/openapi.json", "/assets/missing", "/api/v1-other"):
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    for path in ("/", "/docs", "/openapi.json", "/assets/missing", "/api/v1-other"):
         response = await client.get(path, headers={"X-Api-Key": "bootstrap", "X-Forwarded-User": "reader"})
-        assert response.status_code == 401
-        assert "bootstrap" not in response.text
-        assert response.headers["www-authenticate"].startswith("Basic ")
-    for auth in (httpx.BasicAuth("reader", "wrong"), httpx.BasicAuth("wrong", "password")):
-        assert (await client.get("/initialize.json", auth=auth)).status_code == 401
-    for value in ("Bearer bogus", "Basic !!!", "Basic Og=="):
-        assert (await client.get("/initialize.json", headers={"Authorization": value})).status_code == 401
-    response = await client.get("/initialize.json", auth=httpx.BasicAuth("reader", "password"))
-    assert response.json()["apiKey"] == "bootstrap"
-    assert response.headers["cache-control"] == "no-store"
+        assert response.status_code == 307 and response.headers["location"] == "/login"
+    assert (await client.get("/ping")).status_code == 200
+    response = await client.get("/initialize.json", auth=("reader", "password"))
+    assert response.status_code == 401
+    assert response.json()["authPath"] == "/login"
+    assert "www-authenticate" not in response.headers and "bootstrap" not in response.text
     assert (await client.get("/api/v1/settings", auth=httpx.BasicAuth("reader", "password"))).status_code == 401
     assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "wrong"})).status_code == 401
     session.add(ApiKey(name="integration", key="managed"))
     await session.commit()
     for key in ("managed", "bootstrap"):
         assert (await client.get("/api/v1/settings", headers={"X-Api-Key": key})).status_code == 200
+
+
+async def test_configured_public_origin_allows_login_through_rewriting_proxy(client, monkeypatch):
+    enable_login(monkeypatch)
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    login = {"username": "reader", "password": "password"}
+    public = "https://reader.example:8443"
+    headers = {"Host": "localhost:6997", "Origin": public, "Sec-Fetch-Site": "same-origin"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=public) as browser:
+        assert (await browser.get("/login", headers={"Host": headers["Host"]})).status_code == 200
+        assert (await browser.post("/login", data=login, headers=headers)).status_code == 403
+        monkeypatch.setattr(config, "browser_origins", [public])
+        for changes in (
+            {"Sec-Fetch-Site": "same-site"}, {"Origin": "https://reader.example"},
+            {"Origin": "http://reader.example:8443"}, {"Origin": public + "/login"},
+            {"Origin": "https://evil.example", "X-Forwarded-Host": "reader.example:8443"},
+        ):
+            denied = await browser.post("/login", data=login, headers={**headers, **changes})
+            assert denied.status_code == 403
+        denied = await browser.post("/login", data=login, headers={**headers, "Host": "evil.example"})
+        assert denied.status_code == 400
+        response = await browser.post("/login", data=login, headers=headers)
+        assert response.status_code == 303
+        assert "Secure" in response.headers["set-cookie"]
+        assert (await browser.put("/api/v1/settings", json={}, headers=headers)).status_code == 200
+        denied = await browser.put("/api/v1/settings", json={}, headers={**headers, "Origin": "https://evil.example"})
+        assert denied.status_code == 403
+        assert (await browser.post("/auth/logout", headers=headers)).status_code == 204
+
+
+async def test_environment_login_uses_form_and_revokes_sessions_on_rotation(client, tmp_path, monkeypatch):
+    enable_login(monkeypatch)
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    login = {"username": "reader", "password": "password"}
+    headers = {"Origin": "http://localhost"}
+    login_file = tmp_path / LOGIN_FILE
+    login_file.write_text(await browser_setup.encode_login("local", "local password"))
+    page = await client.get("/", follow_redirects=True)
+    assert page.url.path == "/login"
+    assert 'autocomplete="username"' in page.text and 'autocomplete="current-password"' in page.text
+    assert "PULLARR_AUTH_PASSWORD" in page.text and "pullarr.reset_password" not in page.text
+    assert (await client.get("/setup")).headers["location"] == "/"
+    assert (await client.post("/login", data=login)).status_code == 403
+    for invalid in ({"username": "local", "password": "local password"}, {**login, "password": "wrong"}):
+        assert (await client.post("/login", data=invalid, headers=headers)).status_code == 401
+    response = await client.post("/login", data=login, headers=headers)
+    assert response.status_code == 303 and response.headers["location"] == "/"
+    assert "HttpOnly" in response.headers["set-cookie"]
+    response = await client.get("/initialize.json")
+    assert response.json()["apiKey"] == "" and response.json()["authMode"] == "environment"
+    assert response.headers["cache-control"] == "no-store"
+    assert (await client.get("/api/v1/settings")).status_code == 200
+    assert (await client.put("/api/v1/settings", json={})).status_code == 403
+    assert (await client.post("/auth/password", headers=headers)).status_code == 403
+    assert (await client.post("/auth/logout")).status_code == 403
+    assert (await client.post("/auth/logout", headers=headers)).status_code == 204
+    assert (await client.get("/initialize.json")).status_code == 401
+    assert (await client.post("/login", data=login, headers=headers)).status_code == 303
+    cookie_name, cookie = next(iter(client.cookies.items()))
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    assert (await client.get("/initialize.json")).status_code == 200
+
+    monkeypatch.setattr(config, "auth_password", SecretStr("new: password"))
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    assert (await client.get("/initialize.json")).status_code == 401
+    assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "bootstrap"})).status_code == 200
+    assert (await client.post("/login", data=login, headers=headers)).status_code == 401
+    assert (await client.post("/login", data={**login, "password": "new: password"}, headers=headers)).status_code == 303
+    enable_login(monkeypatch)
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    client.cookies.clear()
+    assert (await client.get("/initialize.json", headers={"Cookie": f"{cookie_name}={cookie}"})).status_code == 401
+    assert (await client.post("/login", data=login, headers=headers)).status_code == 303
+    assert browser_setup.load_browser_login().username == "local"
+
+
+async def test_browser_sessions_on_different_ports_do_not_overwrite_each_other(client, monkeypatch):
+    enable_login(monkeypatch)
+    app.state.environment_login = await browser_setup.prepare_environment_login()
+    first, second = "http://localhost:6996", "http://localhost:7996"
+    login = {"username": "reader", "password": "password"}
+    for origin in (first, second):
+        assert (await client.post(f"{origin}/login", data=login, headers={"Origin": origin})).status_code == 303
+    assert len(client.cookies) == 2
+    assert (await client.get(f"{first}/initialize.json")).status_code == 200
+    assert (await client.get(f"{second}/initialize.json")).status_code == 200
+    assert (await client.post(f"{second}/auth/logout", headers={"Origin": second})).status_code == 204
+    assert (await client.get(f"{first}/initialize.json")).status_code == 200
+    assert (await client.get(f"{second}/initialize.json")).status_code == 401
+
+
+async def test_rewriting_proxies_keep_independent_sessions_on_the_same_hostname(client, monkeypatch, tmp_path):
+    origins = ("https://reader.example:8443", "https://reader.example:9443")
+    monkeypatch.setattr(config, "browser_origins", list(origins))
+    monkeypatch.setattr(config, "allowed_hosts", ["pullarr"])
+    enable_login(monkeypatch)
+    login = await browser_setup.prepare_environment_login()
+    browser_login = {"username": "reader", "password": "password"}
+    proxies = []
+    for i in range(len(origins)):
+        instance = FastAPI()
+        instance.middleware("http")(access_boundary)
+        instance.add_api_route("/initialize.json", lambda: {"signed_in": True})
+        monkeypatch.setattr(config, "data_dir", tmp_path / f"instance-{i}")
+        instance.state.browser_instance = await browser_setup.prepare_browser_instance()
+        # Use the same signing key on both instances to verify the cookie
+        # scope itself is signed, even if credential state is copied.
+        instance.state.environment_login = login
+        proxies.append(instance)
+
+    mounts = {origin: httpx.ASGITransport(app=proxy) for origin, proxy in zip(origins, proxies)}
+    async with httpx.AsyncClient(mounts=mounts) as browser:
+        host = {"Host": "pullarr:6997"}
+        headers = [{**host, "Origin": origin} for origin in origins]
+        cookies = []
+        for origin, request_headers in zip(origins, headers):
+            response = await browser.post(f"{origin}/login", data=browser_login, headers=request_headers)
+            assert response.status_code == 303
+            assert "Secure" in response.headers["set-cookie"]
+            cookies.append(next(iter(response.cookies.items())))
+        assert len(browser.cookies) == 2
+
+        first, second = [f"{origin}/initialize.json" for origin in origins]
+        for endpoint in (first, second):
+            assert (await browser.get(endpoint, headers=host)).status_code == 200
+
+        first_name, first_token = cookies[0]
+        second_name, _ = cookies[1]
+        copied = await browser.get(second, headers={**host, "Cookie": f"{second_name}={first_token}"})
+        assert copied.status_code == 401
+        payload = first_token.rpartition(".")[0]
+        signature = hmac.digest(login.digest, b"pullarr-browser-session:" + payload.encode(), "sha256").hex()
+        legacy = f"{payload}.{signature}"
+        old = await browser.get(second, headers={
+            **host, "Cookie": f"pullarr_session={legacy}; {second_name}={legacy}",
+        })
+        assert old.status_code == 401
+        proxies[1].state.browser_instance = await browser_setup.prepare_browser_instance()
+        assert (await browser.get(second, headers=host)).status_code == 200
+        assert (await browser.post(f"{origins[1]}/auth/logout", headers=headers[1])).status_code == 204
+        assert (await browser.get(first, headers=host)).status_code == 200
+        assert (await browser.get(second, headers=host)).status_code == 401
+        assert dict(browser.cookies) == {first_name: first_token}
+
+
+async def test_settings_api_accepts_escaped_naming_fields_and_rejects_malformed_specs(client):
+    headers = {"X-Api-Key": "bootstrap"}
+    escaped = "{{issue:03d}} {issue}"
+    response = await client.put("/api/v1/settings", json={"naming_template": escaped}, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["naming_template"] == escaped
+    for malformed in ("{{issue:03d}}", "{issue", "{series:03d} {issue}", "{issue:{year}}"):
+        response = await client.put("/api/v1/settings", json={"naming_template": malformed}, headers=headers)
+        assert response.status_code == 422
+        assert "Invalid naming template" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("host", ["localhost", "LOCALHOST:6996", "192.0.2.1:6996", "[::1]:6996", "reader.example:443"])
@@ -106,9 +291,15 @@ async def test_mount_path_cannot_bypass_browser_login(client, monkeypatch):
         assert (await mounted.get("/api/v1/")).headers["location"] == "/api/v1/setup"
         assert (await mounted.get("/api/v1/initialize.json")).status_code == 403
         enable_login(monkeypatch)
+        app.state.environment_login = await browser_setup.prepare_environment_login()
         assert (await mounted.get("/api/v1/initialize.json")).status_code == 401
-        response = await mounted.get("/api/v1/initialize.json", auth=("reader", "password"))
-        assert response.json()["apiKey"] == "bootstrap"
+        assert (await mounted.get("/api/v1/")).headers["location"] == "/api/v1/login"
+        response = await mounted.post("/api/v1/login", data={"username": "reader", "password": "password"},
+                                      headers={"Origin": "http://localhost"})
+        assert response.status_code == 303 and response.headers["location"] == "/api/v1/"
+        assert "Path=/api/v1/" in response.headers["set-cookie"]
+        response = await mounted.get("/api/v1/initialize.json")
+        assert response.json()["apiKey"] == ""
         assert response.headers["cache-control"] == "no-store"
         assert (await mounted.get("/api/v1/api/v1/settings", headers={"X-Api-Key": "bootstrap"})).status_code == 200
 
@@ -121,7 +312,8 @@ async def test_browser_setup_keeps_existing_api_and_accepts_one_login(client, tm
     assert page.headers["cache-control"] == "no-store"
     assert 'name="code"' not in page.text
     assert page.text.count('type="password" required maxlength="256"') == 2
-    assert (await client.get("/initialize.json")).status_code == 403
+    bootstrap = await client.get("/initialize.json")
+    assert bootstrap.status_code == 403 and bootstrap.json()["authPath"] == "/setup"
     assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "bootstrap"})).status_code == 200
     password = "abcdefgh"
     data = {"username": "reader", "password": password, "confirmation": password}
@@ -138,14 +330,15 @@ async def test_browser_setup_keeps_existing_api_and_accepts_one_login(client, tm
     assert escaped.status_code == 400
     assert "&lt;img" in escaped.text and "<img" not in escaped.text
     assert (await client.post("/setup", data={**data, "password": "x" * 8192}, headers=headers)).status_code == 413
+    monkeypatch.setattr(browser_setup.os, "link", Mock(side_effect=PermissionError(errno.EPERM, "hard links unavailable")))
     responses = await asyncio.gather(
         client.post("/setup", data=data, headers=headers),
         client.post("/setup", data={**data, "username": "other"}, headers=headers),
     )
-    assert any(r.status_code == 303 and r.headers["location"] == "/" for r in responses)
+    assert sorted(r.status_code for r in responses) == [303, 409]
     assert stat.S_IMODE(login_file.stat().st_mode) == 0o600
     assert password not in login_file.read_text()
-    assert client.cookies.get(browser_setup.SESSION_COOKIE)
+    assert len(client.cookies) == 1
     assert (await client.get("/api/v1/settings")).status_code == 200
     client.cookies.clear()
 
@@ -177,8 +370,21 @@ async def test_browser_setup_keeps_existing_api_and_accepts_one_login(client, tm
     assert (await client.post("/setup", data={**data, "username": "attacker"}, headers=headers)).status_code == 303
 
 
-async def test_password_change_and_logout_preserve_api_keys(client, session, monkeypatch):
-    monkeypatch.setattr(browser_setup, "engine", session.bind)
+async def test_browser_setup_storage_error_can_be_retried(client, tmp_path, monkeypatch):
+    data = {"username": "reader", "password": "abcdefgh", "confirmation": "abcdefgh"}
+    headers = {"Origin": "http://localhost"}
+    with monkeypatch.context() as patch:
+        patch.setattr(browser_setup.os, "replace", Mock(side_effect=PermissionError(errno.EACCES, "access denied")))
+        response = await client.post("/setup", data=data, headers=headers)
+    assert response.status_code == 503 and "Check that Pullarr can write" in response.text
+    assert "abcdefgh" not in response.text and "set-cookie" not in response.headers
+    assert not (tmp_path / LOGIN_FILE).exists()
+    assert not list(tmp_path.glob("tmp*"))
+    assert (await client.get("/initialize.json")).status_code == 403
+    assert (await client.post("/setup", data=data, headers=headers)).status_code == 303
+
+
+async def test_password_change_and_logout_preserve_api_keys(client):
     headers = {"Origin": "http://localhost"}
     password = "old fixture password"
     new = "new fixture password"
@@ -187,13 +393,13 @@ async def test_password_change_and_logout_preserve_api_keys(client, session, mon
     payload = {"current": password, "password": new, "confirmation": new}
     assert (await client.post("/auth/password", data=payload, headers={**headers, "X-Api-Key": "bootstrap"})).status_code == 401
     assert (await client.post("/login", data={"username": "reader", "password": password}, headers=headers)).status_code == 303
-    cookie = client.cookies.get(browser_setup.SESSION_COOKIE)
+    cookie_name, cookie = next(iter(client.cookies.items()))
     assert (await client.post("/auth/password", data=payload, headers={"Origin": "http://evil.example"})).status_code == 403
     assert (await client.post("/auth/password", data={**payload, "current": "wrong"}, headers=headers)).status_code == 400
     assert (await client.post("/auth/password", data={**payload, "confirmation": "wrong"}, headers=headers)).status_code == 400
     assert (await client.post("/auth/password", data=payload, headers=headers)).status_code == 204
-    assert client.cookies.get(browser_setup.SESSION_COOKIE) is None
-    assert (await client.get("/api/v1/settings", headers={"Cookie": f"{browser_setup.SESSION_COOKIE}={cookie}"})).status_code == 401
+    assert not client.cookies
+    assert (await client.get("/api/v1/settings", headers={"Cookie": f"{cookie_name}={cookie}"})).status_code == 401
     assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "bootstrap"})).status_code == 200
     assert (await client.post("/login", data={"username": "reader", "password": password}, headers=headers)).status_code == 401
     assert (await client.post("/login", data={"username": "reader", "password": new}, headers=headers)).status_code == 303
@@ -202,14 +408,20 @@ async def test_password_change_and_logout_preserve_api_keys(client, session, mon
     assert (await client.get("/api/v1/settings")).status_code == 401
 
 
-async def test_sign_in_throttle_checks_peer_before_password_verification(client, monkeypatch):
+@pytest.mark.parametrize("environment", [False, True])
+async def test_sign_in_throttle_checks_peer_before_password_verification(client, monkeypatch, environment):
     now = 100.0
     monkeypatch.setattr(sign_in_throttle, "monotonic", lambda: now)
     password = "fixture password"
     headers = {"Origin": "http://localhost"}
     login = {"username": "reader", "password": password}
-    assert (await client.post("/setup", data={**login, "confirmation": password}, headers=headers)).status_code == 303
-    client.cookies.clear()
+    if environment:
+        enable_login(monkeypatch)
+        monkeypatch.setattr(config, "auth_password", SecretStr(password))
+        app.state.environment_login = await browser_setup.prepare_environment_login()
+    else:
+        assert (await client.post("/setup", data={**login, "confirmation": password}, headers=headers)).status_code == 303
+        client.cookies.clear()
 
     async def failed(index):
         # Changing the username, claimed address or peer port cannot bypass the limit.
@@ -229,15 +441,14 @@ async def test_sign_in_throttle_checks_peer_before_password_verification(client,
     assert (await failed(0)).status_code == 401
 
 
-async def test_local_reset_preserves_username_and_recovers_throttled_peer(client, session, monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(browser_setup, "engine", session.bind)
+async def test_local_reset_preserves_username_and_recovers_throttled_peer(client, monkeypatch, tmp_path, capsys):
     headers = {"Origin": "http://localhost"}
     old = "old fixture password"
     new = "\U0001f680" * 128
     login = {"username": "reader", "password": old}
     assert (await client.post("/setup", data={**login, "confirmation": old}, headers=headers)).status_code == 303
     assert (await client.post("/login", data=login, headers=headers)).status_code == 303
-    cookie = client.cookies.get(browser_setup.SESSION_COOKIE)
+    cookie_name, cookie = next(iter(client.cookies.items()))
     client.cookies.clear()
     for _ in range(sign_in_throttle.ATTEMPTS):
         assert (await client.post("/login", data={**login, "username": "wrong"}, headers=headers)).status_code == 401
@@ -252,7 +463,7 @@ async def test_local_reset_preserves_username_and_recovers_throttled_peer(client
     assert stat.S_IMODE((tmp_path / LOGIN_FILE).stat().st_mode) == 0o600
     assert (await client.get("/")).headers["location"] == "/login"
     assert 'type="password" required maxlength="256"' in (await client.get("/login")).text
-    assert (await client.get("/api/v1/settings", headers={"Cookie": f"{browser_setup.SESSION_COOKIE}={cookie}"})).status_code == 401
+    assert (await client.get("/api/v1/settings", headers={"Cookie": f"{cookie_name}={cookie}"})).status_code == 401
     assert (await client.get("/api/v1/settings", headers={"X-Api-Key": "bootstrap"})).status_code == 200
     assert (await client.post("/login", data=login, headers=headers)).status_code == 401
     assert (await client.post("/login", data={**login, "password": new}, headers=headers)).status_code == 303
@@ -278,15 +489,17 @@ def test_local_reset_requires_existing_managed_login(monkeypatch, tmp_path, caps
 
 async def test_expired_tampered_and_wrong_revision_sessions_are_rejected(client, monkeypatch):
     from starlette.requests import Request
-    from pullarr.browser_setup import BrowserLogin, SESSION_COOKIE
+    from pullarr.browser_setup import BrowserLogin, session_cookie_name
 
-    login = BrowserLogin("reader", b"fixture-salt", b"fixture-digest")
-    token = login.session_token()
+    login = BrowserLogin("reader", b"fixture-digest", b"fixture-salt")
+    scope = {"type": "http", "app": app, "headers": [(b"host", b"localhost")]}
+    token = login.session_token(Request(scope))
     def request(value):
-        return Request({"type": "http", "headers": [(b"cookie", f"{SESSION_COOKIE}={value}".encode())]})
+        cookie_name = session_cookie_name(Request(scope))
+        return Request({**scope, "headers": [*scope["headers"], (b"cookie", f"{cookie_name}={value}".encode())]})
     assert login.has_session(request(token))
     assert not login.has_session(request(token + "x"))
-    assert not BrowserLogin("reader", b"new-salt", b"new-digest").has_session(request(token))
+    assert not BrowserLogin("reader", b"new-digest", b"new-salt").has_session(request(token))
     monkeypatch.setattr(browser_setup.time, "time", lambda: 10**12)
     assert not login.has_session(request(token))
 

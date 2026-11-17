@@ -5,12 +5,15 @@ import zipfile
 from contextlib import asynccontextmanager
 
 import pytest
+import respx
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullarr import settings_service
 from pullarr.api import queue
-from pullarr.download.qbittorrent import QbtError, QbtTorrent
+from pullarr.download.qbittorrent import QbtClient, QbtError, QbtTorrent
+from pullarr.download import clients
 from pullarr.jobs import tasks
 from pullarr.models import (
     Base, Download, DownloadKind, DownloadStatus, HistoryEvent, Issue, RootFolder, Series,
@@ -28,7 +31,7 @@ class FakeQbt:
         if self.missing:
             return None
         return QbtTorrent(
-            hash=torrent_hash, name="Test Series #1", progress=self.progress,
+            hash=self.api_id or torrent_hash, name="Test Series #1", progress=self.progress,
             state="uploading" if self.progress == 1 else "downloading",
             content_path=str(self.payload), category="pullarr",
             save_path=str(self.payload.parent),
@@ -36,6 +39,8 @@ class FakeQbt:
 
     async def torrent_files(self, torrent_hash):
         await self.hold("torrent_files")
+        if self.api_id:
+            assert torrent_hash == self.api_id
         if self.file_error:
             raise QbtError("qBittorrent request failed: HTTP 503")
         return self.files
@@ -46,6 +51,8 @@ class FakeQbt:
             await self.release.wait()
 
     async def delete_torrents(self, hashes, delete_files=True):
+        if self.delete_error:
+            raise QbtError("qBittorrent request failed: HTTP 503")
         # Keep the payload present so a stale sync really can import it.
         self.deleted.extend(hashes)
 
@@ -86,10 +93,11 @@ async def env(tmp_path, monkeypatch):
             yield session
 
     client = FakeQbt()
+    client.api_id = None
     client.payload, client.files = payload, [payload.name]
     client.entered, client.release = asyncio.Event(), asyncio.Event()
     client.hold_call = None
-    client.file_error, client.missing = False, False
+    client.file_error = client.delete_error = client.missing = False
     client.progress, client.deleted = 1.0, []
     imports = []
     real_import = tasks._import_torrent
@@ -100,8 +108,7 @@ async def env(tmp_path, monkeypatch):
         await real_import(session, dl, *args, **kwargs)
 
     monkeypatch.setattr(tasks, "session_scope", scope)
-    monkeypatch.setattr(tasks, "QbtClient", lambda *args: client)
-    monkeypatch.setattr(queue, "QbtClient", lambda *args: client)
+    monkeypatch.setattr(clients, "QbtClient", lambda *args: client)
     monkeypatch.setattr(tasks, "_import_torrent", record_import)
     monkeypatch.setattr(tasks.notifications, "notify_import", lambda *args: None)
     monkeypatch.setattr(tasks, "_notify_kavita", lambda *args: None)
@@ -111,7 +118,7 @@ async def env(tmp_path, monkeypatch):
 
 async def remove_during_sync(env):
     maker, client, dl_id, _, _ = env
-    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    sync = asyncio.create_task(tasks.sync_torrents("qbittorrent"))
     try:
         await asyncio.wait_for(client.entered.wait(), timeout=5)
         async with maker() as session:
@@ -135,8 +142,68 @@ async def assert_removed(env):
     assert imports == []
     assert list(library.rglob("*.cbz")) == []
     # Future sync passes must leave the removed row and payload alone.
-    await tasks.sync_qbittorrent()
+    await tasks.sync_torrents("qbittorrent")
     assert imports == []
+
+
+async def test_failed_torrent_removal_stays_visible_and_can_be_retried(env):
+    maker, client, dl_id, _, _ = env
+    client.delete_error = True
+    async with maker() as session:
+        with pytest.raises(HTTPException) as exc:
+            await queue._remove_downloads(session, [dl_id])
+        assert exc.value.status_code == 502
+        assert "still in the queue" in exc.value.detail
+        assert [item.id for item in await queue.get_queue(session)] == [dl_id]
+        assert (await session.get(Download, dl_id)).status == DownloadStatus.DOWNLOADING
+        assert not (await session.scalars(select(HistoryEvent))).all()
+    client.delete_error = False
+    async with maker() as session:
+        assert await queue._remove_downloads(session, [dl_id]) == 1
+    await assert_removed(env)
+
+
+@respx.mock
+async def test_malformed_qbt_alias_leaves_transfer_in_queue_until_valid_removal(env, monkeypatch):
+    maker, _, dl_id, _, _ = env
+    base = settings_service.DEFAULTS["qbittorrent_url"]
+    monkeypatch.setattr(clients, "QbtClient", QbtClient)
+    respx.post(f"{base}/api/v2/auth/login").respond(text="Ok.")
+    listing = respx.get(f"{base}/api/v2/torrents/info")
+    listing.respond(json=[{"hash": "all", "infohash_v1": HASH}])
+    delete = respx.post(f"{base}/api/v2/torrents/delete").respond(200)
+
+    async with maker() as session:
+        with pytest.raises(HTTPException) as exc:
+            await queue._remove_downloads(session, [dl_id])
+        assert exc.value.status_code == 502
+        assert not delete.called
+        assert (await session.get(Download, dl_id)).status == DownloadStatus.DOWNLOADING
+        assert not (await session.scalars(select(HistoryEvent))).all()
+
+        listing.respond(json=[{"hash": "d" * 40, "infohash_v1": HASH}])
+        assert await queue._remove_downloads(session, [dl_id]) == 1
+        assert delete.call_count == 1
+        assert delete.calls.last.request.content == f"hashes={'d' * 40}&deleteFiles=true".encode()
+        assert (await session.get(Download, dl_id)).status == DownloadStatus.FAILED
+
+
+async def test_batch_removes_direct_download_and_reports_disabled_torrent_client(env):
+    maker, _, dl_id, _, _ = env
+    async with maker() as session:
+        await settings_service.set_many(session, {"qbittorrent_enabled": "false"})
+        torrent = await session.get(Download, dl_id)
+        direct = Download(series_id=torrent.series_id, kind=DownloadKind.DIRECT,
+                          status=DownloadStatus.DOWNLOADING, title="Direct download")
+        session.add(direct)
+        await session.commit()
+        with pytest.raises(HTTPException) as exc:
+            await queue._remove_downloads(session, [dl_id, direct.id])
+        assert exc.value.status_code == 409
+        assert "Removed 1" in exc.value.detail and "qBittorrent is disabled" in exc.value.detail
+        assert [item.id for item in await queue.get_queue(session)] == [dl_id]
+        assert direct.error_code == "cancelled" and torrent.status == DownloadStatus.DOWNLOADING
+        assert (await session.scalars(select(HistoryEvent.event))).all() == ["removed"]
 
 
 @pytest.mark.parametrize("hold", ["get_torrent", "torrent_files"])
@@ -164,13 +231,15 @@ async def test_incomplete_torrent_progress_does_not_change_removal(env):
     await assert_removed(env)
 
 
-async def test_finished_torrent_still_claims_and_imports(env):
-    maker, _, dl_id, library, imports = env
-    await tasks.sync_qbittorrent()
+@pytest.mark.parametrize("api_id", [None, "d" * 40])
+async def test_finished_torrent_still_claims_and_imports(env, api_id):
+    maker, client, dl_id, library, imports = env
+    client.api_id = api_id
+    await tasks.sync_torrents("qbittorrent")
     assert imports == [(dl_id, DownloadStatus.IMPORTING)]
     async with maker() as session:
         dl = await session.get(Download, dl_id)
-        assert (dl.status, dl.error) == (DownloadStatus.DONE, "")
+        assert (dl.status, dl.error, dl.torrent_hash) == (DownloadStatus.DONE, "", HASH)
         issue = await session.scalar(select(Issue))
         assert issue.downloaded
         assert issue.file_path.startswith(str(library / "Test Series"))
@@ -180,7 +249,7 @@ async def test_finished_torrent_still_claims_and_imports(env):
 async def test_missing_torrent_stays_queued_without_import(env):
     maker, client, dl_id, _, imports = env
     client.missing = True
-    await tasks.sync_qbittorrent()
+    await tasks.sync_torrents("qbittorrent")
     async with maker() as session:
         assert (await session.get(Download, dl_id)).status == DownloadStatus.DOWNLOADING
     assert imports == []
@@ -216,7 +285,7 @@ async def test_removal_is_rejected_through_claim_and_completion(env, monkeypatch
             return await original(session)
 
         monkeypatch.setattr(AsyncSession, "commit", paused_commit)
-    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    sync = asyncio.create_task(tasks.sync_torrents("qbittorrent"))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         async with maker() as session:
@@ -269,7 +338,7 @@ async def test_removal_transaction_finishes_before_import_claim(env, monkeypatch
     monkeypatch.setattr(tasks, "importing_download", attempted_claim)
     removal = asyncio.create_task(remove())
     await asyncio.wait_for(entered.wait(), 5)
-    sync = asyncio.create_task(tasks.sync_qbittorrent())
+    sync = asyncio.create_task(tasks.sync_torrents("qbittorrent"))
     try:
         # Sync has finished qBittorrent calls and is trying to acquire the
         # same download's lock while the removal transaction still owns it.

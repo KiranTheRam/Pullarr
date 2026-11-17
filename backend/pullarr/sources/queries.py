@@ -2,7 +2,7 @@
 import re
 from string import Formatter
 
-from ..library.naming import _format_issue
+from ..library.naming import format_with_issue
 
 
 def validate_templates(value: str, required: bool = False) -> None:
@@ -18,7 +18,7 @@ def validate_templates(value: str, required: bool = False) -> None:
                     raise ValueError("Use only {series}, {issue}, and {year} query tokens")
                 if spec and (field != "issue" or not re.fullmatch(r'0[1-9][0-9]?d?', spec)):
                     raise ValueError("Issue padding must use a format such as {issue:03d}")
-            _format_issue(line, "1").format(series="Series", issue="1", year=2026)
+            format_with_issue(line, series="Series", issue="1", year=2026)
         except (ValueError, KeyError, IndexError) as exc:
             raise ValueError(f"Invalid query template: {exc}") from exc
 
@@ -31,7 +31,7 @@ def search_queries(series, issue, values: dict[str, str]) -> list[str]:
     number = issue.display_number or f"{issue.number:g}"
     year = issue.released_at.year if issue.released_at else (series.year or "")
     return list(dict.fromkeys(
-        _format_issue(line.strip(), number).format(series=title, issue=number, year=year).strip()
+        format_with_issue(line.strip(), series=title, issue=number, year=year).strip()
         for line in templates.splitlines() if line.strip()
     ))
 

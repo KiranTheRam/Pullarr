@@ -182,7 +182,7 @@ async def series_files(series_id: int, session: AsyncSession = Depends(get_sessi
     for folder in _folders_of(series):
         if folder.exists():
             media.extend(await run_library_work(find_media_files, folder))
-    result = match_files(media, list(series.issues))
+    result = match_files(media, list(series.issues), series)
     out: list[SeriesFileOut] = []
     for mf in result.matched:
         out.append(SeriesFileOut(

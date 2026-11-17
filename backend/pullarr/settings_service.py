@@ -1,5 +1,7 @@
 """Runtime-editable settings stored in the Settings table."""
 
+from pathlib import PurePosixPath
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,12 +31,18 @@ DEFAULTS: dict[str, str] = {
     "getcomics_service_preference": "main,pixeldrain,mediafire",
     # Where DDL files land before import; empty → <data dir>/ddl
     "ddl_directory": "",
-    # qBittorrent (optional, for manual magnet grabs)
+    # Torrent download clients (optional)
+    "torrent_download_client": "qbittorrent",
     "qbittorrent_url": "http://localhost:8080",
     "qbittorrent_username": "admin",
     "qbittorrent_password": "",
     "qbittorrent_category": "pullarr",
     "qbittorrent_enabled": "false",
+    "transmission_url": "http://localhost:9091/transmission/rpc",
+    "transmission_username": "",
+    "transmission_password": "",
+    "transmission_download_dir": "",
+    "transmission_enabled": "false",
     # Sources on/off
     "source_getcomics_enabled": "true",
     # Jobs
@@ -62,7 +70,7 @@ DEFAULTS: dict[str, str] = {
 
 SECRET_KEYS = {
     "comicvine_api_key", "metron_password", "qbittorrent_password", "webhook_secret",
-    "kavita_api_key",
+    "kavita_api_key", "transmission_password",
 }
 
 
@@ -79,7 +87,7 @@ def parse_monitor_interval(value: str) -> int:
 
 
 def validate_updates(values: dict[str, str]) -> dict[str, str]:
-    from .library.naming import issue_filename
+    from .library.naming import validate_template
 
     cleaned: dict[str, str] = {}
     for key, value in values.items():
@@ -104,9 +112,22 @@ def validate_updates(values: dict[str, str]) -> dict[str, str]:
             value = str(days)
         elif key == "naming_template":
             try:
-                issue_filename(value, "Series", 1.0, "Issue Title", 2024)
-            except Exception as exc:
+                validate_template(value)
+            except ValueError as exc:
                 raise ValueError(f"Invalid naming template: {exc}") from exc
+        elif key == "torrent_download_client":
+            from .download.clients import CLIENT_NAMES
+
+            if value not in CLIENT_NAMES:
+                raise ValueError("Choose qBittorrent or Transmission for new torrent downloads")
+        elif key == "transmission_url":
+            from .download.transmission import validate_rpc_url
+
+            value = validate_rpc_url(value)
+        elif key == "transmission_download_dir" and value:
+            path = PurePosixPath(value)
+            if not path.is_absolute() or ".." in path.parts or "\\" in value or "\x00" in value:
+                raise ValueError("Transmission download directory must be an absolute path")
         elif key == "qbittorrent_category" and not value.strip():
             raise ValueError("qBittorrent category cannot be empty")
         elif key in {"download_retry_attempts", "metron_issue_enrichment_limit"}:
@@ -144,6 +165,10 @@ async def get(session: AsyncSession, key: str) -> str:
 
 
 async def set_many(session: AsyncSession, values: dict[str, str]) -> None:
+    # Older installations can keep saving other settings until they edit
+    # their existing template, even if it fails the newer validation.
+    if "naming_template" in values and values["naming_template"] == await get(session, "naming_template"):
+        values = {key: value for key, value in values.items() if key != "naming_template"}
     cleaned = validate_updates(values)
     if any(key.startswith("kavita_") for key in cleaned):
         # "enabled needs a URL and key" spans several settings, and the page

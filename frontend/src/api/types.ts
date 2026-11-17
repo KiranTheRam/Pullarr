@@ -167,6 +167,7 @@ export interface QueueItem {
   status: string;
   title: string;
   source_name: string;
+  torrent_client?: string;
   progress: number;
   error: string;
   error_code: string;

@@ -73,3 +73,8 @@ class TestStringIssueNumbers:
 
     def test_plain_placeholder_preserved(self):
         assert issue_filename('{series} {issue}', 'Batman', '001') == 'Batman 001.cbz'
+
+    def test_escaped_braces_and_braces_inside_a_display_label_are_literal(self):
+        template = "{{issue:03d}} {issue} #{{{issue:03d}}}"
+        assert issue_filename(template, "Saga", "12.5") == "{issue03d} 12.5 #{012.5}.cbz"
+        assert issue_filename(template, "Saga", "Annual {2}") == "{issue03d} Annual {2} #{Annual {2}}.cbz"

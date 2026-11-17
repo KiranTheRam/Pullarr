@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..filename import BRACKET_GROUPS, parse_filename
 from ..models import Issue, Series
-from ..util import parse_issue_label
+from ..util import additional_editions, parse_issue_label
 from .matcher import MediaFile, find_media_files, match_files
 from .naming import filename_for_issue, volume_filename
 
@@ -57,9 +57,9 @@ def _canonical(path: str | Path) -> str:
     return str(Path(path).resolve())
 
 
-def _provable(mf: MediaFile) -> bool:
+def _provable(mf: MediaFile, series: Series) -> bool:
     """Ranges and uncertain names can never prove another archive redundant."""
-    if mf.is_dir:
+    if mf.is_dir or additional_editions(mf.editions, series, 0):
         return False
     stem = mf.path.stem
     coverage = parse_filename(stem)
@@ -84,8 +84,6 @@ def _provable(mf: MediaFile) -> bool:
 
 
 def _identity(mf: MediaFile, issues_by_number: dict[float, list[Issue]], tracked_vol: set[int]):
-    if not _provable(mf):
-        return ("unknown", str(mf.path))
     if mf.issue_number is not None and len(issues_by_number.get(mf.issue_number, [])) == 1:
         return ("issue", mf.issue_number)
     if mf.issue_number is None and mf.volume_number is not None and mf.volume_number in tracked_vol:
@@ -102,9 +100,9 @@ def _all_media(folders: list[Path]) -> list[MediaFile]:
     return list(media.values())
 
 
-def _coverage(media: list[MediaFile], issues: list[Issue]):
+def _coverage(media: list[MediaFile], issues: list[Issue], series: Series):
     coverage = {_canonical(mf.path): set() for mf in media}
-    for matched in match_files(media, issues).matched:
+    for matched in match_files(media, issues, series).matched:
         coverage[_canonical(matched.media.path)].update(i.id for i in matched.covered_issues)
     required = {key: set(value) for key, value in coverage.items()}
     for issue in issues:
@@ -131,8 +129,8 @@ def analyze(
     issues_by_number: dict[float, list[Issue]] = {}
     for issue in issues:
         issues_by_number.setdefault(issue.number, []).append(issue)
-    coverage, required = _coverage(media, issues)
-    retained = {_canonical(mf.path) for mf in media if _provable(mf)
+    coverage, required = _coverage(media, issues, series)
+    retained = {_canonical(mf.path) for mf in media if _provable(mf, series)
                 and required[_canonical(mf.path)] == coverage[_canonical(mf.path)]}
     by_identity: dict[tuple, list[MediaFile]] = {}
     for mf in media:
@@ -206,7 +204,7 @@ def apply_cleanup(
 ) -> CleanupResult:
     media = _all_media(folders)
     media_by_resolved = {_canonical(mf.path): mf for mf in media}
-    coverage, required = _coverage(media, issues)
+    coverage, required = _coverage(media, issues, series)
     delete_set = {_canonical(p) for p in delete_paths}
     result = CleanupResult()
     seen = set()
@@ -223,7 +221,7 @@ def apply_cleanup(
         if not mf.path.exists():
             continue
         survivors = {key for key, other in media_by_resolved.items()
-                     if key not in delete_set and other.path.exists() and _provable(other)
+                     if key not in delete_set and other.path.exists() and _provable(other, series)
                      and required[key] == coverage[key]}
         # Recheck the entire batch, including unreferenced known content and
         # stale downloaded flags. Ambiguous names cannot prove a surviving copy.

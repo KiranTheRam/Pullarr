@@ -31,7 +31,7 @@ async def require_api_access(
 async def require_api_key(x_api_key: str, session: AsyncSession) -> None:
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    # Bootstrap key retained for existing integrations and environment-managed UI.
+    # Bootstrap key retained for existing integrations and external browser authentication.
     if x_api_key == get_api_key():
         return
     # User-managed keys created in Settings.

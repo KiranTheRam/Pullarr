@@ -434,6 +434,7 @@ export default function SeriesDetail() {
 
   const scan = useMutation({
     mutationFn: () => api.post<ScanResult>(`/series/${seriesId}/scan`),
+    onMutate: () => setScanResult(null),
     onSuccess: (res) => {
       setScanResult(res);
       invalidate();
@@ -669,9 +670,18 @@ export default function SeriesDetail() {
             <button className="btn sm" onClick={() => setGrabNotice(null)}>Dismiss</button>
           </div>
         )}
-        {(refresh.isError || searchMissing.isError || scan.isError || toggleMonitor.isError || toggleIssue.isError || deleteSeries.isError) && (
-          <div className="error-banner" role="alert">{String((refresh.error || searchMissing.error || scan.error || toggleMonitor.error || toggleIssue.error || deleteSeries.error) as Error)}</div>
-        )}
+        {([
+          ["Refresh", refresh.error],
+          ["Search missing issues", searchMissing.error],
+          ["Scan disk", scan.error],
+          ["Change series monitoring", toggleMonitor.error],
+          ["Change issue monitoring", toggleIssue.error],
+          ["Remove series", deleteSeries.error],
+        ] as const).map(([action, error]) => error && (
+          <div className="error-banner" role="alert" key={action}>
+            <strong>{action} failed.</strong> {error.message}
+          </div>
+        ))}
         {jobs && jobs.length > 0 && jobs.map((job) => (
           <div className="activity-banner" key={job.id}>
             <span className="mini-spinner" />

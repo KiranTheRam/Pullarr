@@ -1,4 +1,3 @@
-import base64
 import json
 import logging
 import zipfile
@@ -9,7 +8,7 @@ import respx
 from fastapi import FastAPI, HTTPException
 from pydantic import SecretStr, ValidationError
 
-from pullarr import kavita, notifications, security
+from pullarr import browser_setup, kavita, notifications, security
 from pullarr.api import settings as settings_api
 from pullarr.config import AppConfig
 from pullarr.download.cbz import MAX_COMICINFO_BYTES, read_comicinfo, upsert_comicinfo
@@ -17,21 +16,17 @@ from pullarr.download.qbittorrent import QbtClient, QbtError, test_connection as
 from pullarr.download.torrent import fetch_torrent
 from pullarr.library.matcher import _comicinfo_identity
 from pullarr.metadata.comicvine import ComicVineError, ComicVineProvider
-from pullarr.schemas import KavitaTestIn, QbtTestIn, WebhookTestIn
+from pullarr.schemas import KavitaTestIn, TorrentClientTestIn, WebhookTestIn
 from pullarr.settings_service import get_all
 from pullarr.sources.torznab import MASK, TorznabIndexer, restore_keys
 
 SECRET = "SECRETKEY123"
 
 
-def basic(user: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{user}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
-
-
 @pytest.fixture
 def browser_app():
     app = FastAPI()
+    app.state.browser_instance = "test-instance"
     app.middleware("http")(security.access_boundary)
     api = FastAPI()
 
@@ -62,13 +57,6 @@ def no_login(monkeypatch):
     monkeypatch.setattr(security.config, "allowed_hosts", ["comics.example.com"])
 
 
-@pytest.fixture
-def login(monkeypatch):
-    monkeypatch.setattr(security.config, "auth_username", "reader")
-    monkeypatch.setattr(security.config, "auth_password", SecretStr("pässword"))
-    monkeypatch.setattr(security.config, "allowed_hosts", [])
-
-
 @pytest.mark.parametrize("host", [
     "127.0.0.1", "127.0.0.1:6997", "192.168.1.5:6997", "[::1]:6997", "localhost:6997",
     "LOCALHOST", "comics.example.com", "COMICS.example.com:443",
@@ -91,17 +79,20 @@ async def test_unrecognized_hosts_are_rejected(browser_app, no_login, host):
             assert "PULLARR_ALLOWED_HOSTS" in resp.json()["detail"]
 
 
-async def test_login_guards_bootstrap_but_not_the_api_key_boundary(browser_app, login):
+async def test_login_guards_bootstrap_but_not_the_api_key_boundary(browser_app, no_login, monkeypatch):
+    monkeypatch.setattr(security.config, "auth_username", "reader")
+    digest = browser_setup._environment_digest("reader", "pässword".encode())
+    browser_app.state.environment_login = browser_setup.EnvironmentLogin("reader", bytes(32), digest)
     async with client_for(browser_app) as client:
         denied = await client.get("/initialize.json")
         assert denied.status_code == 401
-        assert denied.headers["www-authenticate"].startswith("Basic")
         assert denied.headers["cache-control"] == "no-store"
-        assert (await client.get("/initialize.json", headers=basic("reader", "wrong"))).status_code == 401
-        assert (await client.get("/initialize.json", headers=basic("wrong", "pässword"))).status_code == 401
-        assert (await client.get("/initialize.json", headers={"Authorization": "Basic !!"})).status_code == 401
-        assert (await client.get("/initialize.json", headers=basic("reader", "pässword"))).status_code == 200
-        # the mounted API authenticates itself with X-Api-Key
+        assert (await client.get("/initialize.json", auth=("reader", "pässword"))).status_code == 401
+        origin = {"Origin": "http://127.0.0.1:6997"}
+        assert (await client.post("/login", data={"username": "reader", "password": "wrong"}, headers=origin)).status_code == 401
+        assert (await client.post("/login", data={"username": "reader", "password": "pässword"}, headers=origin)).status_code == 303
+        assert (await client.get("/initialize.json")).status_code == 200
+        # The mounted API enforces its own key or session requirement.
         assert (await client.get("/api/v1/thing")).status_code == 200
 
 
@@ -122,6 +113,20 @@ def test_real_app_applies_the_boundary():
 def test_invalid_security_config_stops_startup(env):
     with pytest.raises(ValidationError):
         AppConfig(_env_file=None, **env)
+
+
+@pytest.mark.parametrize("origin", [
+    "reader.example", "https://*.example", "https://reader.example/", "https://reader.example#",
+    "https://reader.example?", "https://user@reader.example", "https://reader.example:99999",
+])
+def test_browser_origins_must_be_exact(origin):
+    with pytest.raises(ValidationError, match="PULLARR_BROWSER_ORIGINS"):
+        AppConfig(browser_origins=[origin])
+
+
+def test_browser_origin_configuration_normalizes_case(monkeypatch):
+    monkeypatch.setenv("PULLARR_BROWSER_ORIGINS", '["https://Reader.Example:8443", "http://[::1]"]')
+    assert AppConfig().browser_origins == ["https://reader.example:8443", "http://[::1]"]
 
 
 def test_empty_environment_values_mean_unset(monkeypatch):
@@ -175,8 +180,8 @@ async def test_webhook_test_keeps_secret_home(session, monkeypatch):
 
 
 @pytest.mark.parametrize("body", [
-    QbtTestIn(url="https://evil.example", username="admin", password="••••••••"),
-    QbtTestIn(url="http://qbt.local", username="other", password="••••••••"),
+    TorrentClientTestIn(url="https://evil.example", username="admin", password="••••••••"),
+    TorrentClientTestIn(url="http://qbt.local", username="other", password="••••••••"),
 ])
 async def test_qbittorrent_test_refuses_changed_destination(session, monkeypatch, body):
     async def fail(*args):
@@ -358,7 +363,7 @@ def archive(path, info: bytes | str, method=zipfile.ZIP_DEFLATED):
 def test_normal_comicinfo_is_read(tmp_path):
     path = archive(tmp_path / "a.cbz", GOOD)
     assert read_comicinfo(path) == GOOD
-    assert _comicinfo_identity(path, False) == ("Batman", "7", None)
+    assert _comicinfo_identity(path, False) == ("Batman", "7", None, set())
 
 
 @pytest.mark.parametrize("info,method", [
@@ -369,7 +374,7 @@ def test_normal_comicinfo_is_read(tmp_path):
 def test_unsafe_comicinfo_is_ignored(tmp_path, info, method):
     path = archive(tmp_path / "a.cbz", info, method)
     assert read_comicinfo(path) is None
-    assert _comicinfo_identity(path, False) == ("", "", None)
+    assert _comicinfo_identity(path, False) == ("", "", None, set())
 
 
 def test_comicinfo_read_is_bounded_when_the_header_understates_size(tmp_path):

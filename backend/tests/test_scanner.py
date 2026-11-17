@@ -37,6 +37,26 @@ class TestScanSeries:
         assert sorted(p.name for p in folder.iterdir()) == [
             "Absolute Batman #001.cbz", "Absolute Batman #002.cbz"]
 
+    def test_duplicate_matches_keep_the_tracked_archive_and_its_provenance(self, tmp_path):
+        first = tmp_path / "Series #001.cbz"
+        original = tmp_path / "Series #1.cbz"
+        make_cbz(first)
+        make_cbz(original)
+        issues = tracked((1, None))
+        issue = issues[0]
+        issue.downloaded = True
+        issue.file_path = str(original)
+        issue.file_source = "getcomics"
+        issue.file_download_id = 12
+        series = Series(title="Series")
+
+        scan_series(series, issues, [tmp_path])
+        assert (issue.file_path, issue.file_source, issue.file_download_id) == (str(original), "getcomics", 12)
+
+        original.unlink()
+        scan_series(series, issues, [tmp_path])
+        assert (issue.file_path, issue.file_source, issue.file_download_id) == (str(first), "", None)
+
     def test_volume_archive_covers_its_issues(self, tmp_path):
         folder = tmp_path / "Series"
         folder.mkdir()

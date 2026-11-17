@@ -171,11 +171,11 @@ def test_rewrite_can_drop_oversized_metadata_without_decoding_it(tmp_path):
 ])
 def test_untrusted_xml_structure_is_ignored_then_safely_replaced(tmp_path, xml):
     path = comic(tmp_path / "comic.cbz", metadata=xml)
-    assert _comicinfo_identity(path, False) == ("", "", None)
+    assert _comicinfo_identity(path, False) == ("", "", None, set())
     with pytest.raises(ParseError):
         cbz.parse_comicinfo(xml)
     assert cbz.upsert_comicinfo(path, "<ComicInfo><Series>New</Series></ComicInfo>")
-    assert _comicinfo_identity(path, False) == ("New", "", None)
+    assert _comicinfo_identity(path, False) == ("New", "", None, set())
 
 
 @pytest.mark.parametrize("operation", [cbz.inject_comicinfo, cbz.upsert_comicinfo])

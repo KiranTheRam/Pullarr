@@ -17,23 +17,38 @@ test("bootstrap falls back to the status for non-JSON responses", async () => {
   await expect(initClient()).rejects.toThrow("HTTP 502");
 });
 
+test.each([[401, "/login"], [403, "/setup"]] as const)("bootstrap sends HTTP %s to %s", async (status, authPath) => {
+  const assign = vi.fn();
+  vi.stubGlobal("window", { location: { assign } });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ authPath }), { status })));
+  await expect(initClient()).resolves.toBe(false);
+  expect(assign).toHaveBeenCalledWith(authPath);
+});
 
-test("managed browser requests use the session without an integration key", async () => {
+test("bootstrap shows unrelated proxy authentication failures", async () => {
+  const assign = vi.fn();
+  vi.stubGlobal("window", { location: { assign } });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "Proxy access denied" }), { status: 401 })));
+  await expect(initClient()).rejects.toThrow("Proxy access denied");
+  expect(assign).not.toHaveBeenCalled();
+});
+
+test.each(["managed", "environment"] as const)("%s browser requests use the session without an integration key", async (mode) => {
   const fetchMock = vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "", authMode: "managed", version: "0.2.0" })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "", authMode: mode, version: "0.2.0" })))
     .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
   vi.stubGlobal("fetch", fetchMock);
   await initClient();
-  expect(browserAuthMode()).toBe("managed");
+  expect(browserAuthMode()).toBe(mode);
   await api.put("/settings", {});
   const [url, options] = fetchMock.mock.calls[1];
   expect(url).toBe("/api/v1/settings");
   expect(options.headers).toEqual({ "Content-Type": "application/json" });
 });
 
-test("environment-managed browser requests retain bootstrap API-key compatibility", async () => {
+test("externally authenticated browser requests retain bootstrap API-key compatibility", async () => {
   const fetchMock = vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "fixture", authMode: "environment", version: "0.2.0" })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ apiKey: "fixture", authMode: "external", version: "0.2.0" })))
     .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
   vi.stubGlobal("fetch", fetchMock);
   await initClient();

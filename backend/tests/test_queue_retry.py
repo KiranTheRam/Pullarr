@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullarr.api import queue
+from pullarr.download import clients
 from pullarr.jobs import tasks
 from pullarr.models import (
     Base,
@@ -110,7 +111,7 @@ async def test_retry_failed_torrent_resubmits_stored_magnet(db_session, monkeypa
     dl = await _failed_torrent(db_session)
     submitted = []
 
-    async def fake_submit(payload, values, *, keep_existing=False):
+    async def fake_submit(payload, values, *, keep_existing=False, client_name="qbittorrent"):
         submitted.append((payload, keep_existing))
         return "a" * 40
 
@@ -144,7 +145,7 @@ async def test_retry_torrent_requires_qbittorrent(db_session, monkeypatch):
 async def test_retry_torrent_reports_qbittorrent_errors(db_session, monkeypatch):
     dl = await _failed_torrent(db_session)
 
-    async def failing_submit(payload, values, *, keep_existing=False):
+    async def failing_submit(payload, values, *, keep_existing=False, client_name="qbittorrent"):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(queue.registry, "apply_settings", _fake_settings())
@@ -196,7 +197,7 @@ async def test_submit_torrent_reuses_existing_only_when_asked(
     monkeypatch, existing, keep_existing, added,
 ):
     client = FakeQbt(existing)
-    monkeypatch.setattr(tasks, "QbtClient", lambda *args: client)
+    monkeypatch.setattr(clients, "QbtClient", lambda *args: client)
 
     torrent_hash = await tasks.submit_torrent(MAGNET, QBT_VALUES, keep_existing=keep_existing)
 

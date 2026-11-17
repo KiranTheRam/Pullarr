@@ -38,6 +38,143 @@ def archive(path, number=None):
     return path
 
 
+@pytest.mark.parametrize("edition", ["(Annual)", "Director's Cut", "(FCBD)"])
+def test_numbered_special_editions_never_replace_regular_issues(tmp_path, edition):
+    special = archive(tmp_path / f"Saga #002 {edition}.cbz", number="2")
+    tracked = rows()
+    issue = tracked[2]
+    comic = series()
+    scan = scan_series(comic, tracked, [tmp_path])
+    assert [item.path for item in scan.unmatched] == [special]
+    assert not issue.downloaded
+
+    regular = archive(tmp_path / "Saga #2.cbz", number="2")
+    scan_series(comic, tracked, [tmp_path])
+    assert issue.file_path == str(regular)
+    plan = analyze(comic, tracked, [tmp_path], DEFAULT_TEMPLATE)
+    assert not plan.groups
+    assert [(item.path, item.keep) for item in plan.orphans] == [(str(special), True)]
+    assert apply_cleanup(comic, tracked, [tmp_path], [str(regular)]).skipped == 1
+    assert regular.exists() and special.exists()
+
+    # Some existing libraries may already have this edition mapped manually.
+    issue.file_path = str(special)
+    assert plan_renames(comic, tracked, DEFAULT_TEMPLATE) == []
+
+
+def test_scan_keeps_real_annual_series_and_story_title(tmp_path):
+    annual = archive(tmp_path / "Saga Annual #2.cbz")
+    comic = series()
+    comic.alt_titles = "Saga Annuals"
+    tracked = rows()
+    scan_series(comic, tracked, [tmp_path])
+    assert tracked[2].file_path == str(annual)
+
+    story = archive(tmp_path / "Saga #3 - The Annual Reckoning (Special-Empire).cbz")
+    comic.alt_titles = ""
+    scan_series(comic, tracked, [tmp_path])
+    assert tracked[3].file_path == str(story)
+
+
+@pytest.mark.parametrize("metadata", ["<Series>Saga Annual</Series>", "<Format>Annual</Format>"])
+def test_force_issue_cannot_adopt_special_edition_with_comicinfo_only(tmp_path, metadata):
+    payload = tmp_path / "Saga #2.cbz"
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("1.png", PNG)
+        zf.writestr("ComicInfo.xml", f"<ComicInfo>{metadata}<Number>2</Number></ComicInfo>")
+    comic = series()
+    tracked = rows()
+    root = tmp_path / "library"
+    root.mkdir()
+    imported = import_payload(payload, comic, tracked, root, DEFAULT_TEMPLATE, force_issue=tracked[2])
+    assert imported[0].status == "unmatched" and imported[0].covered == []
+    assert scan_series(comic, tracked, [root]).unmatched[0].path == imported[0].dest
+    assert not tracked[2].downloaded
+
+
+@pytest.mark.parametrize("stem", ["Saga Annual #1-3", "Saga Annual Vol. 1-2", "Saga #1-3 [#5]"])
+def test_rejected_range_does_not_acquire_regular_issues_after_import(tmp_path, stem):
+    source = archive(tmp_path / f"{stem}.cbz", "1")
+    comic = series()
+    tracked = rows()
+    root = tmp_path / "library"
+    root.mkdir()
+
+    [imported] = import_payload(source, comic, tracked, root, DEFAULT_TEMPLATE, force_issue=tracked[0])
+
+    assert imported.status == "unmatched" and not imported.covered
+    assert stem in imported.dest.stem
+    assert [match.path for match in scan_series(comic, tracked, [root]).unmatched] == [imported.dest]
+    assert not any(issue.downloaded for issue in tracked)
+
+
+@pytest.mark.parametrize("number, end, padding, match_after_mapping", [
+    ("#1-3", "(Annual)", 11, 4),
+    ("#2", "(Annual)", 11, 1),
+    ("#1-3", "(Annual)", 17, 0),
+    ("#2", "(Annual)", 17, 0),
+    ("#1-3", "[#5]", 17, 0),
+])
+def test_long_unmatched_archives_cannot_lose_edition_or_conflicting_span(
+    tmp_path, number, end, padding, match_after_mapping,
+):
+    comic = series()
+    comic.title = "An Example Comic Series With a Commercially Plausible Long Title"
+    stem = f"{comic.title} {number} [{('Publisher ' * padding).strip()}] {end}"
+    source = archive(tmp_path / f"{stem}.cbz", "1")
+    tracked = rows()
+    root = tmp_path / "library"
+    root.mkdir()
+
+    [imported] = import_payload(source, comic, tracked, root, DEFAULT_TEMPLATE)
+
+    assert imported.status == "unmatched"
+    if match_after_mapping:
+        assert imported.dest.name == source.name
+    else:
+        assert imported.dest.name.startswith("[Pullarr unmatched]")
+    assert [match.path for match in scan_series(comic, tracked, [root]).unmatched] == [imported.dest]
+    assert not any(issue.downloaded for issue in tracked)
+    if match_after_mapping:
+        comic.alt_titles = f"{comic.title} Annual"
+        assert scan_series(comic, tracked, [root]).matched_issues == match_after_mapping
+
+
+@pytest.mark.parametrize("stem, name, expected", [
+    ("Saga TPB #1-3", "Saga #001-003.cbz", [1., 1.5, 2., 3.]),
+    ("Saga Omnibus Vol. 1-2", "Saga Vol. 01-02.cbz", [1., 1.5, 2., 3., 4.]),
+])
+def test_collected_ranges_remain_matchable_when_issues_are_added_later(tmp_path, stem, name, expected):
+    source = archive(tmp_path / f"{stem}.cbz")
+    comic = series()
+    root = tmp_path / "library"
+    root.mkdir()
+
+    [imported] = import_payload(source, comic, [], root, DEFAULT_TEMPLATE)
+
+    assert not imported.covered and imported.dest.name == name
+    tracked = rows()
+    scan_series(comic, tracked, [root])
+    assert [issue.number for issue in tracked if issue.downloaded] == expected
+
+
+def test_cover_art_does_not_make_a_loose_comic_and_pages_pack_in_reading_order(tmp_path):
+    source = tmp_path / "Saga #2"
+    source.mkdir()
+    (source / "Cover.JPG").write_bytes(PNG)
+    assert not find_media_files(source)
+    assert not find_media_files(source, files=[source / "Cover.JPG"])
+
+    pages = ["1.png", "2.png", "10.png"]
+    for name in reversed(pages):
+        (source / name).write_bytes(PNG)
+    root = tmp_path / "library"
+    root.mkdir()
+    imported = import_payload(source, series(), rows(), root, DEFAULT_TEMPLATE)
+    with zipfile.ZipFile(imported[0].dest) as zf:
+        assert zf.namelist() == pages + ["Cover.JPG", "ComicInfo.xml"]
+
+
 @pytest.mark.parametrize("stem,expected", [
     ("Saga #1-#3", [1., 1.5, 2., 3.]),
     ("Saga Issue 1.5-Issue 3", [1.5, 2., 3.]),

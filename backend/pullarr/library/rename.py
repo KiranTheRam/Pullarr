@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..filename import parse_filename
 from ..models import Issue, Series
+from ..util import COLLECTED_EDITION, filename_edition_markers
 from .naming import filename_for_issue, range_filename, volume_filename, volume_range_filename
 
 log = logging.getLogger(__name__)
@@ -82,6 +83,11 @@ def plan_renames(
             numbers = sorted(i.number for i in batch)
             desired = range_filename(series.title, numbers[0], numbers[-1], series.year, ext=ext)
             key = (1, numbers[0], numbers[-1])
+        editions = filename_edition_markers(stem)
+        if coverage.is_range or (coverage.volume and not coverage.issue):
+            editions.discard(COLLECTED_EDITION)
+        if not editions <= filename_edition_markers(Path(desired).stem):
+            continue  # Preserve edition labels carried by the original filename.
         # rename in place, in the file's own directory
         new_path = current_path.parent / desired
         if new_path.name != current_path.name:
