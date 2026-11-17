@@ -332,8 +332,13 @@ async def reconcile_downloaded_files(session: AsyncSession, series: Series) -> i
         return 0
     # Defer mutation until the final root check, so losing a share during the
     # file checks cannot clear only part of the series.
-    missing_issues = [issue for issue in series.issues if issue.downloaded and
-                      (not issue.file_path or not Path(issue.file_path).is_file())]
+    missing_issues = []
+    for issue in series.issues:
+        if not issue.downloaded:
+            continue
+        path = Path(issue.file_path) if issue.file_path else None
+        if path is None or not (path.exists() if issue.file_mapped else path.is_file()):
+            missing_issues.append(issue)
     if await library_root_unavailable(session, series):
         return 0
     missing = 0
@@ -342,6 +347,7 @@ async def reconcile_downloaded_files(session: AsyncSession, series: Series) -> i
         issue.file_path = ""
         issue.file_source = ""
         issue.file_download_id = None
+        issue.file_mapped = False
         missing += 1
     if missing:
         await session.commit()
@@ -978,8 +984,13 @@ def _mark_imported(series: Series, imported: list, download: Download | None = N
             covered = [i for i in series.issues if i.volume == item.volume]
         for issue in covered:
             was_same_file = issue.file_path == str(item.dest)
+            if issue.file_mapped and issue.file_path and Path(issue.file_path).exists():
+                if was_same_file:
+                    marked.add(issue.id)
+                continue
             issue.downloaded = True
             issue.file_path = str(item.dest)
+            issue.file_mapped = False
             if item.status != "duplicate":
                 issue.file_source = download.source_name if download else ""
                 issue.file_download_id = download.id if download else None
@@ -1077,6 +1088,13 @@ async def sync_torrents(client_name: str) -> None:
                 if torrent is None:
                     continue
                 dl.progress = torrent.progress
+                if torrent.is_complete and not torrent.save_path:
+                    await _update_if_still_synced(
+                        session, dl, status=DownloadStatus.DOWNLOADING,
+                        error="waiting for the torrent client to report a save path",
+                        error_code="content_unavailable",
+                    )
+                    continue
                 if torrent.is_complete and torrent.content_path:
                     try:
                         files = _torrent_files(

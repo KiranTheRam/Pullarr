@@ -16,6 +16,7 @@ from pullarr.jobs import tasks
 from pullarr.library import importer, scanner
 from pullarr.library.naming import DEFAULT_TEMPLATE
 from pullarr.models import Base, Download, DownloadKind, DownloadStatus, Issue, RootFolder, Series, SeriesFolder, SeriesSourceLink
+from pullarr.schemas import FileMapIn, FileMapRangeIn
 from pullarr.sources.base import DDLSource, SourceRelease
 
 
@@ -147,6 +148,35 @@ async def settings(monkeypatch, tmp_path):
         return values
     monkeypatch.setattr(tasks.registry, "apply_settings", apply)
     return values
+
+
+@pytest.mark.parametrize("as_range", [False, True])
+async def test_explicit_mapping_survives_scan_and_releases_on_file_loss(session, tmp_path, as_range):
+    root = tmp_path / "library"
+    folder = root / "Series"
+    folder.mkdir(parents=True)
+    preferred = folder / "My issue.cbz"
+    automatic = folder / "Series #001.cbz"
+    preferred.write_bytes(comic_bytes())
+    automatic.write_bytes(comic_bytes())
+    series = Series(title="Series", folder_name="Series", root_folder=RootFolder(path=str(root)))
+    issue = Issue(number=1, display_number="1")
+    series.issues = [issue]
+    session.add(series)
+    await session.commit()
+
+    if as_range:
+        await library.map_file_range(series.id, FileMapRangeIn(file_path=str(preferred), from_number=1, to_number=1), session)
+    else:
+        await library.map_file(series.id, FileMapIn(file_path=str(preferred), issue_id=issue.id), session)
+    await library.scan(series.id, session)
+    await session.refresh(issue)
+    assert issue.file_path == str(preferred) and issue.file_mapped
+
+    preferred.unlink()
+    await library.scan(series.id, session)
+    await session.refresh(issue)
+    assert issue.file_path == str(automatic) and not issue.file_mapped
 
 
 @pytest.mark.parametrize("state", ["missing", "empty"])

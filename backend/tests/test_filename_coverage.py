@@ -38,6 +38,28 @@ def archive(path, number=None):
     return path
 
 
+@pytest.mark.parametrize("format_name,number,metadata_series,maps_volume,owned", [
+    ("Trade Paperback", "03", "Saga", False, [3]),
+    ("Comic", "03", "Saga", False, []),
+    ("Trade Paperback", "02", "Saga", False, []),
+    ("Trade Paperback", "03", "Other Series", False, []),
+    ("Trade Paperback", "03", "Saga", True, [1, 2]),
+])
+def test_numbered_volume_matches_explicit_collected_entries_only(
+    tmp_path, format_name, number, metadata_series, maps_volume, owned,
+):
+    with zipfile.ZipFile(tmp_path / "Saga Vol. 03.cbz", "w") as zf:
+        zf.writestr("001.png", PNG)
+        zf.writestr("ComicInfo.xml", f"<ComicInfo><Series>{metadata_series}</Series>"
+                    f"<Number>{number}</Number></ComicInfo>")
+    issues = [Issue(id=n, number=n, display_number=str(n), downloaded=False) for n in (1, 2, 3)]
+    issues[2].format = format_name
+    if maps_volume:
+        issues[0].volume = issues[1].volume = 3
+    scan_series(series(), issues, [tmp_path])
+    assert [issue.number for issue in issues if issue.downloaded] == owned
+
+
 @pytest.mark.parametrize("edition", ["(Annual)", "Director's Cut", "(FCBD)"])
 def test_numbered_special_editions_never_replace_regular_issues(tmp_path, edition):
     special = archive(tmp_path / f"Saga #002 {edition}.cbz", number="2")

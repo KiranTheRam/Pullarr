@@ -67,16 +67,18 @@ async def env(tmp_path, monkeypatch):
 
 async def sync(env, content_path, save_path, files, *, files_status=200):
     session, series, dl, library = env
-    with respx.mock(base_url=f"{BASE}/api/v2") as qbt:
+    with respx.mock(base_url=f"{BASE}/api/v2", assert_all_called=bool(save_path)) as qbt:
         qbt.post("/auth/login").respond(200, text="Ok.")
         qbt.get("/torrents/info", params={"hashes": HASH}).respond(json=[{
             "hash": HASH, "name": dl.title, "progress": 1.0, "state": "stalledUP",
             "category": "pullarr", "content_path": str(content_path), "save_path": str(save_path),
         }])
-        qbt.get("/torrents/files", params={"hash": HASH}).respond(files_status, json=[
+        file_list = qbt.get("/torrents/files", params={"hash": HASH}).respond(files_status, json=[
             {"name": name, "priority": priority} for name, priority in files
         ])
         await tasks.sync_torrents("qbittorrent")
+        if not save_path:
+            assert not file_list.called
     await session.refresh(dl)
     await session.refresh(series, ["issues"])
     return {issue.number for issue in series.issues if issue.downloaded}
@@ -175,6 +177,20 @@ async def test_file_list_api_failure_waits_without_walking_folder(env, tmp_path)
     assert env[2].status == DownloadStatus.DOWNLOADING
     assert "waiting for torrent file list" in env[2].error
     assert not env[3].exists()
+
+
+async def test_completed_torrent_waits_for_save_path_and_imports_after_it_returns(env, tmp_path):
+    category = tmp_path / "downloads"
+    name = "Test Series #3.cbz"
+    cbz(category / name)
+    cbz(category / "Other Series #1.cbz")
+    assert await sync(env, category, "", [(name, 1)]) == set()
+    assert env[2].status == DownloadStatus.DOWNLOADING
+    assert "save path" in env[2].error and not env[3].exists()
+
+    assert await sync(env, category, category, [(name, 1)]) == {3.0}
+    assert env[2].status == DownloadStatus.DONE
+    assert not env[2].error and not env[2].error_code
 
 
 @pytest.mark.parametrize("name", ["../outside.cbz", "/outside.cbz", r"C:\outside.cbz"])

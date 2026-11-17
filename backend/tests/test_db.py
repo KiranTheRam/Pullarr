@@ -52,13 +52,16 @@ async def test_migration_adds_display_number_and_removes_number_unique(tmp_path)
             """
         )
         await conn.exec_driver_sql(
-            "INSERT INTO issues (id, series_id, number, title) VALUES (1, 1, 1.0, 'One')"
+            "INSERT INTO issues (id, series_id, number, title, downloaded, file_path) "
+            "VALUES (1, 1, 1.0, 'One', 1, '/library/Series #1.cbz')"
         )
         await _migrate_sqlite(conn)
         cols = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(issues)")).fetchall()}
         assert "display_number" in cols
-        row = (await conn.exec_driver_sql("SELECT display_number FROM issues WHERE id = 1")).one()
-        assert row[0] == "1"
+        row = (await conn.exec_driver_sql(
+            "SELECT display_number, downloaded, file_path, file_mapped FROM issues WHERE id = 1"
+        )).one()
+        assert tuple(row) == ("1", 1, "/library/Series #1.cbz", 0)
         indexes = (await conn.exec_driver_sql("PRAGMA index_list(issues)")).fetchall()
         unique_number_indexes = []
         for index in indexes:

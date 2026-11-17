@@ -26,3 +26,4 @@ def apply_file_state(issues: list[Issue], copies: list[Issue]) -> None:
         issue.file_path = copied.file_path
         issue.file_source = copied.file_source
         issue.file_download_id = copied.file_download_id
+        issue.file_mapped = copied.file_mapped

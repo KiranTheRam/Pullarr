@@ -184,8 +184,11 @@ def _pick_issue(mf: MediaFile, candidates: list[Issue]) -> Issue | None:
 
 
 def match_files(media: list[MediaFile], issues: list[Issue], series: Series | None = None) -> MatchResult:
-    """Match each media file to a issue (by number) or, for whole-volume
-    archives, to every issue assigned to that volume."""
+    """Match single issues and collected entries, or use known bundle coverage."""
+    series_titles = set()
+    if series is not None:
+        series_titles = {normalize_title(title) for title in
+                         (series.title, *(series.alt_titles or "").splitlines()) if title}
     by_number: dict[float, list[Issue]] = {}
     by_label: dict[str, list[Issue]] = {}
     for c in issues:
@@ -203,7 +206,8 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
             unmatched.append(mf)
             continue
         editions = additional_editions(mf.editions, series, len(issues))
-        if mf.issue_range or (mf.coverage and mf.coverage.volume and not mf.coverage.issue):
+        whole_volume = bool(mf.coverage and mf.coverage.volume and not mf.coverage.issue)
+        if mf.issue_range or whole_volume:
             # A collected archive with explicit coverage can provide regular issues.
             editions.discard(COLLECTED_EDITION)
         # Display labels are identities, not numeric sort keys. ComicVine can
@@ -211,9 +215,19 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
         # exact label across all rows before considering numeric candidates,
         # while keeping a collection's first-page metadata out of span matching.
         label = ""
-        if not mf.issue_range and not mf.volume_range and not (
-            mf.coverage and mf.coverage.volume and not mf.coverage.issue
-        ):
+        if whole_volume and (volume := mf.volume_number) is not None and volume not in issues_in_volume:
+            # Some series track trades as individual entries. Require a
+            # matching ComicInfo number and an explicitly collected entry.
+            if (normalize_issue_label(mf.metadata_number) == str(volume)
+                    and (not mf.metadata_series or normalize_title(mf.metadata_series) in series_titles)):
+                collected = [i for i in by_label.get(str(volume), [])
+                             if COLLECTED_EDITION in declared_issue_editions(
+                                 i.display_number or "", i.title or "", i.format or "",
+                             ) and issue_has_editions(i, editions)]
+                if len(collected) == 1:
+                    matched.append(MatchedFile(mf, collected[0], None, collected))
+                    continue
+        elif not mf.issue_range and not mf.volume_range and not whole_volume:
             filename_label = mf.coverage.issue_label if mf.coverage else ""
             if mf.metadata_number:
                 label = normalize_issue_label(mf.metadata_number)

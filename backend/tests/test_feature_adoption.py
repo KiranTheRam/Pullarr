@@ -60,6 +60,21 @@ def test_future_mode_resolves_once_and_keeps_manual_issue_choices():
     assert [issue.monitored for issue in series.issues] == [False, True]
 
 
+def test_a_late_download_does_not_replace_a_valid_manual_mapping(tmp_path):
+    preferred = tmp_path / "My issue.cbz"
+    preferred.touch()
+    issue = Issue(id=1, number=1, downloaded=True, file_mapped=True, file_path=str(preferred))
+    series = Series(title="Batman", issues=[issue])
+    dest = tmp_path / "Batman #001.cbz"
+    imported = [ImportedFile(dest=dest, issue=issue, volume=None, covered=[issue])]
+    assert _mark_imported(series, imported) == 0
+    assert issue.file_path == str(preferred) and issue.file_mapped
+
+    preferred.unlink()
+    assert _mark_imported(series, imported) == 1
+    assert issue.file_path == str(dest) and not issue.file_mapped
+
+
 def test_provenance_tracks_import_and_clears_on_disk_replacement(tmp_path):
     folder = tmp_path / "Batman"
     folder.mkdir()

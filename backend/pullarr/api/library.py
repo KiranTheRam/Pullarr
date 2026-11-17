@@ -208,12 +208,13 @@ async def map_file(
     issue = next((i for i in series.issues if i.id == body.issue_id), None)
     if issue is None:
         raise HTTPException(404, "Issue not found")
-    if not Path(body.file_path).exists():
+    if not body.file_path or not Path(body.file_path).exists():
         raise HTTPException(400, "File not found on disk")
     issue.downloaded = True
     issue.file_path = body.file_path
     issue.file_source = ""
     issue.file_download_id = None
+    issue.file_mapped = True
     await session.commit()
 
 
@@ -227,7 +228,7 @@ async def map_file_range(
     from ..util import parse_volume_number
 
     series = await _load(session, series_id)
-    if not Path(body.file_path).exists():
+    if not body.file_path or not Path(body.file_path).exists():
         raise HTTPException(400, "File not found on disk")
     lo, hi = sorted((body.from_number, body.to_number))
     volume = parse_volume_number(Path(body.file_path).stem)
@@ -238,6 +239,8 @@ async def map_file_range(
             issue.file_path = body.file_path
             issue.file_source = ""
             issue.file_download_id = None
+            # Keep volume coverage replaceable by exact issue files.
+            issue.file_mapped = lo == hi
             if volume is not None:
                 issue.volume = volume
             mapped += 1

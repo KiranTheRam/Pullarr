@@ -205,7 +205,8 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
         media.extend(find_media_files(folder))
     match = match_files(media, issues, series)
 
-    owned_now: set[int] = set()
+    owned_now = {issue.id for issue in issues if issue.downloaded and issue.file_mapped
+                 and issue.file_path and Path(issue.file_path).exists()}
 
     # Exact issue files take precedence over volume coverage. Prefer a
     # still-matching recorded file to preserve its ownership and provenance.
@@ -222,6 +223,7 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
             if issue.file_path != path_str:
                 issue.file_source = ""
                 issue.file_download_id = None
+                issue.file_mapped = False
             issue.downloaded = True
             issue.file_path = path_str
         owned_now.add(issue.id)
@@ -244,6 +246,7 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
                 issue.file_path = path_str
                 issue.file_source = ""
                 issue.file_download_id = None
+                issue.file_mapped = False
                 result.matched_issues += int(newly_owned)
             owned_now.add(issue.id)
 
@@ -279,5 +282,6 @@ def _reconcile(issues: list[Issue], keep: set[int]) -> int:
             issue.file_path = ""
             issue.file_source = ""
             issue.file_download_id = None
+            issue.file_mapped = False
             cleared += 1
     return cleared

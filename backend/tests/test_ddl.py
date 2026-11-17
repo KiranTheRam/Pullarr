@@ -5,8 +5,18 @@ import httpx
 import pytest
 import respx
 
-from pullarr.download.ddl import DownloadCancelled, download_release, filename_from_response
+from pullarr.download.ddl import DownloadCancelled, _unique_dir, download_release, filename_from_response
 from pullarr.sources.base import DDLSource
+
+
+def test_multibyte_staging_names_fit_even_when_the_folder_is_occupied(tmp_path):
+    seed = "https://example.test/" + "龍" * 90
+    first = _unique_dir(tmp_path, seed)
+    first.mkdir()
+    (first / "download.cbz").touch()
+    second = _unique_dir(tmp_path, seed)
+    assert first != second and second.name.endswith("-2")
+    assert len(first.name.encode("utf-8")) <= 80 and len(second.name.encode("utf-8")) <= 80
 
 
 def comic_bytes():
