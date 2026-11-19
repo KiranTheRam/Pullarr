@@ -43,7 +43,8 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
   several series without moving files. Root changes can optionally move a
   series folder after collision and in-progress work checks. Pullarr recognizes
   existing PDFs by filename, such as `Series #001.pdf` or `Series #002-004.pdf`,
-  and marks the matching issues as owned. You can map unmatched PDFs by hand.
+  and marks the matching issues as owned. PDFs named for a different series
+  appear as unmatched and can be mapped by hand.
 - **Finding releases** — jump to a series or ComicVine search with Ctrl/Cmd+K,
   and browse known issue dates on the release calendar. Downloaded files show
   their recorded source when Pullarr imported them; older files have no source

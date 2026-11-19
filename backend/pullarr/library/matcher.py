@@ -7,6 +7,7 @@ available ComicInfo metadata."""
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
+import stat
 from xml.etree.ElementTree import ParseError
 
 from ..download.archive import ARCHIVE_EXTS, IMAGE_EXTS
@@ -70,6 +71,17 @@ def _name_source(path: Path, is_dir: bool) -> str:
     return path.name if is_dir else path.stem
 
 
+def pdf_file_size(path: Path) -> int | None:
+    """Return the size of a regular PDF candidate, including empty files."""
+    if path.suffix.lower() != ".pdf":
+        return None
+    try:
+        entry = path.stat()
+    except OSError:
+        return None
+    return entry.st_size if stat.S_ISREG(entry.st_mode) else None
+
+
 def find_media_files(
     content_path: Path, files: list[Path] | None = None, *,
     file_extensions: set[str] = LIBRARY_FILE_EXTS,
@@ -83,7 +95,8 @@ def find_media_files(
     media: list[MediaFile] = []
 
     if files is None and content_path.is_file():
-        if content_path.suffix.lower() in file_extensions:
+        suffix = content_path.suffix.lower()
+        if suffix in file_extensions and (suffix != ".pdf" or pdf_file_size(content_path)):
             media.append(_media_of(content_path, is_dir=False))
         return media
 
@@ -99,7 +112,8 @@ def find_media_files(
         if not p.is_file():
             continue
         if suffix in file_extensions:
-            media.append(_media_of(p, is_dir=False))
+            if suffix != ".pdf" or pdf_file_size(p):
+                media.append(_media_of(p, is_dir=False))
         elif suffix in IMAGE_EXTS and p.stem.casefold() not in SIDECAR_IMAGE_STEMS:
             image_dirs.add(p.parent)
 
@@ -189,6 +203,18 @@ def _pick_issue(mf: MediaFile, candidates: list[Issue]) -> Issue | None:
     return matched[0] if len(matched) == 1 else None
 
 
+def _pdf_title_matches(prefix: str, series_titles: set[str]) -> bool:
+    title = normalize_title(prefix)
+    # Filenames such as #001 and Issue #001 rely on their series folder.
+    if (title and title in series_titles) or title in {"issue", "no"} or not any(c.isalnum() for c in prefix):
+        return True
+    # Keep edition labels separate from identity. The matcher still requires
+    # the tracked issue to carry the corresponding edition.
+    return any(title.startswith(f"{series_title} ")
+               and declared_issue_editions("", title[len(series_title) + 1:], "")
+               for series_title in series_titles if series_title)
+
+
 def match_files(media: list[MediaFile], issues: list[Issue], series: Series | None = None) -> MatchResult:
     """Match single issues and collected entries, or use known bundle coverage."""
     series_titles = set()
@@ -209,6 +235,10 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
     unmatched: list[MediaFile] = []
     for mf in media:
         if mf.coverage and mf.coverage.ambiguous:
+            unmatched.append(mf)
+            continue
+        if (series is not None and mf.coverage and not mf.is_dir and mf.path.suffix.lower() == ".pdf"
+                and not _pdf_title_matches(mf.coverage.title_prefix, series_titles)):
             unmatched.append(mf)
             continue
         editions = additional_editions(mf.editions, series, len(issues))

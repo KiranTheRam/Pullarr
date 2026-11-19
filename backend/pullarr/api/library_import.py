@@ -10,13 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..db import get_session
-from ..download.archive import IMAGE_EXTS
+from ..download.archive import ARCHIVE_EXTS, IMAGE_EXTS
+from ..filename import BRACKET_GROUPS, parse_filename
 from ..jobs.service import create_job
 from ..jobs.tasks import refresh_series_full
-from ..library.matcher import LIBRARY_FILE_EXTS, find_media_files
+from ..library.matcher import find_media_files, pdf_file_size
 from ..library.scanner import resolve_folders
 from ..models import JobKind, RootFolder, Series
 from ..schemas import AddSeriesIn, ImportFolderOut, LibraryImportIn, LibraryImportResultOut
+from ..util import normalize_title
 from .series import create_series_record
 
 router = APIRouter(prefix="/library/import", tags=["library"])
@@ -83,9 +85,9 @@ def _candidate_dirs(root: Path, claimed: set[tuple[int, int]],
         # still containing untracked sibling series. Check each candidate
         # below instead of pruning the publisher folder here.
         try:
-            children = [p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")]
-            own_media = any(p.is_file() and p.suffix.lower() in LIBRARY_FILE_EXTS | IMAGE_EXTS
-                            for p in folder.iterdir())
+            entries = list(folder.iterdir())
+            children = [p for p in entries if p.is_dir() and not p.name.startswith(".")]
+            own_media = any(p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS and p.is_file() for p in entries)
         except OSError:
             continue
         # Issue/volume folders belong to the series above them. Otherwise,
@@ -94,9 +96,24 @@ def _candidate_dirs(root: Path, claimed: set[tuple[int, int]],
                                        child.name, re.IGNORECASE) for child in children)
         if own_media or issue_children or not children:
             add(folder)
-        else:
-            for child in sorted(children, key=lambda path: path.name.casefold()):
-                add(child)
+            continue
+        # A loose PDF can be a reading list or other publisher-level document.
+        # Require its title to support the parent grouping.
+        pdfs = [p for p in entries if pdf_file_size(p)]
+        title = normalize_title(BRACKET_GROUPS.sub(" ", folder.name))
+        if title and _identity(folder) not in ancestors and any(
+            not (coverage := parse_filename(p.stem)).ambiguous
+            and (coverage.issue or coverage.volume)
+            and normalize_title(coverage.title_prefix) == title
+            for p in pdfs
+        ):
+            add(folder)
+            continue
+        previous_count = len(out)
+        for child in sorted(children, key=lambda path: path.name.casefold()):
+            add(child)
+        if pdfs and len(out) == previous_count:
+            add(folder)
     return out
 
 

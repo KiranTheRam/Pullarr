@@ -231,6 +231,34 @@ def test_import_folder_discovery_offers_pdf_only_series(tmp_path):
     ]
 
 
+def test_import_folder_discovery_offers_numbered_pdf_with_empty_subfolder(tmp_path):
+    series = tmp_path / "Batman (2024)"
+    (series / "Extras").mkdir(parents=True)
+    comic = series / "001.pdf"
+    comic.touch()
+
+    assert _candidate_dirs(tmp_path, set(), set()) == []
+
+    comic.write_bytes(b"%PDF-1.7\n")
+    assert [item.folder_name for item in _candidate_dirs(tmp_path, set(), set())] == ["Batman (2024)"]
+
+
+@pytest.mark.parametrize("claimed_child", [False, True])
+@pytest.mark.parametrize("document", ["Reading Order.pdf", "DC.pdf"])
+def test_publisher_pdf_does_not_hide_child_series(tmp_path, claimed_child, document):
+    publisher = tmp_path / "DC"
+    folders = [publisher / "Batman", publisher / "Superman"]
+    for folder in folders:
+        folder.mkdir(parents=True)
+        (folder / f"{folder.name} #001.pdf").write_bytes(b"%PDF-1.7\n")
+    (publisher / document).write_bytes(b"%PDF-1.7\n")
+    claimed = {_identity(folders[0])} if claimed_child else set()
+    ancestors = {_identity(p) for p in folders[0].parents} if claimed_child else set()
+
+    expected = ["DC/Superman"] if claimed_child else ["DC/Batman", "DC/Superman"]
+    assert [item.folder_name for item in _candidate_dirs(tmp_path, claimed, ancestors)] == expected
+
+
 def test_import_folder_discovery_keeps_untracked_publisher_siblings(tmp_path):
     root = tmp_path / "comics"
     tracked = root / "Marvel" / "Batman"

@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Issue, Series
 from ..util import normalize_title
-from .matcher import MediaFile, find_media_files, match_files
+from .matcher import MediaFile, find_media_files, match_files, pdf_file_size
 from .naming import series_folder
 from .work import apply_file_state, copy_issues, file_state, run_library_work, update_file_state
 
@@ -278,12 +278,13 @@ async def scan_series_async(
 
 
 def _reconcile(issues: list[Issue], keep: set[int]) -> int:
-    """Clear downloaded state for issues whose recorded file is gone."""
+    """Clear downloaded state when the recorded file disappears or an adopted PDF empties."""
     cleared = 0
     for issue in issues:
         if not issue.downloaded or issue.id in keep:
             continue
-        if not issue.file_path or not Path(issue.file_path).exists():
+        path = Path(issue.file_path)
+        if not issue.file_path or not path.exists() or (not issue.file_mapped and pdf_file_size(path) == 0):
             issue.downloaded = False
             issue.file_path = ""
             issue.file_source = ""

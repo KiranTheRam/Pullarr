@@ -5,7 +5,7 @@ bounds so tracked decimal issues are included without inventing issue rows.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from functools import lru_cache
 
@@ -40,6 +40,8 @@ class FilenameCoverage:
     explicit_issue: bool = False
     ambiguous: bool = False
     issue_label: str = ""
+    # Used to check the identity of a file, independent of its issue coverage.
+    title_prefix: str = field(default="", compare=False, repr=False)
 
     @property
     def is_range(self) -> bool:
@@ -77,8 +79,10 @@ def parse_filename(text: str) -> FilenameCoverage:
     volumes = {(int(m[1]), int(m[2] or m[1])) for m in volume_matches}
     explicit = bool(issues)
     bare = _BARE.search(untagged)
+    title_end = min((m.start() for m in outside_issues + outside_volumes), default=len(untagged))
     if not issues and not volumes and bare:
         issues.add((float(bare[1]), float(bare[2] or bare[1])))
+        title_end = bare.start()
     issue = next(iter(issues), None)
     volume = next(iter(volumes), None)
     ambiguous = len(issues) > 1 or len(volumes) > 1 or len(labels) > 1
@@ -93,4 +97,4 @@ def parse_filename(text: str) -> FilenameCoverage:
         if re.match(r"\s*[-–—]\s*(?:#|(?:issue|no|v(?:ol(?:ume)?)?)[ ._]*)?\d", untagged[match.end():], re.I):
             ambiguous = True
     label = next(iter(labels)) if len(labels) == 1 else ""
-    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label)
+    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label, untagged[:title_end].strip())

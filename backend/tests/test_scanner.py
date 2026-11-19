@@ -1,5 +1,8 @@
 import zipfile
 
+import pytest
+
+from pullarr.library.matcher import find_media_files
 from pullarr.library.scanner import find_existing_folder, scan_series, series_dir
 from pullarr.models import Issue, Series
 
@@ -55,6 +58,55 @@ class TestScanSeries:
         assert [issue.downloaded for issue in issues] == [True, True, True, False]
         assert [media.path for media in result.unmatched] == [unmatched]
         assert all(path.read_bytes() == b"%PDF-1.7\n" for path in (single, collection, unmatched))
+
+    @pytest.mark.parametrize("name", ["Receipt #002.pdf", "Receipt 001-003.pdf", "Catalog Vol. 01.pdf"])
+    def test_pdf_with_unrelated_title_stays_unmatched(self, tmp_path, name):
+        path = tmp_path / name
+        path.write_bytes(b"%PDF-1.7\n")
+        issues = tracked((1, 1), (2, 1), (3, 1))
+
+        result = scan_series(Series(title="Batman"), issues, [tmp_path])
+
+        assert [media.path for media in result.unmatched] == [path]
+        assert not any(issue.downloaded for issue in issues)
+
+    @pytest.mark.parametrize("name", ["002.pdf", "Issue #002.pdf", "The Caped Crusader 001-003.pdf",
+                                     "The Caped Crusader Vol. 01.pdf", "The Caped Crusader [#002].pdf"])
+    def test_pdf_matches_alternate_or_number_only_name(self, tmp_path, name):
+        path = tmp_path / name
+        path.write_bytes(b"%PDF-1.7\n")
+        issues = tracked((1, 1), (2, 1), (3, 1))
+
+        scan_series(Series(title="Batman", alt_titles="Caped Crusader"), issues, [tmp_path])
+
+        assert issues[1].file_path == str(path)
+
+    def test_pdf_edition_suffix_still_requires_the_matching_edition(self, tmp_path):
+        path = tmp_path / "Batman Annual #002.pdf"
+        path.write_bytes(b"%PDF-1.7\n")
+        issues = tracked((2, None), (2, None))
+        issues[1].format = "Annual"
+
+        scan_series(Series(title="Batman"), issues, [tmp_path])
+
+        assert not issues[0].downloaded
+        assert issues[1].file_path == str(path)
+
+    def test_empty_pdf_is_ignored_and_clears_prior_automatic_ownership(self, tmp_path):
+        path = tmp_path / "Batman #002.PDF"
+        path.touch()
+        issues = tracked((2, None))
+        series = Series(title="Batman")
+
+        assert find_media_files(path) == []
+        assert scan_series(series, issues, [tmp_path]).matched_issues == 0
+        assert not issues[0].downloaded
+
+        path.write_bytes(b"%PDF-1.7\n")
+        assert scan_series(series, issues, [tmp_path]).matched_issues == 1
+        path.write_bytes(b"")
+        assert scan_series(series, issues, [tmp_path]).cleared == 1
+        assert not issues[0].downloaded
 
     def test_duplicate_matches_keep_the_tracked_archive_and_its_provenance(self, tmp_path):
         first = tmp_path / "Series #001.cbz"
