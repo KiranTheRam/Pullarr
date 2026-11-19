@@ -289,10 +289,14 @@ def test_import_folder_discovery_offers_numbered_pdf_with_empty_subfolder(tmp_pa
 
     comic.write_bytes(b"%PDF-1.7\n")
     assert [item.folder_name for item in _candidate_dirs(tmp_path, set(), set())] == ["Batman (2024)"]
+    (series / "Extras" / "Sketchbook.pdf").write_bytes(b"%PDF-1.7\n")
+    assert [(item.folder_name, item.file_count) for item in _candidate_dirs(tmp_path, set(), set())] == [
+        ("Batman (2024)", 2),
+    ]
 
 
 @pytest.mark.parametrize("claimed_child", [False, True])
-@pytest.mark.parametrize("document", ["Reading Order.pdf", "DC.pdf"])
+@pytest.mark.parametrize("document", ["Reading Order.pdf", "DC.pdf", "001.pdf"])
 def test_publisher_pdf_does_not_hide_child_series(tmp_path, claimed_child, document):
     publisher = tmp_path / "DC"
     folders = [publisher / "Batman", publisher / "Superman"]
