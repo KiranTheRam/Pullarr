@@ -64,6 +64,7 @@ class MatchedFile:
 class MatchResult:
     matched: list[MatchedFile]
     unmatched: list[MediaFile]
+    conflicting_pdfs: set[Path] = field(default_factory=set)
 
 
 def _name_source(path: Path, is_dir: bool) -> str:
@@ -233,6 +234,7 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
 
     matched: list[MatchedFile] = []
     unmatched: list[MediaFile] = []
+    conflicting_pdfs: set[Path] = set()
     for mf in media:
         if mf.coverage and mf.coverage.ambiguous:
             unmatched.append(mf)
@@ -240,6 +242,8 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
         if (series is not None and mf.coverage and not mf.is_dir and mf.path.suffix.lower() == ".pdf"
                 and not _pdf_title_matches(mf.coverage.title_prefix, series_titles)):
             unmatched.append(mf)
+            if mf.coverage.issue or mf.coverage.volume:
+                conflicting_pdfs.add(mf.path)
             continue
         editions = additional_editions(mf.editions, series, len(issues))
         whole_volume = bool(mf.coverage and mf.coverage.volume and not mf.coverage.issue)
@@ -310,4 +314,4 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
                                        covered_issues=[]))
         else:
             unmatched.append(mf)
-    return MatchResult(matched=matched, unmatched=unmatched)
+    return MatchResult(matched=matched, unmatched=unmatched, conflicting_pdfs=conflicting_pdfs)

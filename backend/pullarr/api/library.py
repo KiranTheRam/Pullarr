@@ -215,6 +215,7 @@ async def map_file(
     issue.file_source = ""
     issue.file_download_id = None
     issue.file_mapped = True
+    issue.file_confirmed = False
     await session.commit()
 
 
@@ -231,7 +232,8 @@ async def map_file_range(
     if not body.file_path or not Path(body.file_path).exists():
         raise HTTPException(400, "File not found on disk")
     lo, hi = sorted((body.from_number, body.to_number))
-    volume = parse_volume_number(Path(body.file_path).stem)
+    path = Path(body.file_path)
+    volume = parse_volume_number(path.stem)
     mapped = 0
     for issue in series.issues:
         if lo <= issue.number <= hi:
@@ -241,6 +243,7 @@ async def map_file_range(
             issue.file_download_id = None
             # Keep volume coverage replaceable by exact issue files.
             issue.file_mapped = lo == hi
+            issue.file_confirmed = lo != hi and path.suffix.lower() == ".pdf"
             if volume is not None:
                 issue.volume = volume
             mapped += 1

@@ -22,6 +22,27 @@ _VOLUME_TOKEN = re.compile(
     rf"{_VOLUME}(\d+)(?:\s*[-–—]\s*(?:{_VOLUME})?(\d+))?(?![a-z0-9]|\.\d)", re.I
 )
 _BARE = re.compile(rf"(?<![\w.])({_NUMBER})(?:\s*[-–—]\s*({_NUMBER}))?\s*$")
+_TITLELESS_PREFIX = re.compile(r"[\W_]*(?:(?:issue|no)[\W_]*)?", re.I)
+_YEAR_TAG = re.compile(r"(?:19|20)\d{2}")
+
+
+def _filename_title_prefix(text: str, untagged_prefix: str) -> str:
+    if not _TITLELESS_PREFIX.fullmatch(untagged_prefix):
+        return untagged_prefix
+    # When the visible prefix is number-only, the last leading text group
+    # before the issue/volume label can be the entire series title.
+    title = untagged_prefix
+    end = 0
+    for group in BRACKET_GROUPS.finditer(text):
+        if not _TITLELESS_PREFIX.fullmatch(text[end:group.start()]):
+            break
+        tag = group.group()[1:-1].strip()
+        if _ISSUE_TOKEN.fullmatch(tag) or _VOLUME_TOKEN.fullmatch(tag):
+            break
+        if not _YEAR_TAG.fullmatch(tag) and any(character.isalnum() for character in tag):
+            title = tag
+        end = group.end()
+    return title
 
 
 def normalize_issue_label(value: str) -> str:
@@ -97,4 +118,5 @@ def parse_filename(text: str) -> FilenameCoverage:
         if re.match(r"\s*[-–—]\s*(?:#|(?:issue|no|v(?:ol(?:ume)?)?)[ ._]*)?\d", untagged[match.end():], re.I):
             ambiguous = True
     label = next(iter(labels)) if len(labels) == 1 else ""
-    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label, untagged[:title_end].strip())
+    title = _filename_title_prefix(text, untagged[:title_end].strip())
+    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label, title)

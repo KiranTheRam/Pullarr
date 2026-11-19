@@ -10,7 +10,7 @@ from starlette.concurrency import run_in_threadpool
 from ..models import Issue
 
 _filesystem_lock = asyncio.Lock()
-_FILE_FIELDS = ("downloaded", "file_path", "file_source", "file_download_id", "file_mapped")
+_FILE_FIELDS = ("downloaded", "file_path", "file_source", "file_download_id", "file_mapped", "file_confirmed")
 
 
 async def run_library_work(function, *args, **kwargs):

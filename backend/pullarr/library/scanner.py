@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 class ScanResult:
     matched_issues: int = 0  # issues newly marked owned
     volume_files: int = 0  # whole-volume archives found
-    cleared: int = 0  # issues whose recorded file vanished
+    cleared: int = 0  # issues whose recorded file no longer proves ownership
     unmatched: list[MediaFile] = field(default_factory=list)
     root_unavailable: str = ""
 
@@ -199,7 +199,7 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
     result = ScanResult()
     existing = [f for f in folders if f.exists()]
     if not existing:
-        result.cleared = _reconcile(issues, keep=set())
+        result.cleared = _reconcile(issues, keep=set(), conflicting_pdfs=set())
         return result
 
     media: list[MediaFile] = []
@@ -226,6 +226,7 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
                 issue.file_source = ""
                 issue.file_download_id = None
                 issue.file_mapped = False
+                issue.file_confirmed = False
             issue.downloaded = True
             issue.file_path = path_str
         owned_now.add(issue.id)
@@ -249,11 +250,12 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
                 issue.file_source = ""
                 issue.file_download_id = None
                 issue.file_mapped = False
+                issue.file_confirmed = False
                 result.matched_issues += int(newly_owned)
             owned_now.add(issue.id)
 
     result.unmatched = match.unmatched
-    result.cleared = _reconcile(issues, keep=owned_now)
+    result.cleared = _reconcile(issues, keep=owned_now, conflicting_pdfs=match.conflicting_pdfs)
     log.info("Scanned %r across %d folder(s): +%d issues, %d volume files, "
              "%d unmatched, -%d cleared", series.title, len(existing),
              result.matched_issues, result.volume_files, result.unmatched_count,
@@ -277,18 +279,22 @@ async def scan_series_async(
     return result
 
 
-def _reconcile(issues: list[Issue], keep: set[int]) -> int:
-    """Clear downloaded state when the recorded file disappears or an adopted PDF empties."""
+def _reconcile(issues: list[Issue], keep: set[int], conflicting_pdfs: set[Path]) -> int:
+    """Clear missing files and PDF matches the scan can disprove."""
     cleared = 0
     for issue in issues:
         if not issue.downloaded or issue.id in keep:
             continue
         path = Path(issue.file_path)
-        if not issue.file_path or not path.exists() or (not issue.file_mapped and pdf_file_size(path) == 0):
+        wrong_pdf = path in conflicting_pdfs and not (issue.file_confirmed or issue.file_source or issue.file_download_id)
+        if not issue.file_path or not path.exists() or (
+            not issue.file_mapped and (wrong_pdf or pdf_file_size(path) == 0)
+        ):
             issue.downloaded = False
             issue.file_path = ""
             issue.file_source = ""
             issue.file_download_id = None
             issue.file_mapped = False
+            issue.file_confirmed = False
             cleared += 1
     return cleared

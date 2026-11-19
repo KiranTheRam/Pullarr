@@ -344,7 +344,7 @@ async def reconcile_downloaded_files(session: AsyncSession, series: Series) -> i
     missing = 0
     for issue in missing_issues:
         if await update_file_state(session, issue, downloaded=False, file_path="", file_source="",
-                                   file_download_id=None, file_mapped=False):
+                                   file_download_id=None, file_mapped=False, file_confirmed=False):
             missing += 1
     if missing_issues:
         await session.commit()
@@ -986,7 +986,7 @@ async def _mark_imported(session: AsyncSession, series: Series, imported: list, 
                 if was_same_file:
                     marked.add(issue.id)
                 continue
-            state = {"downloaded": True, "file_path": str(item.dest), "file_mapped": False}
+            state = {"downloaded": True, "file_path": str(item.dest), "file_mapped": False, "file_confirmed": False}
             if item.status != "duplicate":
                 state.update(file_source=download.source_name if download else "",
                              file_download_id=download.id if download else None)

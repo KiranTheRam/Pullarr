@@ -8,8 +8,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from pullarr import settings_service
 from pullarr.api import library_import as import_api
-from pullarr.api.library import map_file
+from pullarr.api.library import map_file, map_file_range, rename_apply, scan
 from pullarr.api.library_editor import _change_root, _load
 from pullarr.api.series import update_series
 from pullarr.api.library_import import _candidate_dirs, _conflicts, _identity
@@ -20,7 +21,7 @@ from pullarr.library.move import MoveError
 from pullarr.library.scanner import scan_series
 from pullarr.models import Base, Download, DownloadKind, Issue, RootFolder, Series
 from pullarr.monitoring import apply_mode, issue_wanted, resolve_initial_future
-from pullarr.schemas import FileMapIn, ImportItemIn, LibraryImportIn, SeriesUpdateIn
+from pullarr.schemas import FileMapIn, FileMapRangeIn, ImportItemIn, LibraryImportIn, RenameApplyIn, SeriesUpdateIn
 
 
 @pytest.fixture
@@ -135,6 +136,49 @@ async def test_provenance_tracks_import_and_clears_on_disk_replacement(tmp_path,
     scan_series(series, [issue], [folder])
     assert issue.file_path == str(second)
     assert (issue.file_source, issue.file_download_id) == ("", None)
+
+
+async def test_scan_keeps_manual_pdf_range_until_an_exact_file_arrives(tmp_path, ownership_session):
+    session = ownership_session
+    folder = tmp_path / "Batman"
+    folder.mkdir()
+    pdf = folder / "Collected Stories #001-002.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    issues = [Issue(number=n, display_number=str(n)) for n in (1, 2)]
+    series = Series(title="Batman", folder_name=folder.name, issues=issues,
+                    root_folder=RootFolder(path=str(tmp_path)))
+    session.add(series)
+    await session.commit()
+    await map_file_range(series.id, FileMapRangeIn(file_path=str(pdf), from_number=1, to_number=2), session)
+
+    assert (await scan(series.id, session)).cleared == 0
+    assert all(issue.file_path == str(pdf) and issue.downloaded for issue in issues)
+
+    exact = folder / "[Batman] #002.pdf"
+    exact.write_bytes(b"%PDF-1.7\n")
+    assert (await scan(series.id, session)).cleared == 0
+    assert [issue.file_path for issue in issues] == [str(pdf), str(exact)]
+    assert not issues[1].file_confirmed
+    assert pdf.exists()
+
+
+async def test_rescan_keeps_a_pdf_renamed_with_a_custom_template(tmp_path, ownership_session):
+    session = ownership_session
+    folder = tmp_path / "Batman"
+    folder.mkdir()
+    pdf = folder / "Batman #001.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    issue = Issue(number=1, display_number="1", title="The Case Begins")
+    series = Series(title="Batman", folder_name=folder.name, issues=[issue],
+                    root_folder=RootFolder(path=str(tmp_path)))
+    session.add(series)
+    await session.commit()
+    assert (await scan(series.id, session)).matched_issues == 1
+
+    await settings_service.set_many(session, {"naming_template": "{title} #{issue:03d}"})
+    assert [outcome.status for outcome in await rename_apply(series.id, RenameApplyIn(), session)] == ["renamed"]
+    assert (await scan(series.id, session)).cleared == 0
+    assert issue.downloaded and issue.file_path == str(folder / "The Case Begins #001.pdf")
 
 
 @pytest.mark.asyncio

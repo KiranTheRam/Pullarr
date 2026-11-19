@@ -59,7 +59,9 @@ class TestScanSeries:
         assert [media.path for media in result.unmatched] == [unmatched]
         assert all(path.read_bytes() == b"%PDF-1.7\n" for path in (single, collection, unmatched))
 
-    @pytest.mark.parametrize("name", ["Receipt #002.pdf", "Receipt 001-003.pdf", "Catalog Vol. 01.pdf"])
+    @pytest.mark.parametrize("name", ["Receipt #002.pdf", "Receipt 001-003.pdf", "Catalog Vol. 01.pdf",
+                                     "[Superman] #002.pdf", "[Superman] [#001-003].pdf",
+                                     "Issue [Superman] #002.pdf", "[300] #002.pdf"])
     def test_pdf_with_unrelated_title_stays_unmatched(self, tmp_path, name):
         path = tmp_path / name
         path.write_bytes(b"%PDF-1.7\n")
@@ -71,7 +73,9 @@ class TestScanSeries:
         assert not any(issue.downloaded for issue in issues)
 
     @pytest.mark.parametrize("name", ["002.pdf", "Issue #002.pdf", "The Caped Crusader 001-003.pdf",
-                                     "The Caped Crusader Vol. 01.pdf", "The Caped Crusader [#002].pdf"])
+                                     "The Caped Crusader Vol. 01.pdf", "The Caped Crusader [#002].pdf",
+                                     "[Batman] #002.pdf", "(2024) [The Caped Crusader] [#002].pdf",
+                                     "#002 [Release Group].pdf"])
     def test_pdf_matches_alternate_or_number_only_name(self, tmp_path, name):
         path = tmp_path / name
         path.write_bytes(b"%PDF-1.7\n")
@@ -80,6 +84,26 @@ class TestScanSeries:
         scan_series(Series(title="Batman", alt_titles="Caped Crusader"), issues, [tmp_path])
 
         assert issues[1].file_path == str(path)
+
+    @pytest.mark.parametrize("mapped", [False, True])
+    def test_rescan_reconciles_conflicting_pdf_without_overriding_manual_mapping(self, tmp_path, mapped):
+        pdf = tmp_path / "Receipt #002.pdf"
+        pdf.write_bytes(b"%PDF-1.7\n")
+        issues = tracked((2, None))
+        issue = issues[0]
+        issue.downloaded = True
+        issue.file_path = str(pdf)
+        issue.file_mapped = mapped
+        series = Series(title="Batman")
+
+        result = scan_series(series, issues, [tmp_path], root=tmp_path)
+
+        assert result.cleared == int(not mapped)
+        assert issue.downloaded == mapped
+        assert issue.file_path == (str(pdf) if mapped else "")
+        assert [media.path for media in result.unmatched] == [pdf]
+        assert pdf.read_bytes() == b"%PDF-1.7\n"
+        assert scan_series(series, issues, [tmp_path]).cleared == 0
 
     def test_pdf_edition_suffix_still_requires_the_matching_edition(self, tmp_path):
         path = tmp_path / "Batman Annual #002.pdf"
