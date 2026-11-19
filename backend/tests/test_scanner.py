@@ -37,6 +37,25 @@ class TestScanSeries:
         assert sorted(p.name for p in folder.iterdir()) == [
             "Absolute Batman #001.cbz", "Absolute Batman #002.cbz"]
 
+    def test_adopts_pdf_issues_and_ranges_without_changing_files(self, tmp_path):
+        folder = tmp_path / "Series"
+        nested = folder / "Collected"
+        nested.mkdir(parents=True)
+        single = folder / "Series #001.PDF"
+        collection = nested / "Series #002-003.pdf"
+        unmatched = folder / "Bonus Artbook.pdf"
+        for path in (single, collection, unmatched):
+            path.write_bytes(b"%PDF-1.7\n")
+        issues = tracked((1, None), (2, None), (3, None), (4, None))
+
+        result = scan_series(Series(title="Series"), issues, [folder])
+
+        assert result.matched_issues == 3
+        assert [issue.file_path for issue in issues] == [str(single), str(collection), str(collection), ""]
+        assert [issue.downloaded for issue in issues] == [True, True, True, False]
+        assert [media.path for media in result.unmatched] == [unmatched]
+        assert all(path.read_bytes() == b"%PDF-1.7\n" for path in (single, collection, unmatched))
+
     def test_duplicate_matches_keep_the_tracked_archive_and_its_provenance(self, tmp_path):
         first = tmp_path / "Series #001.cbz"
         original = tmp_path / "Series #1.cbz"

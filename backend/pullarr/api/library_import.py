@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..db import get_session
+from ..download.archive import IMAGE_EXTS
 from ..jobs.service import create_job
 from ..jobs.tasks import refresh_series_full
-from ..library.matcher import ARCHIVE_EXTS, IMAGE_EXTS, find_media_files
+from ..library.matcher import LIBRARY_FILE_EXTS, find_media_files
 from ..library.scanner import resolve_folders
 from ..models import JobKind, RootFolder, Series
 from ..schemas import AddSeriesIn, ImportFolderOut, LibraryImportIn, LibraryImportResultOut
@@ -83,7 +84,7 @@ def _candidate_dirs(root: Path, claimed: set[tuple[int, int]],
         # below instead of pruning the publisher folder here.
         try:
             children = [p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")]
-            own_media = any(p.is_file() and p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS
+            own_media = any(p.is_file() and p.suffix.lower() in LIBRARY_FILE_EXTS | IMAGE_EXTS
                             for p in folder.iterdir())
         except OSError:
             continue

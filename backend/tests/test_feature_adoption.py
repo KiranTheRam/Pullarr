@@ -219,6 +219,18 @@ def test_import_folder_discovery_distinguishes_series_and_publisher_subfolders(t
     assert names == {"Batman (2024)", "Marvel/X-Men (2025)"}
 
 
+def test_import_folder_discovery_offers_pdf_only_series(tmp_path):
+    series = tmp_path / "Batman (2024)"
+    extras = series / "Extras"
+    extras.mkdir(parents=True)
+    (series / "Batman #1.PDF").write_bytes(b"%PDF-1.7\n")
+    (extras / "Sketchbook.pdf").write_bytes(b"%PDF-1.7\n")
+
+    assert [(item.folder_name, item.file_count) for item in _candidate_dirs(tmp_path, set(), set())] == [
+        ("Batman (2024)", 2),
+    ]
+
+
 def test_import_folder_discovery_keeps_untracked_publisher_siblings(tmp_path):
     root = tmp_path / "comics"
     tracked = root / "Marvel" / "Batman"
@@ -280,7 +292,8 @@ async def test_import_batch_continues_after_stale_folder_and_starts_prior_jobs(t
 
 
 @pytest.mark.asyncio
-async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suffix", [".cbz", ".pdf"])
+async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_path, monkeypatch, suffix):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -288,9 +301,12 @@ async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_
     root_path = tmp_path / "comics"
     folder = root_path / "Batman"
     folder.mkdir(parents=True)
-    archive_path = folder / "Batman #1.cbz"
-    with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.writestr("001.png", b"image")
+    comic_path = folder / f"Batman #1{suffix}"
+    if suffix == ".cbz":
+        with zipfile.ZipFile(comic_path, "w") as archive:
+            archive.writestr("001.png", b"image")
+    else:
+        comic_path.write_bytes(b"%PDF-1.7\n")
     async with Session() as session:
         series = Series(title="Batman", alt_titles="", folder_name="Batman",
                         root_folder=RootFolder(path=str(root_path)),
@@ -322,5 +338,5 @@ async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_
         await tasks.refresh_series_full(series.id, grab_missing=True, force_scan=True)
         await session.refresh(series.issues[0])
         assert series.issues[0].downloaded
-        assert series.issues[0].file_path == str(archive_path)
+        assert series.issues[0].file_path == str(comic_path)
     await engine.dispose()

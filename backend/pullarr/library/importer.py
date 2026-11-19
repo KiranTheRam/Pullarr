@@ -15,14 +15,15 @@ from dataclasses import dataclass, field
 from collections.abc import Callable
 from pathlib import Path
 
-from ..download.cbz import build_comicinfo, upsert_comicinfo
-from ..download.archive import (ArchiveBudget, ImportValidationError, MAX_ARCHIVE_ENTRIES,
-                                MAX_CONTAINER_BYTES, MAX_EXPANDED_BYTES, MAX_MEMBER_BYTES, MAX_PACK_ARCHIVES,
+from ..download.archive import (ARCHIVE_EXTS, IMAGE_EXTS, ArchiveBudget, ImportValidationError,
+                                MAX_ARCHIVE_ENTRIES, MAX_CONTAINER_BYTES, MAX_EXPANDED_BYTES,
+                                MAX_MEMBER_BYTES, MAX_PACK_ARCHIVES,
                                 check_container_size, checked_zip_infos, copy_zip_member, expansion_limit,
                                 open_zip, validate_archive, zip_member_blocks)
+from ..download.cbz import build_comicinfo, upsert_comicinfo
 from ..models import Issue, Series
 from ..util import additional_editions, issue_has_editions, natural_key, normalize_title, strip_issue_suffix
-from .matcher import ARCHIVE_EXTS, IMAGE_EXTS, MediaFile, find_media_files, match_files
+from .matcher import MediaFile, find_media_files, match_files
 from .naming import (filename_for_issue, range_filename, series_folder, unmatched_filename,
                      volume_filename, volume_range_filename)
 from .scanner import recorded_files_expect_content, require_root_available
@@ -251,7 +252,7 @@ def import_payload(
             check_library()
             child.mkdir(exist_ok=True)
     imported: list[ImportedFile] = []
-    media_files = find_media_files(content_path, files=files)
+    media_files = find_media_files(content_path, files=files, file_extensions=ARCHIVE_EXTS)
 
     # GetComics collection downloads are often an outer ZIP containing one
     # CBR/CBZ per issue. Expand that transport container before matching; it

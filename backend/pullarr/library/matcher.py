@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from xml.etree.ElementTree import ParseError
 
+from ..download.archive import ARCHIVE_EXTS, IMAGE_EXTS
 from ..download.cbz import parse_comicinfo, read_comicinfo_bytes
 from ..filename import FilenameCoverage, normalize_issue_label, parse_filename
 from ..models import Issue, Series
@@ -23,8 +24,7 @@ from ..util import (
     parse_issue_number,
 )
 
-ARCHIVE_EXTS = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z"}
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"}
+LIBRARY_FILE_EXTS = ARCHIVE_EXTS | {".pdf"}
 SIDECAR_IMAGE_STEMS = {
     "backdrop", "background", "banner", "cover", "fanart", "folder", "logo", "poster",
     "series", "thumb", "thumbnail",
@@ -70,15 +70,20 @@ def _name_source(path: Path, is_dir: bool) -> str:
     return path.name if is_dir else path.stem
 
 
-def find_media_files(content_path: Path, files: list[Path] | None = None) -> list[MediaFile]:
-    """Archives anywhere under content_path, plus directories that directly
-    hold loose images. When files is supplied, inspect only those paths rather
-    than walking the containing folder. Non-media sidecars are ignored."""
+def find_media_files(
+    content_path: Path, files: list[Path] | None = None, *,
+    file_extensions: set[str] = LIBRARY_FILE_EXTS,
+) -> list[MediaFile]:
+    """Find comic files and directories that directly hold loose images.
+
+    Existing libraries include PDFs, which are matched by filename. Callers
+    can restrict standalone files by extension or pass an explicit file list.
+    """
     content_path = Path(content_path)
     media: list[MediaFile] = []
 
     if files is None and content_path.is_file():
-        if content_path.suffix.lower() in ARCHIVE_EXTS:
+        if content_path.suffix.lower() in file_extensions:
             media.append(_media_of(content_path, is_dir=False))
         return media
 
@@ -86,13 +91,14 @@ def find_media_files(content_path: Path, files: list[Path] | None = None) -> lis
         return media
 
     image_dirs: set[Path] = set()
+    media_extensions = file_extensions | IMAGE_EXTS
     for p in sorted(set(files) if files is not None else content_path.rglob("*")):
-        if files is not None and p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS and not p.is_file():
+        suffix = p.suffix.lower()
+        if files is not None and suffix in media_extensions and not p.is_file():
             raise FileNotFoundError(f"torrent media file not found: {p}")
         if not p.is_file():
             continue
-        suffix = p.suffix.lower()
-        if suffix in ARCHIVE_EXTS:
+        if suffix in file_extensions:
             media.append(_media_of(p, is_dir=False))
         elif suffix in IMAGE_EXTS and p.stem.casefold() not in SIDECAR_IMAGE_STEMS:
             image_dirs.add(p.parent)

@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..download.archive import ARCHIVE_EXTS
 from ..filename import BRACKET_GROUPS, parse_filename
 from ..models import Issue, Series
 from ..util import additional_editions, parse_issue_label
@@ -95,7 +96,7 @@ def _all_media(folders: list[Path]) -> list[MediaFile]:
     media: dict[str, MediaFile] = {}
     for folder in folders:
         if Path(folder).exists():
-            for mf in find_media_files(folder):
+            for mf in find_media_files(folder, file_extensions=ARCHIVE_EXTS):
                 media.setdefault(_canonical(mf.path), mf)
     return list(media.values())
 
