@@ -211,7 +211,7 @@ async def test_scan_applies_detached_worker_results_on_the_loop(monkeypatch, tmp
     session.add(series)
     await session.commit()
     loop_thread = threading.get_ident()
-    def scan(series, copies, folders, root=None, expect_content=None):
+    def scan(series, copies, folders, root=None, expect_content=None, *, naming_template):
         assert threading.get_ident() != loop_thread
         assert copies[0] is not original
         copies[0].downloaded = True

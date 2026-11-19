@@ -133,6 +133,8 @@ def apply_renames(items: list[RenameItem], issue_by_id: dict[int, Issue]) -> lis
             issue = issue_by_id.get(iid)
             if issue is not None:
                 issue.file_path = str(dst)
+                if dst.suffix.lower() == ".pdf" and not issue.file_mapped:
+                    issue.file_confirmed = True
         log.info("Renamed %s -> %s", src.name, dst.name)
         outcomes.append(RenameOutcome(item, "renamed"))
     return outcomes

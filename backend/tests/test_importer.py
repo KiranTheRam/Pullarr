@@ -100,6 +100,7 @@ class TestImportPayload:
         payload = tmp_path / "Absolute Batman (Digital)"
         payload.mkdir()
         make_cbz(payload / "Absolute Batman 002.cbz")
+        (payload / "Absolute Batman 004.pdf").write_bytes(b"%PDF-1.7\n")
         loose = payload / "Absolute Batman - Issue 3"
         loose.mkdir()
         (loose / "p01.png").write_bytes(PNG)
@@ -107,6 +108,7 @@ class TestImportPayload:
 
         imported = run_import(payload, series, issues, tmp_path / "lib")
 
+        assert len(imported) == 2
         by_issue = {r.issue.number: r.dest for r in imported if r.issue is not None}
         assert set(by_issue) == {2.0, 3.0}
         with zipfile.ZipFile(by_issue[3.0]) as zf:

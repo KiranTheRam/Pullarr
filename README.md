@@ -41,7 +41,10 @@ stack. It is mangarr's western-comics sibling and shares its architecture.
   unmatched TPB archives can be mapped to issue ranges by hand. The import page
   discovers untracked folders, lets you confirm ComicVine matches, and adds
   several series without moving files. Root changes can optionally move a
-  series folder after collision and in-progress work checks.
+  series folder after collision and in-progress work checks. Pullarr recognizes
+  existing PDFs by filename, such as `Series #001.pdf` or `Series #002-004.pdf`,
+  and marks the matching issues as owned. PDFs named for a different series
+  appear as unmatched and can be mapped by hand.
 - **Finding releases** — jump to a series or ComicVine search with Ctrl/Cmd+K,
   and browse known issue dates on the release calendar. Downloaded files show
   their recorded source when Pullarr imported them; older files have no source

@@ -8,8 +8,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from pullarr import settings_service
 from pullarr.api import library_import as import_api
-from pullarr.api.library import map_file
+from pullarr.api.library import map_file, map_file_range, rename_apply, scan
 from pullarr.api.library_editor import _change_root, _load
 from pullarr.api.series import update_series
 from pullarr.api.library_import import _candidate_dirs, _conflicts, _identity
@@ -20,7 +21,7 @@ from pullarr.library.move import MoveError
 from pullarr.library.scanner import scan_series
 from pullarr.models import Base, Download, DownloadKind, Issue, RootFolder, Series
 from pullarr.monitoring import apply_mode, issue_wanted, resolve_initial_future
-from pullarr.schemas import FileMapIn, ImportItemIn, LibraryImportIn, SeriesUpdateIn
+from pullarr.schemas import FileMapIn, FileMapRangeIn, ImportItemIn, LibraryImportIn, RenameApplyIn, SeriesUpdateIn
 
 
 @pytest.fixture
@@ -137,6 +138,53 @@ async def test_provenance_tracks_import_and_clears_on_disk_replacement(tmp_path,
     assert (issue.file_source, issue.file_download_id) == ("", None)
 
 
+async def test_scan_keeps_manual_pdf_range_until_an_exact_file_arrives(tmp_path, ownership_session):
+    session = ownership_session
+    folder = tmp_path / "Batman"
+    folder.mkdir()
+    pdf = folder / "Collected Stories #001-002.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    issues = [Issue(number=n, display_number=str(n)) for n in (1, 2)]
+    series = Series(title="Batman", folder_name=folder.name, issues=issues,
+                    root_folder=RootFolder(path=str(tmp_path)))
+    session.add(series)
+    await session.commit()
+    await map_file_range(series.id, FileMapRangeIn(file_path=str(pdf), from_number=1, to_number=2), session)
+
+    assert (await scan(series.id, session)).cleared == 0
+    assert all(issue.file_path == str(pdf) and issue.downloaded for issue in issues)
+
+    exact = folder / "[Batman] #002.pdf"
+    exact.write_bytes(b"%PDF-1.7\n")
+    assert (await scan(series.id, session)).cleared == 0
+    assert [issue.file_path for issue in issues] == [str(pdf), str(exact)]
+    assert not issues[1].file_confirmed
+    assert pdf.exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_rescan_keeps_a_pdf_renamed_with_a_custom_template(tmp_path, ownership_session, legacy):
+    session = ownership_session
+    folder = tmp_path / "Batman"
+    folder.mkdir()
+    pdf = folder / "Batman #001.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    issue = Issue(number=1, display_number="1", title="The Case Begins")
+    series = Series(title="Batman", folder_name=folder.name, issues=[issue],
+                    root_folder=RootFolder(path=str(tmp_path)))
+    session.add(series)
+    await session.commit()
+    assert (await scan(series.id, session)).matched_issues == 1
+
+    await settings_service.set_many(session, {"naming_template": "{title} #{issue:03d}"})
+    assert [outcome.status for outcome in await rename_apply(series.id, RenameApplyIn(), session)] == ["renamed"]
+    if legacy:
+        issue.file_confirmed = False
+        await session.commit()
+    assert (await scan(series.id, session)).cleared == 0
+    assert issue.downloaded and issue.file_path == str(folder / "The Case Begins #001.pdf")
+
+
 @pytest.mark.asyncio
 async def test_root_move_repoints_issue_and_keeps_external_extra_folder(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
@@ -219,6 +267,50 @@ def test_import_folder_discovery_distinguishes_series_and_publisher_subfolders(t
     assert names == {"Batman (2024)", "Marvel/X-Men (2025)"}
 
 
+def test_import_folder_discovery_offers_pdf_only_series(tmp_path):
+    series = tmp_path / "Batman (2024)"
+    extras = series / "Extras"
+    extras.mkdir(parents=True)
+    (series / "Batman #1.PDF").write_bytes(b"%PDF-1.7\n")
+    (extras / "Sketchbook.pdf").write_bytes(b"%PDF-1.7\n")
+
+    assert [(item.folder_name, item.file_count) for item in _candidate_dirs(tmp_path, set(), set())] == [
+        ("Batman (2024)", 2),
+    ]
+
+
+def test_import_folder_discovery_offers_numbered_pdf_with_empty_subfolder(tmp_path):
+    series = tmp_path / "Batman (2024)"
+    (series / "Extras").mkdir(parents=True)
+    comic = series / "001.pdf"
+    comic.touch()
+
+    assert _candidate_dirs(tmp_path, set(), set()) == []
+
+    comic.write_bytes(b"%PDF-1.7\n")
+    assert [item.folder_name for item in _candidate_dirs(tmp_path, set(), set())] == ["Batman (2024)"]
+    (series / "Extras" / "Sketchbook.pdf").write_bytes(b"%PDF-1.7\n")
+    assert [(item.folder_name, item.file_count) for item in _candidate_dirs(tmp_path, set(), set())] == [
+        ("Batman (2024)", 2),
+    ]
+
+
+@pytest.mark.parametrize("claimed_child", [False, True])
+@pytest.mark.parametrize("document", ["Reading Order.pdf", "DC.pdf", "001.pdf"])
+def test_publisher_pdf_does_not_hide_child_series(tmp_path, claimed_child, document):
+    publisher = tmp_path / "DC"
+    folders = [publisher / "Batman", publisher / "Superman"]
+    for folder in folders:
+        folder.mkdir(parents=True)
+        (folder / f"{folder.name} #001.pdf").write_bytes(b"%PDF-1.7\n")
+    (publisher / document).write_bytes(b"%PDF-1.7\n")
+    claimed = {_identity(folders[0])} if claimed_child else set()
+    ancestors = {_identity(p) for p in folders[0].parents} if claimed_child else set()
+
+    expected = ["DC/Superman"] if claimed_child else ["DC/Batman", "DC/Superman"]
+    assert [item.folder_name for item in _candidate_dirs(tmp_path, claimed, ancestors)] == expected
+
+
 def test_import_folder_discovery_keeps_untracked_publisher_siblings(tmp_path):
     root = tmp_path / "comics"
     tracked = root / "Marvel" / "Batman"
@@ -280,7 +372,8 @@ async def test_import_batch_continues_after_stale_folder_and_starts_prior_jobs(t
 
 
 @pytest.mark.asyncio
-async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suffix", [".cbz", ".pdf"])
+async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_path, monkeypatch, suffix):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -288,9 +381,12 @@ async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_
     root_path = tmp_path / "comics"
     folder = root_path / "Batman"
     folder.mkdir(parents=True)
-    archive_path = folder / "Batman #1.cbz"
-    with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.writestr("001.png", b"image")
+    comic_path = folder / f"Batman #1{suffix}"
+    if suffix == ".cbz":
+        with zipfile.ZipFile(comic_path, "w") as archive:
+            archive.writestr("001.png", b"image")
+    else:
+        comic_path.write_bytes(b"%PDF-1.7\n")
     async with Session() as session:
         series = Series(title="Batman", alt_titles="", folder_name="Batman",
                         root_folder=RootFolder(path=str(root_path)),
@@ -322,5 +418,5 @@ async def test_explicit_import_scans_even_when_automatic_scans_are_disabled(tmp_
         await tasks.refresh_series_full(series.id, grab_missing=True, force_scan=True)
         await session.refresh(series.issues[0])
         assert series.issues[0].downloaded
-        assert series.issues[0].file_path == str(archive_path)
+        assert series.issues[0].file_path == str(comic_path)
     await engine.dispose()

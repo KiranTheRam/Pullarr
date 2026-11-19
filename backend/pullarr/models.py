@@ -199,6 +199,7 @@ class Issue(Base):
     file_source: Mapped[str] = mapped_column(String, default="")
     file_download_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     file_mapped: Mapped[bool] = mapped_column(Boolean, default=False)  # explicitly mapped to this issue
+    file_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)  # user-selected path that can still be replaced
     released_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     series: Mapped[Series] = relationship(back_populates="issues")

@@ -117,6 +117,7 @@ async def _migrate_sqlite(conn) -> None:
         "file_source": "VARCHAR NOT NULL DEFAULT ''",
         "file_download_id": "INTEGER",
         "file_mapped": "BOOLEAN NOT NULL DEFAULT 0",
+        "file_confirmed": "BOOLEAN NOT NULL DEFAULT 0",
     })
     await _ensure_columns(conn, "downloads", {
         "torrent_client": "VARCHAR NOT NULL DEFAULT 'qbittorrent'",

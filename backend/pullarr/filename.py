@@ -5,7 +5,7 @@ bounds so tracked decimal issues are included without inventing issue rows.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from functools import lru_cache
 
@@ -22,6 +22,27 @@ _VOLUME_TOKEN = re.compile(
     rf"{_VOLUME}(\d+)(?:\s*[-–—]\s*(?:{_VOLUME})?(\d+))?(?![a-z0-9]|\.\d)", re.I
 )
 _BARE = re.compile(rf"(?<![\w.])({_NUMBER})(?:\s*[-–—]\s*({_NUMBER}))?\s*$")
+_TITLELESS_PREFIX = re.compile(r"[\W_]*(?:(?:issue|no)[\W_]*)?", re.I)
+_YEAR_TAG = re.compile(r"(?:19|20)\d{2}")
+
+
+def _filename_title_candidates(text: str, untagged_prefix: str) -> tuple[str, ...]:
+    if not _TITLELESS_PREFIX.fullmatch(untagged_prefix):
+        return (untagged_prefix,)
+    # A leading group can hold the title while neighboring groups hold
+    # format or release tags. Stop once we reach the comic label.
+    titles = []
+    end = 0
+    for group in BRACKET_GROUPS.finditer(text):
+        if not _TITLELESS_PREFIX.fullmatch(text[end:group.start()]):
+            break
+        tag = group.group()[1:-1].strip()
+        if _ISSUE_TOKEN.fullmatch(tag) or _VOLUME_TOKEN.fullmatch(tag):
+            break
+        if not _YEAR_TAG.fullmatch(tag) and any(character.isalnum() for character in tag):
+            titles.append(tag)
+        end = group.end()
+    return tuple(titles)
 
 
 def normalize_issue_label(value: str) -> str:
@@ -40,6 +61,8 @@ class FilenameCoverage:
     explicit_issue: bool = False
     ambiguous: bool = False
     issue_label: str = ""
+    # Used to check the identity of a file, independent of its issue coverage.
+    title_candidates: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
     @property
     def is_range(self) -> bool:
@@ -77,8 +100,10 @@ def parse_filename(text: str) -> FilenameCoverage:
     volumes = {(int(m[1]), int(m[2] or m[1])) for m in volume_matches}
     explicit = bool(issues)
     bare = _BARE.search(untagged)
+    title_end = min((m.start() for m in outside_issues + outside_volumes), default=len(untagged))
     if not issues and not volumes and bare:
         issues.add((float(bare[1]), float(bare[2] or bare[1])))
+        title_end = bare.start()
     issue = next(iter(issues), None)
     volume = next(iter(volumes), None)
     ambiguous = len(issues) > 1 or len(volumes) > 1 or len(labels) > 1
@@ -93,4 +118,5 @@ def parse_filename(text: str) -> FilenameCoverage:
         if re.match(r"\s*[-–—]\s*(?:#|(?:issue|no|v(?:ol(?:ume)?)?)[ ._]*)?\d", untagged[match.end():], re.I):
             ambiguous = True
     label = next(iter(labels)) if len(labels) == 1 else ""
-    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label)
+    titles = _filename_title_candidates(text, untagged[:title_end].strip())
+    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label, titles)

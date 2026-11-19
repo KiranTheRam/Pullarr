@@ -10,12 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..db import get_session
+from ..download.archive import ARCHIVE_EXTS, IMAGE_EXTS
+from ..filename import BRACKET_GROUPS, parse_filename
 from ..jobs.service import create_job
 from ..jobs.tasks import refresh_series_full
-from ..library.matcher import ARCHIVE_EXTS, IMAGE_EXTS, find_media_files
+from ..library.matcher import MediaFile, find_media_files, pdf_header_present
 from ..library.scanner import resolve_folders
 from ..models import JobKind, RootFolder, Series
 from ..schemas import AddSeriesIn, ImportFolderOut, LibraryImportIn, LibraryImportResultOut
+from ..util import normalize_title
 from .series import create_series_record
 
 router = APIRouter(prefix="/library/import", tags=["library"])
@@ -62,18 +65,19 @@ def _candidate_dirs(root: Path, claimed: set[tuple[int, int]],
                     ancestors: set[tuple[int, int]]) -> list[ImportFolderOut]:
     """Show likely series folders at root or one publisher level below it."""
     out: list[ImportFolderOut] = []
-    def add(folder: Path) -> None:
+    def add(folder: Path, candidates: list[ImportFolderOut]) -> list[MediaFile]:
         if _conflicts(folder, claimed, ancestors):
-            return
+            return []
         try:
             media = find_media_files(folder)
         except OSError:
-            return
+            return []
         if media:
-            out.append(ImportFolderOut(
+            candidates.append(ImportFolderOut(
                 folder_name=str(folder.relative_to(root)), path=str(folder),
                 file_count=len(media), query=folder.name,
             ))
+        return media
 
     for folder in sorted(root.iterdir(), key=lambda path: path.name.casefold()):
         if not folder.is_dir() or folder.name.startswith("."):
@@ -82,9 +86,9 @@ def _candidate_dirs(root: Path, claimed: set[tuple[int, int]],
         # still containing untracked sibling series. Check each candidate
         # below instead of pruning the publisher folder here.
         try:
-            children = [p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")]
-            own_media = any(p.is_file() and p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS
-                            for p in folder.iterdir())
+            entries = list(folder.iterdir())
+            children = [p for p in entries if p.is_dir() and not p.name.startswith(".")]
+            own_media = any(p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS and p.is_file() for p in entries)
         except OSError:
             continue
         # Issue/volume folders belong to the series above them. Otherwise,
@@ -92,10 +96,37 @@ def _candidate_dirs(root: Path, claimed: set[tuple[int, int]],
         issue_children = any(re.search(r"(?:^|\s)(?:#\s*\d+|(?:issue|chapter|volume|vol\.?|v)\s*\d+|\d{1,3})(?:\b|$)",
                                        child.name, re.IGNORECASE) for child in children)
         if own_media or issue_children or not children:
-            add(folder)
-        else:
-            for child in sorted(children, key=lambda path: path.name.casefold()):
-                add(child)
+            add(folder, out)
+            continue
+        # A loose PDF can be a reading list or other publisher-level document.
+        # Require its title to support the parent grouping.
+        pdfs = [parse_filename(p.stem) for p in entries if pdf_header_present(p)]
+        numbered_pdfs = [coverage for coverage in pdfs
+                         if not coverage.ambiguous and (coverage.issue or coverage.volume)]
+        title = normalize_title(BRACKET_GROUPS.sub(" ", folder.name))
+        if title and _identity(folder) not in ancestors and any(
+            normalize_title(candidate) == title
+            for coverage in numbered_pdfs for candidate in coverage.title_candidates
+        ):
+            add(folder, out)
+            continue
+        child_candidates: list[ImportFolderOut] = []
+        child_has_comic = False
+        for child in sorted(children, key=lambda path: path.name.casefold()):
+            media = add(child, child_candidates)
+            child_has_comic = child_has_comic or any(
+                item.is_dir or item.path.suffix.lower() != ".pdf" or (
+                    item.coverage and not item.coverage.ambiguous and (item.coverage.issue or item.coverage.volume)
+                )
+                for item in media
+            )
+        number_only_parent = any(not coverage.title_candidates for coverage in numbered_pdfs)
+        # Unnumbered PDFs in subfolders can be extras belonging to a series
+        # whose main folder uses number-only filenames.
+        if pdfs and (not child_candidates or (number_only_parent and not child_has_comic)):
+            if add(folder, out):
+                continue
+        out.extend(child_candidates)
     return out
 
 

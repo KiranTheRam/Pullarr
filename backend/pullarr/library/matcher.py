@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from xml.etree.ElementTree import ParseError
 
+from ..download.archive import ARCHIVE_EXTS, IMAGE_EXTS
 from ..download.cbz import parse_comicinfo, read_comicinfo_bytes
 from ..filename import FilenameCoverage, normalize_issue_label, parse_filename
 from ..models import Issue, Series
@@ -23,8 +24,7 @@ from ..util import (
     parse_issue_number,
 )
 
-ARCHIVE_EXTS = {".cbz", ".zip", ".cbr", ".rar", ".cb7", ".7z"}
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"}
+LIBRARY_FILE_EXTS = ARCHIVE_EXTS | {".pdf"}
 SIDECAR_IMAGE_STEMS = {
     "backdrop", "background", "banner", "cover", "fanart", "folder", "logo", "poster",
     "series", "thumb", "thumbnail",
@@ -63,6 +63,7 @@ class MatchedFile:
 class MatchResult:
     matched: list[MatchedFile]
     unmatched: list[MediaFile]
+    conflicting_pdf_issues: dict[Path, FilenameCoverage] = field(default_factory=dict)
 
 
 def _name_source(path: Path, is_dir: bool) -> str:
@@ -70,15 +71,36 @@ def _name_source(path: Path, is_dir: bool) -> str:
     return path.name if is_dir else path.stem
 
 
-def find_media_files(content_path: Path, files: list[Path] | None = None) -> list[MediaFile]:
-    """Archives anywhere under content_path, plus directories that directly
-    hold loose images. When files is supplied, inspect only those paths rather
-    than walking the containing folder. Non-media sidecars are ignored."""
+def pdf_header_present(path: Path) -> bool | None:
+    """Check a regular PDF candidate, or return None if it cannot be checked."""
+    if path.suffix.lower() != ".pdf":
+        return None
+    try:
+        if not path.is_file():
+            return None
+        if path.name.startswith("._"):
+            return False  # macOS AppleDouble metadata sidecar
+        with path.open("rb") as stream:
+            return b"%PDF-" in stream.read(1024)
+    except OSError:
+        return None
+
+
+def find_media_files(
+    content_path: Path, files: list[Path] | None = None, *,
+    file_extensions: set[str] = LIBRARY_FILE_EXTS,
+) -> list[MediaFile]:
+    """Find comic files and directories that directly hold loose images.
+
+    Existing libraries include PDFs, which are matched by filename. Callers
+    can restrict standalone files by extension or pass an explicit file list.
+    """
     content_path = Path(content_path)
     media: list[MediaFile] = []
 
     if files is None and content_path.is_file():
-        if content_path.suffix.lower() in ARCHIVE_EXTS:
+        suffix = content_path.suffix.lower()
+        if suffix in file_extensions and (suffix != ".pdf" or pdf_header_present(content_path)):
             media.append(_media_of(content_path, is_dir=False))
         return media
 
@@ -86,14 +108,16 @@ def find_media_files(content_path: Path, files: list[Path] | None = None) -> lis
         return media
 
     image_dirs: set[Path] = set()
+    media_extensions = file_extensions | IMAGE_EXTS
     for p in sorted(set(files) if files is not None else content_path.rglob("*")):
-        if files is not None and p.suffix.lower() in ARCHIVE_EXTS | IMAGE_EXTS and not p.is_file():
+        suffix = p.suffix.lower()
+        if files is not None and suffix in media_extensions and not p.is_file():
             raise FileNotFoundError(f"torrent media file not found: {p}")
         if not p.is_file():
             continue
-        suffix = p.suffix.lower()
-        if suffix in ARCHIVE_EXTS:
-            media.append(_media_of(p, is_dir=False))
+        if suffix in file_extensions:
+            if suffix != ".pdf" or pdf_header_present(p):
+                media.append(_media_of(p, is_dir=False))
         elif suffix in IMAGE_EXTS and p.stem.casefold() not in SIDECAR_IMAGE_STEMS:
             image_dirs.add(p.parent)
 
@@ -183,6 +207,17 @@ def _pick_issue(mf: MediaFile, candidates: list[Issue]) -> Issue | None:
     return matched[0] if len(matched) == 1 else None
 
 
+def _pdf_title_matches(prefix: str, series_titles: set[str]) -> bool:
+    title = normalize_title(prefix)
+    if title and title in series_titles:
+        return True
+    # Keep edition labels separate from identity. The matcher still requires
+    # the tracked issue to carry the corresponding edition.
+    return any(title.startswith(f"{series_title} ")
+               and declared_issue_editions("", title[len(series_title) + 1:], "")
+               for series_title in series_titles if series_title)
+
+
 def match_files(media: list[MediaFile], issues: list[Issue], series: Series | None = None) -> MatchResult:
     """Match single issues and collected entries, or use known bundle coverage."""
     series_titles = set()
@@ -201,9 +236,18 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
 
     matched: list[MatchedFile] = []
     unmatched: list[MediaFile] = []
+    conflicting_pdf_issues: dict[Path, FilenameCoverage] = {}
     for mf in media:
         if mf.coverage and mf.coverage.ambiguous:
             unmatched.append(mf)
+            continue
+        if (series is not None and mf.coverage and not mf.is_dir and mf.path.suffix.lower() == ".pdf"
+                and mf.coverage.title_candidates and not any(
+                    _pdf_title_matches(title, series_titles) for title in mf.coverage.title_candidates
+                )):
+            unmatched.append(mf)
+            if mf.coverage.issue_number is not None and not mf.coverage.volume:
+                conflicting_pdf_issues[mf.path] = mf.coverage
             continue
         editions = additional_editions(mf.editions, series, len(issues))
         whole_volume = bool(mf.coverage and mf.coverage.volume and not mf.coverage.issue)
@@ -274,4 +318,4 @@ def match_files(media: list[MediaFile], issues: list[Issue], series: Series | No
                                        covered_issues=[]))
         else:
             unmatched.append(mf)
-    return MatchResult(matched=matched, unmatched=unmatched)
+    return MatchResult(matched=matched, unmatched=unmatched, conflicting_pdf_issues=conflicting_pdf_issues)

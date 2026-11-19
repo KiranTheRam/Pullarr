@@ -77,6 +77,20 @@ class TestAnalyze:
 
 
 class TestApplyCleanup:
+    def test_preserves_existing_pdf_even_if_an_archive_covers_the_same_issue(self, tmp_path):
+        pdf = tmp_path / "Saga #003.pdf"
+        pdf.write_bytes(b"%PDF-1.7\n")
+        (tmp_path / "Saga #003.cbz").write_bytes(b"comic archive")
+        issues = [issue(1, 3, downloaded=True, file_path=str(pdf))]
+
+        plan = run_analyze(series(), issues, tmp_path)
+        result = apply_cleanup(series(), issues, [tmp_path], [str(pdf)])
+
+        assert not plan.groups
+        assert result.deleted == 0 and result.skipped == 1
+        assert pdf.exists()
+        assert issues[0].file_path == str(pdf)
+
     def test_deletes_and_repoints(self, tmp_path):
         folder = tmp_path / "Saga (2012)"
         folder.mkdir()
