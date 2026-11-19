@@ -26,12 +26,12 @@ _TITLELESS_PREFIX = re.compile(r"[\W_]*(?:(?:issue|no)[\W_]*)?", re.I)
 _YEAR_TAG = re.compile(r"(?:19|20)\d{2}")
 
 
-def _filename_title_prefix(text: str, untagged_prefix: str) -> str:
+def _filename_title_candidates(text: str, untagged_prefix: str) -> tuple[str, ...]:
     if not _TITLELESS_PREFIX.fullmatch(untagged_prefix):
-        return untagged_prefix
-    # When the visible prefix is number-only, the last leading text group
-    # before the issue/volume label can be the entire series title.
-    title = untagged_prefix
+        return (untagged_prefix,)
+    # A leading group can hold the title while neighboring groups hold
+    # format or release tags. Stop once we reach the comic label.
+    titles = []
     end = 0
     for group in BRACKET_GROUPS.finditer(text):
         if not _TITLELESS_PREFIX.fullmatch(text[end:group.start()]):
@@ -40,9 +40,9 @@ def _filename_title_prefix(text: str, untagged_prefix: str) -> str:
         if _ISSUE_TOKEN.fullmatch(tag) or _VOLUME_TOKEN.fullmatch(tag):
             break
         if not _YEAR_TAG.fullmatch(tag) and any(character.isalnum() for character in tag):
-            title = tag
+            titles.append(tag)
         end = group.end()
-    return title
+    return tuple(titles)
 
 
 def normalize_issue_label(value: str) -> str:
@@ -62,7 +62,7 @@ class FilenameCoverage:
     ambiguous: bool = False
     issue_label: str = ""
     # Used to check the identity of a file, independent of its issue coverage.
-    title_prefix: str = field(default="", compare=False, repr=False)
+    title_candidates: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
     @property
     def is_range(self) -> bool:
@@ -118,5 +118,5 @@ def parse_filename(text: str) -> FilenameCoverage:
         if re.match(r"\s*[-–—]\s*(?:#|(?:issue|no|v(?:ol(?:ume)?)?)[ ._]*)?\d", untagged[match.end():], re.I):
             ambiguous = True
     label = next(iter(labels)) if len(labels) == 1 else ""
-    title = _filename_title_prefix(text, untagged[:title_end].strip())
-    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label, title)
+    titles = _filename_title_candidates(text, untagged[:title_end].strip())
+    return FilenameCoverage(issue, volume, explicit, bool(ambiguous), label, titles)

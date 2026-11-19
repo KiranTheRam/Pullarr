@@ -162,7 +162,8 @@ async def test_scan_keeps_manual_pdf_range_until_an_exact_file_arrives(tmp_path,
     assert pdf.exists()
 
 
-async def test_rescan_keeps_a_pdf_renamed_with_a_custom_template(tmp_path, ownership_session):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_rescan_keeps_a_pdf_renamed_with_a_custom_template(tmp_path, ownership_session, legacy):
     session = ownership_session
     folder = tmp_path / "Batman"
     folder.mkdir()
@@ -177,6 +178,9 @@ async def test_rescan_keeps_a_pdf_renamed_with_a_custom_template(tmp_path, owner
 
     await settings_service.set_many(session, {"naming_template": "{title} #{issue:03d}"})
     assert [outcome.status for outcome in await rename_apply(series.id, RenameApplyIn(), session)] == ["renamed"]
+    if legacy:
+        issue.file_confirmed = False
+        await session.commit()
     assert (await scan(series.id, session)).cleared == 0
     assert issue.downloaded and issue.file_path == str(folder / "The Case Begins #001.pdf")
 

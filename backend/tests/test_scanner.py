@@ -61,7 +61,8 @@ class TestScanSeries:
 
     @pytest.mark.parametrize("name", ["Receipt #002.pdf", "Receipt 001-003.pdf", "Catalog Vol. 01.pdf",
                                      "[Superman] #002.pdf", "[Superman] [#001-003].pdf",
-                                     "Issue [Superman] #002.pdf", "[300] #002.pdf"])
+                                     "Issue [Superman] #002.pdf", "[300] #002.pdf",
+                                     "[Superman] (Digital) #002.pdf"])
     def test_pdf_with_unrelated_title_stays_unmatched(self, tmp_path, name):
         path = tmp_path / name
         path.write_bytes(b"%PDF-1.7\n")
@@ -75,7 +76,8 @@ class TestScanSeries:
     @pytest.mark.parametrize("name", ["002.pdf", "Issue #002.pdf", "The Caped Crusader 001-003.pdf",
                                      "The Caped Crusader Vol. 01.pdf", "The Caped Crusader [#002].pdf",
                                      "[Batman] #002.pdf", "(2024) [The Caped Crusader] [#002].pdf",
-                                     "#002 [Release Group].pdf"])
+                                     "#002 [Release Group].pdf", "[Batman] (Digital) #002.pdf",
+                                     "[Release Group] [Batman] [Digital] #002.pdf"])
     def test_pdf_matches_alternate_or_number_only_name(self, tmp_path, name):
         path = tmp_path / name
         path.write_bytes(b"%PDF-1.7\n")
@@ -105,6 +107,42 @@ class TestScanSeries:
         assert pdf.read_bytes() == b"%PDF-1.7\n"
         assert scan_series(series, issues, [tmp_path]).cleared == 0
 
+    @pytest.mark.parametrize(("name", "numbers"), [
+        ("Collected Stories #001-002.pdf", [1, 2]),
+        ("Collected Stories #001-002.pdf", [2]),
+        ("Collected Stories #002.pdf", [1, 2]),
+        ("Collected Stories #007.pdf", [2]),
+    ])
+    def test_rescan_preserves_legacy_pdf_ownership_that_could_be_manual(self, tmp_path, name, numbers):
+        pdf = tmp_path / name
+        pdf.write_bytes(b"%PDF-1.7\n")
+        issues = tracked(*[(number, None) for number in numbers])
+        for issue in issues:
+            issue.downloaded = True
+            issue.file_path = str(pdf)
+        series = Series(title="Batman")
+
+        result = scan_series(series, issues, [tmp_path], root=tmp_path)
+
+        assert result.cleared == 0
+        assert all(issue.downloaded and issue.file_path == str(pdf) for issue in issues)
+        assert [media.path for media in result.unmatched] == [pdf]
+
+    def test_legacy_shared_pdf_stays_owned_after_an_exact_issue_arrives(self, tmp_path):
+        pdf = tmp_path / "Collected Stories #002.pdf"
+        pdf.write_bytes(b"%PDF-1.7\n")
+        issues = tracked((1, None), (2, None))
+        for issue in issues:
+            issue.downloaded = True
+            issue.file_path = str(pdf)
+        series = Series(title="Batman")
+        exact = tmp_path / "Batman #001.cbz"
+        make_cbz(exact)
+
+        assert scan_series(series, issues, [tmp_path]).cleared == 0
+        assert scan_series(series, issues, [tmp_path]).cleared == 0
+        assert [issue.file_path for issue in issues] == [str(exact), str(pdf)]
+
     def test_pdf_edition_suffix_still_requires_the_matching_edition(self, tmp_path):
         path = tmp_path / "Batman Annual #002.pdf"
         path.write_bytes(b"%PDF-1.7\n")
@@ -126,11 +164,29 @@ class TestScanSeries:
         assert scan_series(series, issues, [tmp_path]).matched_issues == 0
         assert not issues[0].downloaded
 
-        path.write_bytes(b"%PDF-1.7\n")
+        path.write_bytes(b"\xef\xbb\xbf%PDF-1.7\n")
         assert scan_series(series, issues, [tmp_path]).matched_issues == 1
         path.write_bytes(b"")
         assert scan_series(series, issues, [tmp_path]).cleared == 1
         assert not issues[0].downloaded
+
+    @pytest.mark.parametrize(("name", "content"), [
+        ("._Batman #002.pdf", b"\x00\x05\x16\x07%PDF-"),
+        ("Batman #002.pdf", b"This is not a PDF"),
+    ])
+    def test_ignores_pdf_sidecars_and_non_pdf_content(self, tmp_path, name, content):
+        path = tmp_path / name
+        path.write_bytes(content)
+        series = Series(title="Batman")
+        issues = tracked((2, None))
+
+        assert find_media_files(path) == []
+        assert scan_series(series, issues, [tmp_path]).matched_issues == 0
+
+        issues[0].downloaded = True
+        issues[0].file_path = str(path)
+        assert scan_series(series, issues, [tmp_path]).cleared == 1
+        assert path.read_bytes() == content
 
     def test_duplicate_matches_keep_the_tracked_archive_and_its_provenance(self, tmp_path):
         first = tmp_path / "Series #001.cbz"

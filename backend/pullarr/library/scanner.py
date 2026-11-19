@@ -12,16 +12,19 @@ whole-volume archive, the exact issue file wins."""
 
 import logging
 import os
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import settings_service
+from ..filename import FilenameCoverage, normalize_issue_label
 from ..models import Issue, Series
 from ..util import normalize_title
-from .matcher import MediaFile, find_media_files, match_files, pdf_file_size
-from .naming import series_folder
+from .matcher import MediaFile, find_media_files, match_files, pdf_header_present
+from .naming import DEFAULT_TEMPLATE, filename_for_issue, series_folder
 from .work import apply_file_state, copy_issues, file_state, run_library_work, update_file_state
 
 log = logging.getLogger(__name__)
@@ -176,16 +179,17 @@ def find_existing_folder(root: Path, series: Series, max_depth: int = 3) -> str 
 def scan_series(
     series: Series, issues: list[Issue], folders: list[Path],
     root: Path | None = None, expect_content: bool | None = None,
+    *, naming_template: str = DEFAULT_TEMPLATE,
 ) -> ScanResult:
     """Apply a scan only while its root remains available, including at the end."""
     if root is None:
-        return _scan_series(series, issues, folders)
+        return _scan_series(series, issues, folders, naming_template)
     recorded_paths = [issue.file_path for issue in issues if issue.downloaded]
     reason = library_unavailable(root, folders, recorded_paths, expect_content)
     if reason:
         return ScanResult(root_unavailable=reason)
     copies = copy_issues(issues)
-    result = _scan_series(series, copies, folders)
+    result = _scan_series(series, copies, folders, naming_template)
     reason = library_unavailable(root, folders, recorded_paths, expect_content)
     if reason:
         return ScanResult(root_unavailable=reason)
@@ -193,19 +197,20 @@ def scan_series(
     return result
 
 
-def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> ScanResult:
+def _scan_series(series: Series, issues: list[Issue], folders: list[Path], naming_template: str) -> ScanResult:
     """Mark issues present across `folders` as downloaded (in place)."""
     folders = [Path(f) for f in folders]
     result = ScanResult()
     existing = [f for f in folders if f.exists()]
     if not existing:
-        result.cleared = _reconcile(issues, keep=set(), conflicting_pdfs=set())
+        result.cleared = _reconcile(issues, keep=set(), disproved=set())
         return result
 
     media: list[MediaFile] = []
     for folder in existing:
         media.extend(find_media_files(folder))
     match = match_files(media, issues, series)
+    disproved = _recheck_legacy_pdf_ownership(series, issues, match.conflicting_pdf_issues, naming_template)
 
     owned_now = {issue.id for issue in issues if issue.downloaded and issue.file_mapped
                  and issue.file_path and Path(issue.file_path).exists()}
@@ -255,7 +260,7 @@ def _scan_series(series: Series, issues: list[Issue], folders: list[Path]) -> Sc
             owned_now.add(issue.id)
 
     result.unmatched = match.unmatched
-    result.cleared = _reconcile(issues, keep=owned_now, conflicting_pdfs=match.conflicting_pdfs)
+    result.cleared = _reconcile(issues, keep=owned_now, disproved=disproved)
     log.info("Scanned %r across %d folder(s): +%d issues, %d volume files, "
              "%d unmatched, -%d cleared", series.title, len(existing),
              result.matched_issues, result.volume_files, result.unmatched_count,
@@ -269,8 +274,13 @@ async def scan_series_async(
 ) -> ScanResult:
     """Scan detached values in a worker; update session-owned rows on its loop."""
     copies = copy_issues(issues)
-    identity = Series(title=series.title, alt_titles=series.alt_titles, status=series.status)
-    result = await run_library_work(scan_series, identity, copies, folders, root, expect_content)
+    identity = Series(title=series.title, alt_titles=series.alt_titles, status=series.status, year=series.year)
+    naming_template = DEFAULT_TEMPLATE
+    if any(i.downloaded and i.file_path.lower().endswith(".pdf") for i in copies):
+        naming_template = await settings_service.get(session, "naming_template")
+    result = await run_library_work(
+        scan_series, identity, copies, folders, root, expect_content, naming_template=naming_template,
+    )
     for issue, copied in zip(issues, copies):
         was_downloaded = issue.downloaded
         if not await update_file_state(session, issue, **file_state(copied)):
@@ -279,16 +289,47 @@ async def scan_series_async(
     return result
 
 
-def _reconcile(issues: list[Issue], keep: set[int], conflicting_pdfs: set[Path]) -> int:
+def _recheck_legacy_pdf_ownership(
+    series: Series, issues: list[Issue], conflicts: dict[Path, FilenameCoverage], naming_template: str,
+) -> set[int]:
+    if not conflicts:
+        return set()
+    owners = Counter(Path(i.file_path) for i in issues if i.downloaded and i.file_path)
+    disproved = set()
+    for issue in issues:
+        if not issue.downloaded or not issue.file_path:
+            continue
+        path = Path(issue.file_path)
+        coverage = conflicts.get(path)
+        if coverage is None or issue.file_mapped or issue.file_confirmed or issue.file_source or issue.file_download_id:
+            continue
+        # Legacy rows lack provenance for ranges and custom renames. Only
+        # clear a single-file match that the earlier scanner could have made.
+        label = normalize_issue_label(issue.display_number or f"{issue.number:g}")
+        same_issue = coverage.issue_label == label if coverage.issue_label else coverage.issue_number == issue.number
+        if owners[path] != 1 or not same_issue:
+            issue.file_confirmed = True
+            continue
+        try:
+            expected_name = filename_for_issue(naming_template, series, issue, ext=".pdf")
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue  # A legacy template we cannot render gives no evidence to clear the file.
+        if path.name == expected_name:
+            issue.file_confirmed = True
+        else:
+            disproved.add(issue.id)
+    return disproved
+
+
+def _reconcile(issues: list[Issue], keep: set[int], disproved: set[int]) -> int:
     """Clear missing files and PDF matches the scan can disprove."""
     cleared = 0
     for issue in issues:
         if not issue.downloaded or issue.id in keep:
             continue
         path = Path(issue.file_path)
-        wrong_pdf = path in conflicting_pdfs and not (issue.file_confirmed or issue.file_source or issue.file_download_id)
         if not issue.file_path or not path.exists() or (
-            not issue.file_mapped and (wrong_pdf or pdf_file_size(path) == 0)
+            not issue.file_mapped and (issue.id in disproved or pdf_header_present(path) is False)
         ):
             issue.downloaded = False
             issue.file_path = ""
